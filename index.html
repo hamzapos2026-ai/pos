@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport"
+    content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#f59e0b" />
+  <meta name="description"
+    content="A One Jewelry POS - Offline-First Professional Point of Sale System for Jewelry Stores" />
+  <meta name="author" content="A One Jewelry" />
+
+  <!-- ✅ PWA Meta Tags -->
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="AOne POS" />
+  <meta name="application-name" content="AOne POS" />
+  <meta name="msapplication-TileColor" content="#f59e0b" />
+  <meta name="format-detection" content="telephone=no" />
+
+  <!-- ✅ Favicon (kept) -->
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <link rel="apple-touch-icon" href="/icon-192.png" />
+  <link rel="apple-touch-icon" sizes="192x192" href="/icon-192.png" />
+  <link rel="apple-touch-icon" sizes="512x512" href="/icon-512.png" />
+
+  <!-- ❌ REMOVED: <link rel="manifest" href="/manifest.json" />
+         vite-plugin-pwa auto-injects /manifest.webmanifest
+         Having both creates conflict! -->
+
+  <!-- ❌ REMOVED: <link rel="icon" href="data:," />
+         This empty data URI confuses browsers -->
+
+  <!-- ✅ Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap"
+    rel="stylesheet" />
+
+  <title>A One Jewelry POS</title>
+
+  <style>
+    /* Prevent flash of unstyled content */
+    html {
+      background-color: #0a0805;
+      scroll-behavior: smooth;
+    }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+
+    ::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    ::-webkit-scrollbar-thumb {
+      background: #2a1f0d;
+      border-radius: 3px;
+    }
+
+    ::-webkit-scrollbar-thumb:hover {
+      background: #f59e0b;
+    }
+
+    /* Selection */
+    ::selection {
+      background: #f59e0b;
+      color: #0a0805;
+    }
+
+    /* Accessibility focus */
+    :focus-visible {
+      outline: 2px solid #f59e0b;
+      outline-offset: 2px;
+    }
+
+    /* App loader */
+    #app-loader {
+      position: fixed;
+      inset: 0;
+      background: #0a0805;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      z-index: 99999;
+      transition: opacity 0.3s ease;
+    }
+
+    #app-loader.hidden {
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .loader-spinner {
+      width: 48px;
+      height: 48px;
+      border: 4px solid #2a1f0d;
+      border-top-color: #f59e0b;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+    }
+
+    .loader-text {
+      color: #78716c;
+      font-family: 'Inter', sans-serif;
+      font-size: 12px;
+      font-weight: 500;
+      letter-spacing: 0.5px;
+    }
+
+    @keyframes spin {
+      to {
+        transform: rotate(360deg);
+      }
+    }
+
+    /* Disable iOS text size adjust */
+    html {
+      -webkit-text-size-adjust: 100%;
+    }
+
+    /* Prevent overscroll bounce on PWA */
+    body {
+      overscroll-behavior: none;
+      -webkit-tap-highlight-color: transparent;
+    }
+  </style>
+</head>
+
+<body class="antialiased">
+  <!-- App Loader -->
+  <div id="app-loader">
+    <div class="loader-spinner"></div>
+    <div class="loader-text">A ONE JEWELRY POS</div>
+  </div>
+
+  <!-- Root Element -->
+  <div id="root"></div>
+
+  <!-- ❌ REMOVED: Manual SW registration script
+         vite-plugin-pwa handles this in main.jsx via registerSW() -->
+
+  <!-- Main App -->
+  <script type="module" src="/src/main.jsx"></script>
+
+  <script>
+    // Hide loader when app is ready
+    window.addEventListener('load', function () {
+      setTimeout(function () {
+        var loader = document.getElementById('app-loader');
+        if (loader) loader.classList.add('hidden');
+      }, 500);
+    });
+
+    // Theme preference (early — before React loads)
+    (function () {
+      try {
+        var savedTheme = localStorage.getItem('aone-theme');
+        if (savedTheme === 'light') {
+          document.documentElement.classList.remove('dark');
+        } else {
+          document.documentElement.classList.add('dark');
+        }
+      } catch (e) { }
+    })();
+  </script>
+</body>
+
+</html>

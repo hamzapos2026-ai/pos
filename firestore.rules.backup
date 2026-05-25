@@ -1,0 +1,271 @@
+// firestore.rules
+// ✅ PRODUCTION SECURITY v1 — A One Jewelry POS
+// Deployed: 2026-05-13
+//
+// PROTECTS:
+//   1. Biller cannot delete bills, customers, or any data
+//   2. Serial counter can ONLY go forward (never backward)
+//   3. Serial locks are PERMANENT (never modified/deleted)
+//   4. Activity logs are IMMUTABLE (audit integrity)
+//   5. Only Super Admin can delete anything
+//
+// ROLES (stored in users/{uid}.role):
+//   - 'biller'      → create + read only
+//   - 'cashier'     → create + read + payment update
+//   - 'admin'       → can edit, cannot delete bills
+//   - 'superadmin'  → full control
+
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ═══════════════════════════════════════════════════════
+    // HELPER FUNCTIONS
+    // ═══════════════════════════════════════════════════════
+    function isAuthed() {
+      return request.auth != null;
+    }
+
+    function userDoc() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function userRole() {
+      return userDoc().role;
+    }
+
+    function isSuperAdmin() {
+      return isAuthed() && userRole() == 'superadmin';
+    }
+
+    function isAdmin() {
+      return isAuthed() && userRole() in ['superadmin', 'admin'];
+    }
+
+    function isBiller() {
+      return isAuthed() && userRole() == 'biller';
+    }
+
+    function isCashier() {
+      return isAuthed() && userRole() == 'cashier';
+    }
+
+    // Validate that a serial number is non-blank
+    function hasValidSerial() {
+      return request.resource.data.serialNo is string
+             && request.resource.data.serialNo.size() > 0
+             && request.resource.data.serialNo != '----';
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // ORDERS (BILLS) — Core business data
+    // ═══════════════════════════════════════════════════════
+    match /orders/{orderId} {
+      // Anyone authenticated can read
+      allow read: if isAuthed();
+
+      // Create: must have valid serial (no blank serials)
+      allow create: if isAuthed() && hasValidSerial();
+
+      // Update: anyone can update bill data, but only admin can flag isDeleted
+      allow update: if isAuthed()
+                    && (
+                      // Normal update without delete flag
+                      !('isDeleted' in request.resource.data)
+                      ||
+                      // Or admin setting delete flag
+                      isAdmin()
+                    );
+
+      // ⛔ DELETE: SUPER ADMIN ONLY
+      allow delete: if isSuperAdmin();
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // STORES — Serial counter protection
+    // ═══════════════════════════════════════════════════════
+    match /stores/{storeId} {
+      allow read: if isAuthed();
+      allow create: if isAdmin();
+
+      // ✅ CRITICAL: Counter can ONLY go forward, NEVER backward
+      // This prevents serial manipulation even if someone bypasses frontend
+      allow update: if isAuthed()
+                    && (
+                      // Either lastSerialNumber not being changed
+                      !('lastSerialNumber' in request.resource.data)
+                      ||
+                      // Or new value >= old value
+                      request.resource.data.lastSerialNumber 
+                         >= resource.data.lastSerialNumber
+                    );
+
+      allow delete: if isSuperAdmin();
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // SERIAL LOCKS — Permanent registry, NEVER modified
+    // ═══════════════════════════════════════════════════════
+    match /serialLocks/{lockId} {
+      allow read: if isAuthed();
+      allow create: if isAuthed();
+      // ⛔ ABSOLUTE: NEVER update or delete — locks are forever
+      allow update: if false;
+      allow delete: if false;
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // ACTIVITY LOGS — Immutable audit trail
+    // ═══════════════════════════════════════════════════════
+    match /activityLogs/{logId} {
+      // Only admins can view audit trail
+      allow read: if isAdmin();
+      // Anyone can append logs
+      allow create: if isAuthed();
+      // ⛔ ABSOLUTE: NEVER modify or delete — audit integrity
+      allow update: if false;
+      allow delete: if false;
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // DELETED BILLS — Recovery archive (admin only)
+    // ═══════════════════════════════════════════════════════
+    match /deletedBills/{billId} {
+      allow read: if isAdmin();
+      allow create: if isAuthed();
+      allow update: if isAuthed();
+      // Only super admin can permanently remove from archive
+      allow delete: if isSuperAdmin();
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // CUSTOMERS
+    // ═══════════════════════════════════════════════════════
+    match /customers/{custId} {
+      allow read: if isAuthed();
+      allow create: if isAuthed();
+      allow update: if isAuthed();
+      // Only admin can delete customers
+      allow delete: if isAdmin();
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // USERS — Profile management
+    // ═══════════════════════════════════════════════════════
+    match /users/{userId} {
+      // User can read own profile, admin can read all
+      allow read: if isAuthed() 
+                  && (request.auth.uid == userId || isAdmin());
+      // Only super admin can create/modify user roles
+      allow write: if isSuperAdmin();
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // SETTINGS
+    // ═══════════════════════════════════════════════════════
+    match /settings/{settingId} {
+      allow read: if isAuthed();
+      allow write: if isAdmin();
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // SYSTEM (configuration, never user-facing)
+    // ═══════════════════════════════════════════════════════
+    match /system/{docId} {
+      allow read: if isAuthed();
+      allow write: if isSuperAdmin();
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // PAYMENTS
+    // ═══════════════════════════════════════════════════════
+    match /payments/{payId} {
+      allow read: if isAuthed();
+      allow create: if isAuthed();
+      allow update: if isAdmin();
+      allow delete: if isSuperAdmin();
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // EXPENSES
+    // ═══════════════════════════════════════════════════════
+    match /expenses/{expId} {
+      allow read: if isAdmin();
+      allow create: if isAuthed();
+      allow update: if isAdmin();
+      allow delete: if isSuperAdmin();
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // RETURNS
+    // ═══════════════════════════════════════════════════════
+    match /returns/{retId} {
+      allow read: if isAuthed();
+      allow create: if isAuthed();
+      allow update: if isAdmin();
+      allow delete: if isSuperAdmin();
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // AUDIT LOGS COMPAT (legacy collection name)
+    // ═══════════════════════════════════════════════════════
+    match /auditLogs/{lid} {
+      allow read: if isAdmin();
+      allow create: if isAuthed();
+      allow update: if false;
+      allow delete: if false;
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // LEGACY COLLECTIONS (backward compat)
+    // ═══════════════════════════════════════════════════════
+    match /clearedData/{did} {
+      allow read: if isAdmin();
+      allow create: if isAuthed();
+      allow update: if false;
+      allow delete: if false;
+    }
+
+    match /heldBills/{hid} {
+      allow read: if isAuthed();
+      allow create: if isAuthed();
+      allow update: if isAuthed();
+      allow delete: if isAuth();
+    }
+
+    match /fraudAlerts/{fid} {
+      allow read: if isAdmin();
+      allow create: if isAuthed();
+      allow update: if isAdmin();
+      allow delete: if false;
+    }
+
+    match /shifts/{shid} {
+      allow read: if isAdmin();
+      allow create: if isAdmin();
+      allow update: if isAdmin();
+      allow delete: if false;
+    }
+
+    match /cashTransactions/{tid} {
+      allow read: if isAdmin();
+      allow create: if isAdmin();
+      allow update: if false;
+      allow delete: if false;
+    }
+
+    match /approvalRequests/{rid} {
+      allow read: if isAuthed();
+      allow create: if isAuthed();
+      allow update: if isAdmin();
+      allow delete: if false;
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // DEFAULT DENY (anything not listed above)
+    // ═══════════════════════════════════════════════════════
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

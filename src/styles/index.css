@@ -1,0 +1,311 @@
+/* File: aone-jewelry-pos/src/styles/index.css
+/* Main CSS file for A One Jewelry POS with Tailwind directives and custom styles */
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ============================================
+   CSS VARIABLES FOR THEME SUPPORT
+   ============================================ */
+
+:root {
+  /* Dark mode (default) */
+  --bg-primary: #0a0805;
+  --bg-card: #1a1208;
+  --bg-elevated: #2a1f0d;
+  --border-color: #2a1f0d;
+  --border-light: #3a2f1d;
+  --text-primary: #f5f5f4;
+  --text-secondary: #a8a29e;
+  --text-muted: #78716c;
+  --primary: #f59e0b;
+  --primary-hover: #d97706;
+  --primary-light: rgba(245, 158, 11, 0.1);
+  --primary-glow: rgba(245, 158, 11, 0.3);
+  
+  /* Status colors */
+  --success: #22c55e;
+  --success-light: rgba(34, 197, 94, 0.1);
+  --warning: #f59e0b;
+  --warning-light: rgba(245, 158, 11, 0.1);
+  --error: #ef4444;
+  --error-light: rgba(239, 68, 68, 0.1);
+  --info: #3b82f6;
+  --info-light: rgba(59, 130, 246, 0.1);
+  --edited: #a855f7;
+  --edited-light: rgba(168, 85, 247, 0.1);
+  
+  /* Shadows */
+  --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.3), 0 2px 4px -1px rgba(0, 0, 0, 0.2);
+  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.4), 0 4px 6px -2px rgba(0, 0, 0, 0.3);
+  --shadow-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.4), 0 10px 10px -5px rgba(0, 0, 0, 0.3);
+}
+
+/* Light mode */
+.light-mode {
+  --bg-primary: #fafaf9;
+  --bg-card: #ffffff;
+  --bg-elevated: #f5f5f4;
+  --border-color: #e7e5e4;
+  --border-light: #d6d3d1;
+  --text-primary: #1c1917;
+  --text-secondary: #78716c;
+  --text-muted: #a8a29e;
+  --primary: #f59e0b;
+  --primary-hover: #d97706;
+  --primary-light: rgba(245, 158, 11, 0.1);
+  --primary-glow: rgba(245, 158, 11, 0.2);
+  
+  --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+  --shadow-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+}
+
+/* ============================================
+   GLOBAL STYLES
+   ============================================ */
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html {
+  font-size: 16px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  line-height: 1.5;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+/* ============================================
+   TYPOGRAPHY
+   ============================================ */
+
+h1, h2, h3, h4, h5, h6 {
+  font-weight: 600;
+  line-height: 1.25;
+  color: var(--text-primary);
+}
+
+h1 { font-size: 2rem; }
+h2 { font-size: 1.5rem; }
+h3 { font-size: 1.25rem; }
+h4 { font-size: 1.125rem; }
+h5 { font-size: 1rem; }
+h6 { font-size: 0.875rem; }
+
+p {
+  color: var(--text-secondary);
+}
+
+/* ============================================
+   FORM ELEMENTS
+   ============================================ */
+
+input, textarea, select {
+  font-family: inherit;
+  font-size: inherit;
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--text-muted);
+}
+
+/* Remove default input styles */
+input[type="text"],
+input[type="email"],
+input[type="password"],
+input[type="number"],
+input[type="tel"],
+input[type="search"],
+textarea,
+select {
+  background: transparent;
+  border: none;
+  outline: none;
+}
+
+/* Number input spin buttons */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  opacity: 1;
+}
+
+/* ============================================
+   SCROLLBAR STYLES
+   ============================================ */
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--primary);
+}
+
+/* ============================================
+   SELECTION
+   ============================================ */
+
+::selection {
+  background: var(--primary);
+  color: var(--bg-primary);
+}
+
+/* ============================================
+   FOCUS STYLES
+   ============================================ */
+
+:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+/* ============================================
+   UTILITY CLASSES
+   ============================================ */
+
+/* Glass effect */
+.glass {
+  background: rgba(26, 18, 8, 0.8);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+.light-mode .glass {
+  background: rgba(255, 255, 255, 0.8);
+}
+
+/* Text gradient */
+.text-gradient {
+  background: linear-gradient(135deg, var(--primary) 0%, #fbbf24 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Glow effect */
+.glow {
+  box-shadow: 0 0 20px var(--primary-glow);
+}
+
+.glow-lg {
+  box-shadow: 0 0 40px var(--primary-glow);
+}
+
+/* ============================================
+   ANIMATION CLASSES
+   ============================================ */
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes slideInRight {
+  from {
+    opacity: 0;
+    transform: translateX(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes slideInLeft {
+  from {
+    opacity: 0;
+    transform: translateX(-20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  10%, 30%, 50%, 70%, 90% { transform: translateX(-4px); }
+  20%, 40%, 60%, 80% { transform: translateX(4px); }
+}
+
+@keyframes pulse-glow {
+  0%, 100% { box-shadow: 0 0 20px var(--primary-glow); }
+  50% { box-shadow: 0 0 40px var(--primary-glow); }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.2s ease-in-out;
+}
+
+.animate-fade-in-up {
+  animation: fadeInUp 0.3s ease-out;
+}
+
+.animate-shake {
+  animation: shake 0.5s ease-in-out;
+}
+
+/* ============================================
+   PRINT STYLES
+   ============================================ */
+
+@media print {
+  body {
+    background: white !important;
+    color: black !important;
+  }
+  
+  .no-print {
+    display: none !important;
+  }
+}
+
+/* ============================================
+   RESPONSIVE TYPOGRAPHY
+   ============================================ */
+
+@media (max-width: 640px) {
+  html {
+    font-size: 14px;
+  }
+  
+  h1 { font-size: 1.75rem; }
+  h2 { font-size: 1.375rem; }
+  h3 { font-size: 1.125rem; }
+}
