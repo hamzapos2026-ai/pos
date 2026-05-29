@@ -1,18 +1,14 @@
 // File: src/pages/admin/CashFlowMonitor.jsx
-// ✅ MASTER PROMPT v4 — PRODUCTION FINAL
-// Features: 10k+ orders, virtual scroll, advance filters, modern stylish
-//           Firebase + IDB hybrid, real-time updates, export CSV/Excel/PDF
-//           Animated stats, branch-wise breakdown, register verification
-
+// ✅ FIXED — User import added, fully responsive, no scroll issues
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Wallet, ArrowUpRight, ArrowDownRight, RefreshCw, Search,
   Wifi, Database, Eye, CheckCircle2, X, Filter, Download,
-  TrendingUp, TrendingDown, DollarSign, Users, Building2,
-  Calendar, AlertCircle, FileText, FileSpreadsheet, FileType,
-  ChevronDown, BarChart3, Activity, Clock, Banknote,
-  Smartphone, CreditCard, Landmark, RotateCcw,
+  DollarSign, Users, Building2, Calendar, FileText, FileSpreadsheet,
+  FileType, ChevronDown, BarChart3, Activity,
+  Banknote, Smartphone, CreditCard, Landmark, RotateCcw,
+  User,  // ✅ FIX: missing import
 } from 'lucide-react';
 import {
   collection, onSnapshot, query, orderBy, limit,
@@ -27,7 +23,6 @@ import PageHeader from '../../components/admin/PageHeader';
 import StatCard from '../../components/admin/StatCard';
 import EmptyState from '../../components/admin/EmptyState';
 import Badge from '../../components/ui/Badge';
-import Input from '../../components/ui/Input';
 import Button from '../../components/ui/Button';
 
 // ── HELPERS ──────────────────────────────────────────────────
@@ -35,7 +30,7 @@ const toDate = (v) => {
   if (!v) return new Date();
   let d;
   if (v && typeof v.toDate === 'function') {
-    try { d = v.toDate(); } catch {}
+    try { d = v.toDate(); } catch { }
   } else if (v && typeof v === 'object' && typeof v.seconds === 'number' && v.seconds > 0) {
     d = new Date(v.seconds * 1000);
   } else {
@@ -80,7 +75,6 @@ const PAYMENT_ICONS = {
   bank: Landmark, card: CreditCard, mobile: Smartphone,
 };
 
-// ── DATE PRESETS ─────────────────────────────────────────────
 const getDatePresets = () => {
   const now = new Date();
   const today = new Date(now); today.setHours(0, 0, 0, 0);
@@ -90,8 +84,8 @@ const getDatePresets = () => {
   return {
     today: { label: 'Today', from: today },
     yesterday: { label: 'Yesterday', from: yesterday, to: today },
-    week: { label: 'Last 7 Days', from: weekAgo },
-    month: { label: 'Last 30 Days', from: monthAgo },
+    week: { label: '7 Days', from: weekAgo },
+    month: { label: '30 Days', from: monthAgo },
     all: { label: 'All Time', from: new Date(0) },
   };
 };
@@ -111,9 +105,13 @@ const ExportMenu = ({ data, filename, isDark }) => {
 
   const exportRows = useMemo(() =>
     data.map(t => ({
-      Type: t.type, Source: t.source, Description: t.description,
-      Operator: t.initiator, Customer: t.customer || '—',
-      Branch: t.branch, Method: t.method || 'cash',
+      Type: t.type,
+      Source: t.source,
+      Description: t.description,
+      Operator: t.initiator,
+      Customer: t.customer || '—',
+      Branch: t.branch,
+      Method: t.method || 'cash',
       Amount: Number(t.amount || 0),
       Date: toDate(t.timestamp).toLocaleString(),
       Synced: t.synced ? 'Yes' : 'No',
@@ -190,14 +188,12 @@ const CashFlowMonitor = () => {
   const { isDark } = useTheme();
   const { isOnline } = useNetwork();
 
-  // ── STATE ──────────────────────────────────────────────────
   const [bills, setBills] = useState([]);
   const [transfers, setTransfers] = useState([]);
   const [registers, setRegisters] = useState([]);
   const [loading, setLoading] = useState(true);
   const [lastUpdated, setLastUpdated] = useState(null);
 
-  // Filters
   const [datePreset, setDatePreset] = useState('today');
   const [customFrom, setCustomFrom] = useState('');
   const [customTo, setCustomTo] = useState('');
@@ -209,16 +205,13 @@ const CashFlowMonitor = () => {
   const [showSug, setShowSug] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
 
-  // UI
   const [selectedRegister, setSelectedRegister] = useState(null);
-  // pagination for transactions
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(100);
 
-  // ── REAL-TIME FIREBASE SUBSCRIPTIONS ──────────────────────
+  // ── Firestore listeners ────────────────────────────────────
   useEffect(() => {
     if (!isFirebaseReady() || !db) {
-      // Offline mode — load from IDB
       (async () => {
         try {
           const idbOrders = await localDB.orders.toArray();
@@ -231,8 +224,6 @@ const CashFlowMonitor = () => {
     }
 
     setLoading(true);
-
-    // Orders stream (10k limit)
     const u1 = onSnapshot(
       query(collection(db, 'orders'), orderBy('createdAt', 'desc'), limit(10000)),
       async (snap) => {
@@ -240,7 +231,6 @@ const CashFlowMonitor = () => {
         setBills(data);
         setLastUpdated(new Date());
         setLoading(false);
-        // Cache to IDB
         try {
           await localDB.orders.bulkPut(data.map(b => ({
             ...b, localId: b.localId || b.id, syncStatus: 'synced', synced: 1,
@@ -262,7 +252,7 @@ const CashFlowMonitor = () => {
     return () => { u1(); u2(); u3(); };
   }, []);
 
-  // ── DATE RANGE ─────────────────────────────────────────────
+  // ── Date range ─────────────────────────────────────────────
   const dateRange = useMemo(() => {
     if (datePreset === 'custom' && customFrom) {
       return {
@@ -274,7 +264,6 @@ const CashFlowMonitor = () => {
     return { from: presets[datePreset]?.from || new Date(0), to: new Date() };
   }, [datePreset, customFrom, customTo]);
 
-  // ── BRANCHES LIST ──────────────────────────────────────────
   const allBranches = useMemo(() => {
     const set = new Set();
     bills.forEach(b => {
@@ -284,7 +273,7 @@ const CashFlowMonitor = () => {
     return Array.from(set).sort();
   }, [bills]);
 
-  // ── STATS (filtered) ───────────────────────────────────────
+  // ── Stats ──────────────────────────────────────────────────
   const stats = useMemo(() => {
     let cashIn = 0, cashOut = 0, digital = 0;
     let totalSales = 0, totalBills = 0;
@@ -302,9 +291,7 @@ const CashFlowMonitor = () => {
 
       totalBills++;
       totalSales += total;
-
-      if (isCash) cashIn += total;
-      else digital += total;
+      if (isCash) cashIn += total; else digital += total;
 
       if (b.status === 'returned' || b.returnAmount) {
         returnsAmt += Number(b.returnAmount || total);
@@ -316,7 +303,6 @@ const CashFlowMonitor = () => {
       }
     });
 
-    // Add transfers
     transfers.forEach(t => {
       const dt = toDate(t.timestamp || t.createdAt);
       if (dt < dateRange.from || dt > dateRange.to) return;
@@ -343,7 +329,7 @@ const CashFlowMonitor = () => {
     };
   }, [bills, transfers, registers, dateRange, branchFilter, allBranches]);
 
-  // ── TRANSACTIONS LIST (filtered) ───────────────────────────
+  // ── Tx list ────────────────────────────────────────────────
   const allTx = useMemo(() => {
     const fromOrders = bills
       .filter(b => {
@@ -355,7 +341,9 @@ const CashFlowMonitor = () => {
       .map(b => {
         const method = getPaymentMethod(b);
         return {
-          id: b.id, type: 'IN', source: 'SALE',
+          id: b.id,
+          type: 'IN',
+          source: 'SALE',
           description: `Sale #${b.billSerial || b.serialNo || b.id.slice(0, 8)}`,
           amount: getTotal(b),
           timestamp: b.createdAt,
@@ -384,16 +372,11 @@ const CashFlowMonitor = () => {
     return [...fromOrders, ...fromTransfers]
       .sort((a, b) => toDate(b.timestamp) - toDate(a.timestamp))
       .filter(t => {
-        // Type filter
         if (typeFilter !== 'all' && t.type !== typeFilter) return false;
-        // Payment filter
         if (paymentFilter !== 'all' && t.method !== paymentFilter) return false;
-        // Register filter
         if (registerFilter !== 'all' &&
           (t.initiator || '').toLowerCase() !== registerFilter.toLowerCase()) return false;
-        // Branch filter
         if (branchFilter !== 'all' && t.branch !== branchFilter) return false;
-        // Search
         if (search) {
           const s = search.toLowerCase();
           return t.description.toLowerCase().includes(s) ||
@@ -405,7 +388,6 @@ const CashFlowMonitor = () => {
       });
   }, [bills, transfers, dateRange, typeFilter, paymentFilter, registerFilter, branchFilter, search]);
 
-  // ── ACTIVE REGISTERS ───────────────────────────────────────
   const activeRegs = useMemo(() => {
     if (registers.length > 0) return registers;
     const map = {};
@@ -420,8 +402,10 @@ const CashFlowMonitor = () => {
           id: `reg_${b.billerId || b.billerName}`,
           name: b.billerName,
           branch: b.storeId || b.branchId || 'Main',
-          cashReceived: 0, digitalReceived: 0,
-          totalBills: 0, status: 'open',
+          cashReceived: 0,
+          digitalReceived: 0,
+          totalBills: 0,
+          status: 'open',
         };
       }
       const method = getPaymentMethod(b);
@@ -434,7 +418,6 @@ const CashFlowMonitor = () => {
     return Object.values(map).sort((a, b) => b.cashReceived - a.cashReceived);
   }, [bills, registers, dateRange, branchFilter]);
 
-  // ── SEARCH SUGGESTIONS ─────────────────────────────────────
   const suggestions = useMemo(() => {
     if (!search.trim()) return [];
     const s = search.toLowerCase();
@@ -448,7 +431,6 @@ const CashFlowMonitor = () => {
     return [...set].slice(0, 6);
   }, [bills, search]);
 
-  // ── PAYMENT METHOD BREAKDOWN ───────────────────────────────
   const methodBreakdown = useMemo(() => {
     const map = {};
     bills.forEach(b => {
@@ -485,19 +467,16 @@ const CashFlowMonitor = () => {
     return allTx.slice(start, start + pageSize);
   }, [allTx, page, pageSize]);
 
-  // ══════════════════════════════════════════════════════════
-  // RENDER
-  // ══════════════════════════════════════════════════════════
   return (
-    <div className="w-full px-3 sm:px-4 md:px-6 space-y-4">
+    <div className="p-2 sm:p-3 lg:p-4 max-w-[1600px] mx-auto space-y-3">
 
-      {/* HEADER */}
-      <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+      {/* ── HEADER ─────────────────────────────────────────── */}
+      <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-2">
         <PageHeader
           icon={Wallet}
           title="Cash Flow Control Center"
           description={
-            <div className="flex items-center gap-3 flex-wrap text-xs mt-1">
+            <div className="flex items-center gap-2 flex-wrap text-[10px] sm:text-xs mt-1">
               <span>{stats.totalBills.toLocaleString()} bills</span>
               <span className="text-gray-500">•</span>
               <span>{fmt(stats.totalSales)} sales</span>
@@ -509,7 +488,7 @@ const CashFlowMonitor = () => {
               </span>
               {lastUpdated && <>
                 <span className="text-gray-500">•</span>
-                <span>Updated {fmtDt(lastUpdated)}</span>
+                <span>{fmtDt(lastUpdated)}</span>
               </>}
             </div>
           }
@@ -522,14 +501,14 @@ const CashFlowMonitor = () => {
         </div>
       </div>
 
-      {/* DATE PRESET TABS */}
+      {/* ── DATE PRESETS ────────────────────────────────────── */}
       <div className="flex items-center gap-1.5 flex-wrap">
         {Object.entries(getDatePresets()).map(([key, p]) => (
           <button
             key={key}
             onClick={() => setDatePreset(key)}
             className={cn(
-              'px-3 py-1.5 rounded-lg text-[11px] font-semibold transition-all border',
+              'px-2.5 py-1 rounded-lg text-[10px] font-semibold transition-all border',
               datePreset === key
                 ? 'bg-amber-500/15 text-amber-400 border-amber-500/40'
                 : isDark
@@ -543,7 +522,7 @@ const CashFlowMonitor = () => {
         <button
           onClick={() => setDatePreset('custom')}
           className={cn(
-            'px-3 py-1.5 rounded-lg text-[11px] font-semibold transition-all border flex items-center gap-1',
+            'px-2.5 py-1 rounded-lg text-[10px] font-semibold transition-all border flex items-center gap-1',
             datePreset === 'custom'
               ? 'bg-amber-500/15 text-amber-400 border-amber-500/40'
               : isDark
@@ -558,18 +537,18 @@ const CashFlowMonitor = () => {
           <motion.div initial={{ opacity: 0, x: -8 }} animate={{ opacity: 1, x: 0 }}
             className="flex items-center gap-2">
             <input type="date" value={customFrom} onChange={e => setCustomFrom(e.target.value)}
-              className={cn('rounded-lg border px-2 py-1 text-[11px]',
+              className={cn('rounded-lg border px-2 py-1 text-[10px]',
                 isDark ? 'bg-[#0f0a05] border-[#2a1f0d] text-gray-300' : 'bg-white border-amber-100')} />
             <span className="text-xs text-gray-500">→</span>
             <input type="date" value={customTo} onChange={e => setCustomTo(e.target.value)}
-              className={cn('rounded-lg border px-2 py-1 text-[11px]',
+              className={cn('rounded-lg border px-2 py-1 text-[10px]',
                 isDark ? 'bg-[#0f0a05] border-[#2a1f0d] text-gray-300' : 'bg-white border-amber-100')} />
           </motion.div>
         )}
       </div>
 
-      {/* STATS GRID */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+      {/* ── STATS GRID ──────────────────────────────────────── */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
         <StatCard label="Cash Received" value={fmtShort(stats.cashIn)} icon={ArrowDownRight} color="green" />
         <StatCard label="Cash Out" value={fmtShort(stats.cashOut)} icon={ArrowUpRight} color="rose" />
         <StatCard label="Net Cash" value={fmtShort(stats.netCash)} icon={Wallet} color="amber" />
@@ -578,14 +557,14 @@ const CashFlowMonitor = () => {
         <StatCard label="Branches" value={stats.uniqueBranches} icon={Building2} color="cyan" />
       </div>
 
-      {/* PAYMENT METHOD BREAKDOWN */}
+      {/* ── PAYMENT METHOD BREAKDOWN ────────────────────────── */}
       {methodBreakdown.length > 0 && (
         <motion.div
           initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}
-          className={cn('rounded-2xl border p-4',
+          className={cn('rounded-xl border p-3',
             isDark ? 'bg-[#0f0a05] border-[#2a1f0d]' : 'bg-white border-amber-200')}
         >
-          <h4 className={cn('text-xs font-bold mb-3 flex items-center gap-2',
+          <h4 className={cn('text-xs font-bold mb-2 flex items-center gap-2',
             isDark ? 'text-white' : 'text-gray-900')}>
             <BarChart3 className="w-3.5 h-3.5 text-amber-500" />
             Payment Method Breakdown
@@ -596,14 +575,14 @@ const CashFlowMonitor = () => {
               const pct = stats.totalSales > 0 ? (m.amount / stats.totalSales * 100).toFixed(1) : 0;
               return (
                 <div key={m.method}
-                  className={cn('rounded-xl p-3 border',
+                  className={cn('rounded-lg p-2.5 border',
                     isDark ? 'bg-[#070503] border-[#2a1f0d]' : 'bg-gray-50 border-gray-200')}>
                   <div className="flex items-center gap-2 mb-1">
                     <Icon className="w-3.5 h-3.5 text-amber-400" />
-                    <p className="text-[10px] font-semibold uppercase text-gray-500">{m.method}</p>
+                    <p className="text-[10px] font-semibold uppercase text-gray-500 truncate">{m.method}</p>
                   </div>
-                  <p className={cn('text-sm font-bold', isDark ? 'text-gray-100' : 'text-gray-900')}>
-                    {fmt(m.amount)}
+                  <p className={cn('text-sm font-bold font-mono', isDark ? 'text-gray-100' : 'text-gray-900')}>
+                    {fmtShort(m.amount)}
                   </p>
                   <p className="text-[10px] text-amber-500/70">{pct}% of total</p>
                 </div>
@@ -613,20 +592,19 @@ const CashFlowMonitor = () => {
         </motion.div>
       )}
 
-      {/* FILTERS BAR */}
-      <div className={cn('rounded-2xl border p-3',
+      {/* ── FILTER BAR ──────────────────────────────────────── */}
+      <div className={cn('rounded-xl border p-2.5',
         isDark ? 'bg-[#0f0a05] border-[#2a1f0d]' : 'bg-white border-amber-200')}>
         <div className="flex flex-col sm:flex-row gap-2">
-          {/* Search */}
           <div className="relative flex-1">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" />
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-500" />
             <input
               value={search}
               onChange={e => { setSearch(e.target.value); setShowSug(true); }}
               onFocus={() => setShowSug(true)}
               placeholder="Search bills, cashier, customer, branch..."
               className={cn(
-                'w-full rounded-xl border pl-10 pr-9 py-2 text-sm',
+                'w-full rounded-lg border pl-9 pr-9 py-1.5 text-xs',
                 isDark
                   ? 'bg-[#070503] border-[#2a1f0d] text-gray-200 placeholder-gray-600'
                   : 'bg-white border-amber-100 text-gray-700 placeholder-gray-400',
@@ -652,7 +630,7 @@ const CashFlowMonitor = () => {
                   {suggestions.map((s, i) => (
                     <button key={i} onClick={() => { setSearch(s); setShowSug(false); }}
                       className={cn(
-                        'w-full text-left px-3 py-2 rounded-lg text-xs transition-colors',
+                        'w-full text-left px-3 py-1.5 rounded-lg text-xs transition-colors',
                         isDark ? 'text-gray-300 hover:bg-amber-500/10' : 'text-gray-700 hover:bg-amber-50',
                       )}>
                       <Search className="w-3 h-3 inline mr-2 text-gray-500" />
@@ -668,7 +646,7 @@ const CashFlowMonitor = () => {
             <button
               onClick={() => setShowAdvanced(v => !v)}
               className={cn(
-                'flex items-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-medium transition-colors',
+                'flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition-colors',
                 showAdvanced || totalActiveFilters > 0
                   ? 'bg-amber-500/15 text-amber-400 border-amber-500/40'
                   : isDark
@@ -677,7 +655,7 @@ const CashFlowMonitor = () => {
               )}
             >
               <Filter className="w-3.5 h-3.5" />
-              Filters
+              <span className="hidden sm:inline">Filters</span>
               {totalActiveFilters > 0 && (
                 <span className="bg-amber-500 text-[#1a1208] text-[9px] font-bold px-1.5 py-0.5 rounded-full">
                   {totalActiveFilters}
@@ -693,7 +671,6 @@ const CashFlowMonitor = () => {
           </div>
         </div>
 
-        {/* ADVANCED FILTERS PANEL */}
         <AnimatePresence>
           {showAdvanced && (
             <motion.div
@@ -702,48 +679,44 @@ const CashFlowMonitor = () => {
               exit={{ opacity: 0, height: 0 }}
               className="overflow-hidden"
             >
-              <div className={cn('mt-3 pt-3 border-t grid grid-cols-2 sm:grid-cols-4 gap-2',
+              <div className={cn('mt-2 pt-2 border-t grid grid-cols-2 sm:grid-cols-4 gap-2',
                 isDark ? 'border-[#2a1f0d]' : 'border-amber-100')}>
-
                 <div>
-                  <label className="text-[10px] font-semibold uppercase text-gray-500 block mb-1">Type</label>
+                  <label className="text-[9px] font-semibold uppercase text-gray-500 block mb-1">Type</label>
                   <select value={typeFilter} onChange={e => setTypeFilter(e.target.value)}
-                    className={cn('w-full rounded-lg border px-2 py-1.5 text-xs',
+                    className={cn('w-full rounded-lg border px-2 py-1 text-xs',
                       isDark ? 'bg-[#070503] border-[#2a1f0d] text-gray-200' : 'bg-white border-amber-100')}>
                     <option value="all">All Types</option>
                     <option value="IN">Cash IN</option>
                     <option value="OUT">Cash OUT</option>
                   </select>
                 </div>
-
                 <div>
-                  <label className="text-[10px] font-semibold uppercase text-gray-500 block mb-1">Payment Method</label>
+                  <label className="text-[9px] font-semibold uppercase text-gray-500 block mb-1">Method</label>
                   <select value={paymentFilter} onChange={e => setPaymentFilter(e.target.value)}
-                    className={cn('w-full rounded-lg border px-2 py-1.5 text-xs',
+                    className={cn('w-full rounded-lg border px-2 py-1 text-xs',
                       isDark ? 'bg-[#070503] border-[#2a1f0d] text-gray-200' : 'bg-white border-amber-100')}>
                     <option value="all">All Methods</option>
                     <option value="cash">Cash</option>
                     <option value="easypaisa">EasyPaisa</option>
                     <option value="jazzcash">JazzCash</option>
-                    <option value="bank">Bank Transfer</option>
+                    <option value="bank">Bank</option>
                     <option value="card">Card</option>
                   </select>
                 </div>
-
                 <div>
-                  <label className="text-[10px] font-semibold uppercase text-gray-500 block mb-1">Branch</label>
+                  <label className="text-[9px] font-semibold uppercase text-gray-500 block mb-1">Branch</label>
                   <select value={branchFilter} onChange={e => setBranchFilter(e.target.value)}
-                    className={cn('w-full rounded-lg border px-2 py-1.5 text-xs',
+                    className={cn('w-full rounded-lg border px-2 py-1 text-xs',
                       isDark ? 'bg-[#070503] border-[#2a1f0d] text-gray-200' : 'bg-white border-amber-100')}>
                     <option value="all">All Branches</option>
                     {allBranches.map(b => <option key={b} value={b}>{b}</option>)}
                   </select>
                 </div>
-
                 <div>
-                  <label className="text-[10px] font-semibold uppercase text-gray-500 block mb-1">Register / Operator</label>
+                  <label className="text-[9px] font-semibold uppercase text-gray-500 block mb-1">Register</label>
                   <select value={registerFilter} onChange={e => setRegisterFilter(e.target.value)}
-                    className={cn('w-full rounded-lg border px-2 py-1.5 text-xs',
+                    className={cn('w-full rounded-lg border px-2 py-1 text-xs',
                       isDark ? 'bg-[#070503] border-[#2a1f0d] text-gray-200' : 'bg-white border-amber-100')}>
                     <option value="all">All Registers</option>
                     {activeRegs.map(r => <option key={r.id} value={r.name}>{r.name}</option>)}
@@ -754,210 +727,278 @@ const CashFlowMonitor = () => {
           )}
         </AnimatePresence>
 
-        <div className="flex items-center justify-between mt-3 pt-2 border-t border-[#2a1f0d]/50">
-          <p className={cn('text-xs', isDark ? 'text-gray-500' : 'text-gray-400')}>
-            <span className="font-semibold text-amber-500">{allTx.length.toLocaleString()}</span> transactions found
-            {bills.length > 0 && <span className="text-gray-600"> of {bills.length.toLocaleString()} total bills</span>}
+        <div className="flex items-center justify-between mt-2 pt-2 border-t border-[#2a1f0d]/50">
+          <p className={cn('text-[10px]', isDark ? 'text-gray-500' : 'text-gray-400')}>
+            <span className="font-semibold text-amber-500">{allTx.length.toLocaleString()}</span> transactions
+            {bills.length > 0 && <span className="text-gray-600"> / {bills.length.toLocaleString()} bills</span>}
           </p>
           {pageCount > 1 && (
             <button onClick={() => setPage(pageCount)}
-              className="text-xs text-amber-500 hover:text-amber-400">
-              Jump to latest →
+              className="text-[10px] text-amber-500 hover:text-amber-400">
+              Latest →
             </button>
           )}
         </div>
       </div>
 
-      {/* MAIN STACK — REGISTERS + LEDGER (stacked full-width) */}
-      <div className="space-y-4">
+      {/* ── ACTIVE REGISTERS ────────────────────────────────── */}
+      <motion.div
+        initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}
+        className={cn('rounded-xl border p-3 w-full',
+          isDark ? 'bg-[#0f0a05] border-[#2a1f0d]' : 'bg-white border-amber-200')}>
+        <h3 className={cn('font-bold text-xs mb-2.5 flex items-center justify-between',
+          isDark ? 'text-white' : 'text-gray-900')}>
+          <span className="flex items-center gap-2">
+            <Activity className="w-3.5 h-3.5 text-amber-500 animate-pulse" />
+            Active Registers
+          </span>
+          <span className="text-[10px] text-gray-500 font-normal">({activeRegs.length})</span>
+        </h3>
 
-        {/* REGISTERS */}
-        <motion.div
-          initial={{ opacity: 0, x: -8 }} animate={{ opacity: 1, x: 0 }}
-          className={cn('rounded-2xl border p-4 shadow-xl w-full',
-            isDark ? 'bg-[#0f0a05] border-[#2a1f0d]' : 'bg-white border-amber-200')}>
-          <h3 className={cn('font-bold text-sm mb-3 flex items-center justify-between',
-            isDark ? 'text-white' : 'text-gray-900')}>
-            <span className="flex items-center gap-2">
-              <Activity className="w-4 h-4 text-amber-500 animate-pulse" />
-              Active Registers
-            </span>
-            <span className="text-xs text-gray-500 font-normal">({activeRegs.length})</span>
-          </h3>
-
-          {activeRegs.length === 0 ? (
-            <EmptyState title="No registers" description="No active cashiers found" />
-          ) : (
-            <div className="space-y-2 max-h-[600px] overflow-y-auto pr-1">
-              {activeRegs.map((reg, idx) => (
-                <motion.div
-                  key={reg.id}
-                  initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }}
-                  transition={{ delay: idx * 0.03 }}
-                  className={cn('rounded-xl border p-3 hover:border-amber-500/30 transition-colors cursor-pointer group',
-                    isDark ? 'bg-[#070503] border-[#2a1f0d]' : 'bg-gray-50 border-gray-200')}
-                  onClick={() => setSelectedRegister(reg)}
-                >
-                  <div className="flex items-start justify-between gap-2 mb-2">
-                    <div className="min-w-0 flex-1">
-                      <p className={cn('font-semibold text-sm truncate',
-                        isDark ? 'text-gray-100' : 'text-gray-900')}>{reg.name}</p>
-                      <p className="text-[10px] text-gray-500 truncate">
-                        <Building2 className="w-2.5 h-2.5 inline mr-1" />{reg.branch}
-                      </p>
-                    </div>
-                    <Badge variant={reg.status === 'open' ? 'success' : 'secondary'}>
-                      {(reg.status || 'open').toUpperCase()}
-                    </Badge>
+        {activeRegs.length === 0 ? (
+          <EmptyState title="No registers" description="No active cashiers found" />
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-2">
+            {activeRegs.map((reg, idx) => (
+              <motion.div
+                key={reg.id}
+                initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: idx * 0.03 }}
+                className={cn('rounded-lg border p-2.5 hover:border-amber-500/30 transition-colors cursor-pointer group',
+                  isDark ? 'bg-[#070503] border-[#2a1f0d]' : 'bg-gray-50 border-gray-200')}
+                onClick={() => setSelectedRegister(reg)}
+              >
+                <div className="flex items-start justify-between gap-2 mb-1.5">
+                  <div className="min-w-0 flex-1">
+                    <p className={cn('font-semibold text-xs truncate',
+                      isDark ? 'text-gray-100' : 'text-gray-900')}>{reg.name}</p>
+                    <p className="text-[9px] text-gray-500 truncate">
+                      <Building2 className="w-2.5 h-2.5 inline mr-1" />{reg.branch}
+                    </p>
                   </div>
-                  <div className="grid grid-cols-3 gap-2 text-[10px]">
-                    <div>
-                      <p className="text-gray-500 mb-0.5">Cash</p>
-                      <p className="font-bold text-emerald-400">{fmtShort(reg.cashReceived)}</p>
-                    </div>
-                    <div>
-                      <p className="text-gray-500 mb-0.5">Digital</p>
-                      <p className="font-bold text-blue-400">{fmtShort(reg.digitalReceived || 0)}</p>
-                    </div>
-                    <div>
-                      <p className="text-gray-500 mb-0.5">Bills</p>
-                      <p className="font-bold text-gray-300">{reg.totalBills}</p>
-                    </div>
+                  <Badge variant={reg.status === 'open' ? 'success' : 'secondary'}>
+                    {(reg.status || 'open').toUpperCase()}
+                  </Badge>
+                </div>
+                <div className="grid grid-cols-3 gap-1.5 text-[10px]">
+                  <div>
+                    <p className="text-gray-500 mb-0.5">Cash</p>
+                    <p className="font-bold text-emerald-400 font-mono truncate">{fmtShort(reg.cashReceived)}</p>
                   </div>
-                  <button className="opacity-0 group-hover:opacity-100 transition-opacity text-[10px] text-amber-500 mt-2 flex items-center gap-1">
-                    <Eye className="w-3 h-3" /> View Details
-                  </button>
-                </motion.div>
-              ))}
-            </div>
-          )}
-        </motion.div>
-
-        {/* LEDGER */}
-        <motion.div
-          initial={{ opacity: 0, x: 8 }} animate={{ opacity: 1, x: 0 }}
-          className={cn('rounded-2xl border p-4 shadow-xl w-full',
-            isDark ? 'bg-[#0f0a05] border-[#2a1f0d]' : 'bg-white border-amber-200')}>
-          <h3 className={cn('font-bold text-sm mb-3 flex items-center justify-between',
-            isDark ? 'text-white' : 'text-gray-900')}>
-            <span className="flex items-center gap-2">
-              <Wallet className="w-4 h-4 text-emerald-500 animate-pulse" />
-              Live Cash Ledger
-            </span>
-            <span className="text-xs text-gray-500 font-normal">
-              Showing page {page} of {pageCount} — {allTx.length.toLocaleString()} transactions
-            </span>
-          </h3>
-
-          {loading ? (
-            <div className="text-center py-12">
-              <RefreshCw className="w-6 h-6 animate-spin mx-auto mb-2 text-amber-500" />
-              <p className="text-xs text-gray-500">Loading transactions...</p>
-            </div>
-          ) : allTx.length === 0 ? (
-            <EmptyState title="No transactions" description="Cash transactions will appear here" />
-          ) : (
-            <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
-              <table className="w-full text-sm">
-                <thead className={cn('sticky top-0 z-10',
-                  isDark ? 'bg-[#1a1208] text-gray-400' : 'bg-amber-50 text-gray-600')}>
-                  <tr>
-                    {['Type', 'Description', 'Operator', 'Method', 'Amount', 'Time', 'Sync'].map(h => (
-                      <th key={h} className="px-3 py-2.5 text-start font-semibold whitespace-nowrap text-[10px] uppercase tracking-wider">
-                        {h}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  <AnimatePresence mode="popLayout">
-                    {pageItems.map((tx, idx) => {
-                      const isIn = tx.type === 'IN';
-                      const MethodIcon = PAYMENT_ICONS[tx.method] || DollarSign;
-                      return (
-                        <motion.tr
-                          key={tx.id}
-                          initial={{ opacity: 0 }} animate={{ opacity: 1 }}
-                          transition={{ delay: Math.min(idx * 0.01, 0.5) }}
-                          className={cn(
-                            'border-t transition-colors',
-                            isDark ? 'border-[#2a1f0d] hover:bg-[#1a1208]/60' : 'border-amber-100 hover:bg-amber-50/50',
-                            !isIn && (isDark ? 'bg-rose-500/[0.03]' : 'bg-rose-50/30'),
-                          )}>
-                          <td className="px-3 py-2.5">
-                            <span className={cn(
-                              'inline-flex items-center gap-1 px-2 py-0.5 rounded-lg border font-bold text-[9px] uppercase',
-                              isIn
-                                ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
-                                : 'bg-rose-500/10 text-rose-400 border-rose-500/20',
-                            )}>
-                              {isIn ? <ArrowDownRight className="w-3 h-3" /> : <ArrowUpRight className="w-3 h-3" />}
-                              {tx.type}
-                            </span>
-                          </td>
-                          <td className={cn('px-3 py-2.5', isDark ? 'text-gray-300' : 'text-gray-700')}>
-                            <p className="font-medium truncate max-w-[420px]">{tx.description}</p>
-                            <p className="text-[9px] text-gray-500">
-                              {tx.source} • {tx.customer || 'Walk-in'}
-                            </p>
-                          </td>
-                          <td className={cn('px-3 py-2.5', isDark ? 'text-gray-300' : 'text-gray-700')}>
-                            <p className="truncate max-w-[100px]">{tx.initiator}</p>
-                            <p className="text-[9px] text-gray-500 font-mono truncate max-w-[80px]">
-                              <Building2 className="w-2.5 h-2.5 inline mr-0.5" />{tx.branch}
-                            </p>
-                          </td>
-                          <td className="px-3 py-2.5">
-                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400 text-[10px]">
-                              <MethodIcon className="w-2.5 h-2.5" />
-                              {tx.method || 'cash'}
-                            </span>
-                          </td>
-                          <td className={cn('px-3 py-2.5 font-bold whitespace-nowrap',
-                            isIn ? 'text-emerald-400' : 'text-rose-400')}>
-                            {isIn ? '+' : '-'}{fmt(tx.amount)}
-                          </td>
-                          <td className="px-3 py-2.5 text-gray-500 whitespace-nowrap text-[10px]">
-                            <Clock className="w-2.5 h-2.5 inline mr-1" />
-                            {fmtDt(tx.timestamp)}
-                          </td>
-                          <td className="px-3 py-2.5 text-center">
-                            {tx.synced
-                              ? <Wifi className="w-3.5 h-3.5 text-emerald-500 inline" />
-                              : <Database className="w-3.5 h-3.5 text-amber-500 inline animate-pulse" />}
-                          </td>
-                        </motion.tr>
-                      );
-                    })}
-                  </AnimatePresence>
-                </tbody>
-              </table>
-
-              {/* Pagination controls */}
-              {pageCount > 1 && (
-                <div className="flex items-center justify-between gap-4 mt-3 border-t pt-3">
-                  <div className="flex items-center gap-2">
-                    <button disabled={page <= 1} onClick={() => setPage(p => Math.max(1, p - 1))}
-                      className="px-3 py-1 rounded-md bg-amber-50 text-amber-600 disabled:opacity-40">Prev</button>
-                    <button disabled={page >= pageCount} onClick={() => setPage(p => Math.min(pageCount, p + 1))}
-                      className="px-3 py-1 rounded-md bg-amber-50 text-amber-600 disabled:opacity-40">Next</button>
-                    <span className="text-xs text-gray-500">Page {page} / {pageCount}</span>
+                  <div>
+                    <p className="text-gray-500 mb-0.5">Digital</p>
+                    <p className="font-bold text-blue-400 font-mono truncate">{fmtShort(reg.digitalReceived || 0)}</p>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <label className="text-xs text-gray-500">Rows:</label>
-                    <select value={pageSize} onChange={e => { setPageSize(Number(e.target.value)); setPage(1); }}
-                      className="rounded-md border px-2 py-1 text-sm">
-                      {[25,50,100,200].map(n => <option key={n} value={n}>{n}</option>)}
-                    </select>
+                  <div>
+                    <p className="text-gray-500 mb-0.5">Bills</p>
+                    <p className="font-bold text-gray-300 font-mono">{reg.totalBills}</p>
                   </div>
                 </div>
-              )}
-            </div>
-          )}
-        </motion.div>
-      </div>
+              </motion.div>
+            ))}
+          </div>
+        )}
+      </motion.div>
 
-      {/* REGISTER VERIFICATION MODAL */}
+      {/* ── LIVE LEDGER ─────────────────────────────────────── */}
+      <motion.div
+        initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}
+        className={cn('rounded-xl border p-3 w-full',
+          isDark ? 'bg-[#0f0a05] border-[#2a1f0d]' : 'bg-white border-amber-200')}
+      >
+        <h3 className={cn('font-bold text-xs sm:text-sm mb-2 flex items-center justify-between',
+          isDark ? 'text-white' : 'text-gray-900')}>
+          <span className="flex items-center gap-1.5">
+            <Wallet className="w-4 h-4 text-emerald-500 animate-pulse" />
+            Live Cash Ledger
+          </span>
+          <span className="text-[10px] text-slate-500 font-normal">
+            Page {page}/{pageCount} • {allTx.length.toLocaleString()}
+          </span>
+        </h3>
+
+        {loading ? (
+          <div className="text-center py-12">
+            <RefreshCw className="w-5 h-5 animate-spin mx-auto mb-2 text-amber-500" />
+            <p className="text-xs text-slate-500">Loading transactions...</p>
+          </div>
+        ) : allTx.length === 0 ? (
+          <EmptyState title="No transactions" description="Cash transactions will appear here" />
+        ) : (
+          <>
+            {/* ── Desktop Table ─────────────────────────────── */}
+            <div className="hidden md:block w-full overflow-hidden rounded-lg border border-[#2a1f0d]/50">
+              <div className="overflow-y-auto max-h-[500px]">
+                <table className="w-full text-sm table-fixed">
+                  <thead className={cn('sticky top-0 z-10',
+                    isDark ? 'bg-[#1a1208] text-slate-400' : 'bg-amber-50 text-gray-600')}>
+                    <tr>
+                      <th className="px-2 py-2 text-start font-bold text-xs uppercase tracking-wider w-[80px]">Type</th>
+                      <th className="px-2 py-2 text-start font-bold text-xs uppercase tracking-wider">Description</th>
+                      <th className="px-2 py-2 text-start font-bold text-xs uppercase tracking-wider w-[150px]">Operator</th>
+                      <th className="px-2 py-2 text-end font-bold text-xs uppercase tracking-wider w-[125px]">Amount</th>
+                      <th className="px-2 py-2 text-end font-bold text-xs uppercase tracking-wider w-[95px]">Time</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <AnimatePresence mode="popLayout">
+                      {pageItems.map((tx, idx) => {
+                        const isIn = tx.type === 'IN';
+                        const MethodIcon = PAYMENT_ICONS[tx.method] || DollarSign;
+                        return (
+                          <motion.tr
+                            key={tx.id}
+                            initial={{ opacity: 0 }} animate={{ opacity: 1 }}
+                            transition={{ delay: Math.min(idx * 0.008, 0.4) }}
+                            className={cn(
+                              'border-t transition-colors',
+                              isDark ? 'border-[#2a1f0d]/60 hover:bg-[#1a1208]/60' : 'border-amber-100 hover:bg-amber-50/50',
+                              !isIn && (isDark ? 'bg-rose-500/[0.02]' : 'bg-rose-50/20'),
+                            )}>
+                            <td className="px-2 py-2">
+                              <span className={cn(
+                                'inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded font-bold text-[10px] uppercase border',
+                                isIn
+                                  ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                                  : 'bg-rose-500/10 text-rose-400 border-rose-500/20',
+                              )}>
+                                {isIn ? <ArrowDownRight className="w-2.5 h-2.5" /> : <ArrowUpRight className="w-2.5 h-2.5" />}
+                                {tx.type}
+                              </span>
+                            </td>
+                            <td className={cn('px-2 py-2', isDark ? 'text-gray-300' : 'text-gray-700')}>
+                              <p className="font-semibold text-xs truncate">{tx.description}</p>
+                              <p className="text-[11px] text-slate-400 mt-0.5 truncate">
+                                {tx.source}{tx.customer && ` • ${tx.customer}`}
+                              </p>
+                            </td>
+                            <td className="px-2 py-2">
+                              <div className="min-w-0">
+                                <div className="flex items-center gap-1">
+                                  <User className="w-2.5 h-2.5 text-amber-500 shrink-0" />
+                                  <span className="text-xs text-slate-200 font-semibold truncate">
+                                    {tx.initiator}
+                                  </span>
+                                </div>
+                                <div className="flex items-center gap-1 mt-0.5">
+                                  <Building2 className="w-2.5 h-2.5 text-slate-500 shrink-0" />
+                                  <span className="text-[11px] text-slate-400 font-mono truncate">
+                                    {tx.branch}
+                                  </span>
+                                </div>
+                              </div>
+                            </td>
+                            <td className="px-2 py-2 text-right">
+                              <span className={cn('text-xs font-bold font-mono block',
+                                isIn ? 'text-emerald-400' : 'text-rose-400')}>
+                                {isIn ? '+' : '-'}{fmtShort(tx.amount)}
+                              </span>
+                              <span className="inline-flex items-center gap-0.5 px-1 py-0.5 rounded bg-amber-500/10 text-amber-400 text-[10px] mt-0.5 border border-amber-500/10 font-mono">
+                                <MethodIcon className="w-2.5 h-2.5" />
+                                {tx.method || 'cash'}
+                              </span>
+                            </td>
+                            <td className="px-2 py-2 text-right">
+                              <div className="flex flex-col items-end gap-0.5">
+                                <span className="text-xs text-slate-400 font-mono">{fmtDt(tx.timestamp)}</span>
+                                <div className="flex items-center gap-0.5">
+                                  {tx.synced ? (
+                                    <>
+                                      <Wifi className="w-2.5 h-2.5 text-emerald-500" />
+                                      <span className="text-[10px] text-emerald-500 font-bold">Synced</span>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <Database className="w-2.5 h-2.5 text-amber-500 animate-pulse" />
+                                      <span className="text-[10px] text-amber-500 font-bold">Wait</span>
+                                    </>
+                                  )}
+                                </div>
+                              </div>
+                            </td>
+                          </motion.tr>
+                        );
+                      })}
+                    </AnimatePresence>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* ── Mobile Cards ──────────────────────────────── */}
+            <div className="md:hidden space-y-2 max-h-[500px] overflow-y-auto pr-1">
+              {pageItems.map((tx) => {
+                const isIn = tx.type === 'IN';
+                const MethodIcon = PAYMENT_ICONS[tx.method] || DollarSign;
+                return (
+                  <motion.div
+                    key={tx.id}
+                    initial={{ opacity: 0, y: 4 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className={cn(
+                      'p-2.5 rounded-lg border',
+                      isDark ? 'bg-[#070503] border-[#2a1f0d]' : 'bg-gray-50 border-gray-200',
+                      !isIn && (isDark ? 'bg-rose-500/[0.03]' : 'bg-rose-50/30'),
+                    )}
+                  >
+                    <div className="flex items-center justify-between gap-2 mb-1.5">
+                      <span className={cn(
+                        'inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded font-bold text-[9px] uppercase border',
+                        isIn
+                          ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                          : 'bg-rose-500/10 text-rose-400 border-rose-500/20',
+                      )}>
+                        {isIn ? <ArrowDownRight className="w-2.5 h-2.5" /> : <ArrowUpRight className="w-2.5 h-2.5" />}
+                        {tx.type}
+                      </span>
+                      <span className={cn('text-xs font-bold font-mono',
+                        isIn ? 'text-emerald-400' : 'text-rose-400')}>
+                        {isIn ? '+' : '-'}{fmtShort(tx.amount)}
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-gray-300 truncate mb-1">{tx.description}</p>
+                    <div className="flex items-center justify-between text-[10px] text-slate-500">
+                      <span className="truncate">{tx.initiator} • {tx.branch}</span>
+                      <span>{fmtDt(tx.timestamp)}</span>
+                    </div>
+                    <div className="flex items-center gap-1 mt-1">
+                      <MethodIcon className="w-2.5 h-2.5 text-amber-400" />
+                      <span className="text-[9px] text-amber-400 font-mono uppercase">{tx.method || 'cash'}</span>
+                    </div>
+                  </motion.div>
+                );
+              })}
+            </div>
+
+            {/* ── Pagination ──────────────────────────────── */}
+            {pageCount > 1 && (
+              <div className="flex flex-col sm:flex-row items-center justify-between gap-2 mt-2.5 pt-2.5 border-t border-[#2a1f0d]/50">
+                <div className="flex items-center gap-2">
+                  <button disabled={page <= 1} onClick={() => setPage(p => Math.max(1, p - 1))}
+                    className="px-2.5 py-1 rounded-md bg-amber-500/10 text-amber-400 text-xs disabled:opacity-40 border border-amber-500/20">
+                    Prev
+                  </button>
+                  <button disabled={page >= pageCount} onClick={() => setPage(p => Math.min(pageCount, p + 1))}
+                    className="px-2.5 py-1 rounded-md bg-amber-500/10 text-amber-400 text-xs disabled:opacity-40 border border-amber-500/20">
+                    Next
+                  </button>
+                  <span className="text-[10px] text-gray-500">Page {page}/{pageCount}</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <label className="text-[10px] text-gray-500">Rows:</label>
+                  <select value={pageSize} onChange={e => { setPageSize(Number(e.target.value)); setPage(1); }}
+                    className={cn('rounded-md border px-2 py-0.5 text-xs',
+                      isDark ? 'bg-[#070503] border-[#2a1f0d] text-gray-200' : 'bg-white border-amber-100')}>
+                    {[25, 50, 100, 200].map(n => <option key={n} value={n}>{n}</option>)}
+                  </select>
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </motion.div>
+
+      {/* ── REGISTER MODAL ──────────────────────────────────── */}
       <AnimatePresence>
         {selectedRegister && (
           <motion.div
@@ -967,14 +1008,14 @@ const CashFlowMonitor = () => {
           >
             <motion.div
               initial={{ scale: 0.95, y: 16 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.95, y: 16 }}
-              className={cn('w-full max-w-md rounded-3xl border p-6 shadow-2xl relative',
+              className={cn('w-full max-w-md rounded-2xl border p-5 shadow-2xl relative',
                 isDark ? 'bg-[#0f0a05] border-[#2a1f0d]' : 'bg-white border-amber-200')}
             >
-              <div className="absolute top-0 inset-x-0 h-1 bg-gradient-to-r from-amber-400 to-amber-600 rounded-t-3xl" />
+              <div className="absolute top-0 inset-x-0 h-1 bg-gradient-to-r from-amber-400 to-amber-600 rounded-t-2xl" />
 
               <div className={cn('flex items-center justify-between pb-3 border-b mb-4',
                 isDark ? 'border-[#2a1f0d]' : 'border-amber-100')}>
-                <h3 className={cn('font-bold flex items-center gap-2',
+                <h3 className={cn('font-bold flex items-center gap-2 text-sm',
                   isDark ? 'text-white' : 'text-gray-900')}>
                   <Wallet className="w-5 h-5 text-amber-500" /> Register Verification
                 </h3>
@@ -984,44 +1025,44 @@ const CashFlowMonitor = () => {
                 </button>
               </div>
 
-              <div className="space-y-4 text-xs">
-                <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-3 text-xs">
+                <div className="grid grid-cols-2 gap-2">
                   {[
                     { label: 'Cashier', value: selectedRegister.name },
                     { label: 'Branch', value: selectedRegister.branch },
                     { label: 'Total Bills', value: selectedRegister.totalBills || 0 },
                     { label: 'Status', value: (selectedRegister.status || 'open').toUpperCase() },
                   ].map(f => (
-                    <div key={f.label} className={cn('p-3 rounded-xl border',
+                    <div key={f.label} className={cn('p-2.5 rounded-lg border',
                       isDark ? 'bg-[#070503] border-[#2a1f0d]' : 'bg-gray-50 border-gray-200')}>
                       <p className="text-[9px] text-gray-500 font-bold uppercase mb-1">{f.label}</p>
-                      <p className={cn('font-semibold', isDark ? 'text-gray-200' : 'text-gray-900')}>{f.value}</p>
+                      <p className={cn('font-semibold truncate', isDark ? 'text-gray-200' : 'text-gray-900')}>{f.value}</p>
                     </div>
                   ))}
                 </div>
 
-                <div className="grid grid-cols-2 gap-3">
-                  <div className={cn('p-4 rounded-xl border',
+                <div className="grid grid-cols-2 gap-2">
+                  <div className={cn('p-3 rounded-lg border',
                     isDark ? 'bg-emerald-500/5 border-emerald-500/20' : 'bg-emerald-50 border-emerald-200')}>
-                    <p className="text-[9px] text-emerald-500/70 font-bold uppercase mb-1">Cash Received</p>
-                    <p className="text-lg font-bold text-emerald-400 font-mono">{fmt(selectedRegister.cashReceived)}</p>
+                    <p className="text-[9px] text-emerald-500/70 font-bold uppercase mb-1">Cash</p>
+                    <p className="text-base font-bold text-emerald-400 font-mono">{fmt(selectedRegister.cashReceived)}</p>
                   </div>
-                  <div className={cn('p-4 rounded-xl border',
+                  <div className={cn('p-3 rounded-lg border',
                     isDark ? 'bg-blue-500/5 border-blue-500/20' : 'bg-blue-50 border-blue-200')}>
                     <p className="text-[9px] text-blue-500/70 font-bold uppercase mb-1">Digital</p>
-                    <p className="text-lg font-bold text-blue-400 font-mono">{fmt(selectedRegister.digitalReceived || 0)}</p>
+                    <p className="text-base font-bold text-blue-400 font-mono">{fmt(selectedRegister.digitalReceived || 0)}</p>
                   </div>
                 </div>
 
-                <div className="flex items-center gap-2 bg-emerald-500/5 border border-emerald-500/10 rounded-xl p-3 text-emerald-400 text-[10px]">
+                <div className="flex items-center gap-2 bg-emerald-500/5 border border-emerald-500/10 rounded-lg p-2.5 text-emerald-400 text-[10px]">
                   <CheckCircle2 className="w-4 h-4 shrink-0" />
                   Cashier registry synchronized with offline cache & Firestore
                 </div>
               </div>
 
-              <div className="mt-5">
-                <Button variant="primary" className="w-full rounded-xl" onClick={() => setSelectedRegister(null)}>
-                  Close Verification
+              <div className="mt-4">
+                <Button variant="primary" className="w-full rounded-lg" onClick={() => setSelectedRegister(null)}>
+                  Close
                 </Button>
               </div>
             </motion.div>

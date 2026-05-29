@@ -27,6 +27,9 @@ const _b64ToBuf = (b64) => {
 };
 
 const deriveKey = async (deviceId) => {
+  // If Web Crypto API is not available (e.g. older browsers or non-secure contexts),
+  // return null so callers can fallback to a plaintext-stored session.
+  if (typeof crypto === 'undefined' || !crypto.subtle) return null;
   const enc = new TextEncoder();
   const pass = enc.encode(deviceId || 'unknown_device');
   const salt = enc.encode(PBKDF_SALT);
@@ -38,6 +41,15 @@ const deriveKey = async (deviceId) => {
 const encrypt = async (obj) => {
   try {
     const key = await deriveKey(_getDeviceId());
+    // Fallback to plaintext storage when crypto is unavailable
+    if (!key) {
+      try {
+        return `PLAIN:${btoa(JSON.stringify(obj))}`;
+      } catch (e) {
+        console.warn('[sessionService] plaintext fallback failed:', e?.message || e);
+        return null;
+      }
+    }
     const iv = crypto.getRandomValues(new Uint8Array(12));
     const plain = new TextEncoder().encode(JSON.stringify(obj));
     const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, plain);
@@ -51,11 +63,16 @@ const encrypt = async (obj) => {
 const decrypt = async (payload) => {
   try {
     if (!payload) return null;
+    // Handle plaintext fallback
+    if (typeof payload === 'string' && payload.startsWith('PLAIN:')) {
+      try { return JSON.parse(atob(payload.slice(6))); } catch { return null; }
+    }
     const parts = payload.split(':');
     if (parts.length !== 2) return null;
     const iv = _b64ToBuf(parts[0]);
     const ct = _b64ToBuf(parts[1]);
     const key = await deriveKey(_getDeviceId());
+    if (!key) return null;
     const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: new Uint8Array(iv) }, key, ct);
     return JSON.parse(new TextDecoder().decode(plain));
   } catch (err) {

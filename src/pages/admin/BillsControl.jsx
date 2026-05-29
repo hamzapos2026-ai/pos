@@ -1,11 +1,10 @@
-// src/pages/admin/BillsControl.jsx
-// ✅ FIXED — 10k+ orders, pagination, sort, all filters
-import { useState, useEffect, useMemo, useCallback } from 'react';
+// File: src/pages/admin/BillsControl.jsx
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   ShoppingBag, Search, Eye, Trash2, RotateCcw, Download,
   Clock, FileText, CheckCircle2, Printer, Wifi, Database,
   AlertTriangle, FileCheck, Coins, ChevronUp, ChevronDown,
-  RefreshCw, X,
+  X, Filter, DollarSign, Check, RefreshCw, MoreVertical,
 } from 'lucide-react';
 import {
   collection, doc, updateDoc, deleteDoc,
@@ -15,14 +14,9 @@ import {
 import { db, isFirebaseReady } from '../../services/firebase';
 import toast from 'react-hot-toast';
 import { cn } from '../../utils/cn';
-import { useTheme } from '../../context/ThemeContext';
 import { motion, AnimatePresence } from 'framer-motion';
 import Button from '../../components/ui/Button';
-import Input from '../../components/ui/Input';
-import Badge from '../../components/ui/Badge';
-import PageHeader from '../../components/admin/PageHeader';
-import EmptyState from '../../components/admin/EmptyState';
-import StatCard from '../../components/admin/StatCard';
+import DataTable from '../../components/manager/DataTable';
 
 // ── Helpers ────────────────────────────────────────────────────
 const toDate = (v) => {
@@ -35,46 +29,189 @@ const toDate = (v) => {
   } else {
     d = new Date(v);
   }
-  if (d && !isNaN(d.getTime())) return d;
-  return new Date(0);
+  return d && !isNaN(d.getTime()) ? d : new Date(0);
 };
+
 const fmt = (v) => `Rs ${Number(v || 0).toLocaleString()}`;
-const PAGE = 50;
+
+// ── Status Badge ───────────────────────────────────────────────
+const StatusBadge = ({ variant, children }) => {
+  const variants = {
+    success: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/25',
+    warning: 'bg-amber-500/15   text-amber-400   border-amber-500/25',
+    destructive: 'bg-rose-500/15    text-rose-400    border-rose-500/25',
+    info: 'bg-blue-500/15    text-blue-400    border-blue-500/25',
+  };
+  return (
+    <span className={cn(
+      'inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-semibold border whitespace-nowrap',
+      variants[variant] || variants.info
+    )}>
+      {children}
+    </span>
+  );
+};
+
+// ── Stat Card ──────────────────────────────────────────────────
+const StatCard = ({ label, value, icon: Icon, color }) => (
+  <motion.div
+    initial={{ opacity: 0, scale: 0.95 }}
+    animate={{ opacity: 1, scale: 1 }}
+    className="relative overflow-hidden rounded-xl border border-[#2a1f0d] bg-gradient-to-br from-[#1a1208] to-[#0f0a05] p-3"
+  >
+    <div className={cn(
+      'absolute -top-8 -right-8 w-24 h-24 rounded-full blur-2xl opacity-20',
+      color === 'amber' && 'bg-amber-500',
+      color === 'green' && 'bg-emerald-500',
+      color === 'red' && 'bg-rose-500',
+      color === 'purple' && 'bg-violet-500',
+      color === 'blue' && 'bg-blue-500',
+    )} />
+    <div className="flex items-center justify-between relative">
+      <div className="min-w-0">
+        <p className="text-[9px] text-slate-500 font-medium uppercase tracking-wide truncate">{label}</p>
+        <p className="text-base sm:text-lg font-bold text-gray-100 mt-0.5">
+          {Number(value || 0).toLocaleString()}
+        </p>
+      </div>
+      <div className={cn(
+        'p-1.5 rounded-lg shrink-0',
+        color === 'amber' && 'bg-amber-500/15  text-amber-500',
+        color === 'green' && 'bg-emerald-500/15 text-emerald-500',
+        color === 'red' && 'bg-rose-500/15    text-rose-500',
+        color === 'purple' && 'bg-violet-500/15  text-violet-500',
+        color === 'blue' && 'bg-blue-500/15    text-blue-500',
+      )}>
+        <Icon className="w-3.5 h-3.5" />
+      </div>
+    </div>
+  </motion.div>
+);
+
+// ── Action Menu ────────────────────────────────────────────────
+const ActionMenu = ({ row, onView, onApprove, onMarkPaid, onReset, onSoftDelete, onHardDelete }) => {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+
+  useEffect(() => {
+    const handler = (e) => {
+      if (ref.current && !ref.current.contains(e.target)) setOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  const isDel = row.deleted || row.isDeleted;
+  const total = Number(row.grandTotal || row.totalAmount || row.total || 0);
+  const paid = Number(row.paidAmount || 0);
+  const hasOut = total - paid > 0;
+
+  return (
+    <div className="relative" ref={ref} onClick={(e) => e.stopPropagation()}>
+      <button
+        onClick={() => setOpen(!open)}
+        className="p-1 rounded bg-amber-500/10 text-amber-400 hover:bg-amber-500/20 transition-all border border-amber-500/20"
+      >
+        <MoreVertical className="w-3.5 h-3.5" />
+      </button>
+
+      <AnimatePresence>
+        {open && (
+          <motion.div
+            initial={{ opacity: 0, scale: 0.95, y: -4 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.95, y: -4 }}
+            transition={{ duration: 0.15 }}
+            className="absolute right-0 mt-1 w-48 rounded-xl border border-[#2a1f0d] bg-[#1a1208] shadow-xl z-50 overflow-hidden"
+          >
+            <div className="py-1 px-1">
+              <button
+                onClick={() => { setOpen(false); onView(); }}
+                className="w-full text-left px-2.5 py-1.5 text-xs text-slate-300 hover:bg-amber-500/10 hover:text-amber-400 rounded-lg transition-all flex items-center gap-2"
+              >
+                <Eye className="w-3.5 h-3.5 text-amber-500" /> View Details
+              </button>
+
+              {!isDel && (row.status === 'pending' || row.paymentStatus === 'unpaid' || !row.paymentStatus) && (
+                <button
+                  onClick={() => { setOpen(false); onApprove(); }}
+                  className="w-full text-left px-2.5 py-1.5 text-xs text-emerald-400 hover:bg-emerald-500/10 rounded-lg transition-all flex items-center gap-2"
+                >
+                  <Check className="w-3.5 h-3.5 text-emerald-500" /> Approve
+                </button>
+              )}
+
+              {!isDel && hasOut && (
+                <button
+                  onClick={() => { setOpen(false); onMarkPaid(); }}
+                  className="w-full text-left px-2.5 py-1.5 text-xs text-emerald-400 hover:bg-emerald-500/10 rounded-lg transition-all flex items-center gap-2"
+                >
+                  <Coins className="w-3.5 h-3.5 text-emerald-500" /> Mark Paid
+                </button>
+              )}
+
+              {!isDel && row.paymentStatus === 'paid' && (
+                <button
+                  onClick={() => { setOpen(false); onReset(); }}
+                  className="w-full text-left px-2.5 py-1.5 text-xs text-amber-400 hover:bg-amber-500/10 rounded-lg transition-all flex items-center gap-2"
+                >
+                  <RefreshCw className="w-3.5 h-3.5 text-amber-500" /> Reset Pending
+                </button>
+              )}
+
+              <div className="my-1 border-t border-[#2a1f0d]" />
+
+              {!isDel && (
+                <button
+                  onClick={() => { setOpen(false); onSoftDelete(); }}
+                  className="w-full text-left px-2.5 py-1.5 text-xs text-rose-400 hover:bg-rose-500/10 rounded-lg transition-all flex items-center gap-2"
+                >
+                  <Trash2 className="w-3.5 h-3.5 text-rose-500" /> Cancel Bill
+                </button>
+              )}
+
+              {isDel && (
+                <>
+                  <button
+                    onClick={() => { setOpen(false); onReset(); }}
+                    className="w-full text-left px-2.5 py-1.5 text-xs text-emerald-400 hover:bg-emerald-500/10 rounded-lg transition-all flex items-center gap-2"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5 text-emerald-500" /> Restore
+                  </button>
+                  <button
+                    onClick={() => { setOpen(false); onHardDelete(); }}
+                    className="w-full text-left px-2.5 py-1.5 text-xs text-rose-400 hover:bg-rose-500/10 rounded-lg transition-all flex items-center gap-2"
+                  >
+                    <Trash2 className="w-3.5 h-3.5 text-rose-500" /> Erase Forever
+                  </button>
+                </>
+              )}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+};
 
 const BillsControl = () => {
-  const { isDark } = useTheme();
-
-  // ── Data ───────────────────────────────────────────────────
-  const [bills,   setBills]   = useState([]);
+  const [bills, setBills] = useState([]);
   const [loading, setLoading] = useState(true);
-
-  // ── Filters ────────────────────────────────────────────────
-  const [search,        setSearch]        = useState('');
-  const [filter,        setFilter]        = useState('all');
-  const [dateFilter,    setDateFilter]    = useState('all');
-  const [branchFilter,  setBranchFilter]  = useState('all');
-  const [sortKey,       setSortKey]       = useState('date');
-  const [sortDir,       setSortDir]       = useState('desc');
-  const [page,          setPage]          = useState(1);
-
-  // ── Modals ─────────────────────────────────────────────────
-  const [selectedBill,     setSelectedBill]     = useState(null);
-  const [deleteTarget,     setDeleteTarget]     = useState(null);
-  const [deleteReason,     setDeleteReason]     = useState('');
+  const [search, setSearch] = useState('');
+  const [filter, setFilter] = useState('all');
+  const [dateFilter, setDateFilter] = useState('all');
+  const [branchFilter, setBranchFilter] = useState('all');
+  const [showFilters, setShowFilters] = useState(false);
+  const [selectedBill, setSelectedBill] = useState(null);
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [deleteReason, setDeleteReason] = useState('');
   const [submittingDelete, setSubmittingDelete] = useState(false);
+  const [loadingAction, setLoadingAction] = useState(null);
 
-  // ── Stream ─────────────────────────────────────────────────
   useEffect(() => {
     if (!isFirebaseReady() || !db) { setLoading(false); return; }
     setLoading(true);
-
-    // Load all orders (no limit for full data)
-    const q = query(
-      collection(db, 'orders'),
-      orderBy('createdAt', 'desc'),
-      limit(10000),
-    );
-
+    const q = query(collection(db, 'orders'), orderBy('createdAt', 'desc'), limit(10000));
     const unsub = onSnapshot(q, snap => {
       setBills(snap.docs.map(d => ({ id: d.id, ...d.data() })));
       setLoading(false);
@@ -82,49 +219,43 @@ const BillsControl = () => {
       console.error('[BillsControl]', err);
       setLoading(false);
     });
-
     return () => unsub();
   }, []);
 
-  // ── Branch list ────────────────────────────────────────────
   const branches = useMemo(() => {
     const s = new Set(bills.map(b => b.storeId || b.branchId).filter(Boolean));
-    return [...s];
+    return [...s].sort();
   }, [bills]);
 
-  // ── Stats ──────────────────────────────────────────────────
   const stats = useMemo(() => ({
-    total:   bills.length,
-    active:  bills.filter(b => !b.deleted && !b.isDeleted).length,
-    deleted: bills.filter(b =>  b.deleted ||  b.isDeleted).length,
+    total: bills.length,
+    active: bills.filter(b => !b.deleted && !b.isDeleted).length,
+    deleted: bills.filter(b => b.deleted || b.isDeleted).length,
     pending: bills.filter(b => !b.deleted && !b.isDeleted &&
-      (b.paymentStatus === 'unpaid' || b.paymentStatus === 'pending')).length,
+      (b.paymentStatus === 'unpaid' || b.paymentStatus === 'pending' || !b.paymentStatus)).length,
+    totalAmount: bills.filter(b => !b.deleted && !b.isDeleted)
+      .reduce((s, b) => s + Number(b.grandTotal || b.totalAmount || b.total || 0), 0),
   }), [bills]);
 
-  // ── Filter + Sort ──────────────────────────────────────────
   const filtered = useMemo(() => {
-    const today    = new Date(); today.setHours(0, 0, 0, 0);
-    const weekAgo  = new Date(today); weekAgo.setDate(weekAgo.getDate() - 7);
-    const monthAgo = new Date(today); monthAgo.setMonth(monthAgo.getMonth() - 1);
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const weekAgo = new Date(today); weekAgo.setDate(weekAgo.getDate() - 7);
+    const monAgo = new Date(today); monAgo.setMonth(monAgo.getMonth() - 1);
 
-    let list = bills.filter(b => {
+    return bills.filter(b => {
       const isDel = b.deleted || b.isDeleted;
-
-      if (filter === 'deleted' && !isDel)  return false;
-      if (filter === 'active'  &&  isDel)  return false;
+      if (filter === 'deleted' && !isDel) return false;
+      if (filter === 'active' && isDel) return false;
       if (filter === 'pending' && (isDel ||
-        (b.paymentStatus !== 'unpaid' && b.paymentStatus !== 'pending')))
-        return false;
+        (b.paymentStatus !== 'unpaid' && b.paymentStatus !== 'pending' && b.paymentStatus))) return false;
 
-      if (branchFilter !== 'all' &&
-        b.storeId !== branchFilter && b.branchId !== branchFilter)
-        return false;
+      if (branchFilter !== 'all' && b.storeId !== branchFilter && b.branchId !== branchFilter) return false;
 
       if (dateFilter !== 'all') {
         const d = toDate(b.createdAt);
-        if (dateFilter === 'today' && d < today)    return false;
-        if (dateFilter === 'week'  && d < weekAgo)  return false;
-        if (dateFilter === 'month' && d < monthAgo) return false;
+        if (dateFilter === 'today' && d < today) return false;
+        if (dateFilter === 'week' && d < weekAgo) return false;
+        if (dateFilter === 'month' && d < monAgo) return false;
       }
 
       if (search) {
@@ -138,119 +269,119 @@ const BillsControl = () => {
       }
       return true;
     });
+  }, [bills, search, filter, dateFilter, branchFilter]);
 
-    // Sort
-    list.sort((a, b) => {
-      let av, bv;
-      if (sortKey === 'date') {
-        av = toDate(a.createdAt).getTime();
-        bv = toDate(b.createdAt).getTime();
-      } else if (sortKey === 'amount') {
-        av = Number(a.grandTotal || a.totalAmount || 0);
-        bv = Number(b.grandTotal || b.totalAmount || 0);
-      } else if (sortKey === 'serial') {
-        av = (a.billSerial || '').toLowerCase();
-        bv = (b.billSerial || '').toLowerCase();
-      } else {
-        av = (a[sortKey] || '').toString().toLowerCase();
-        bv = (b[sortKey] || '').toString().toLowerCase();
-      }
-      if (av < bv) return sortDir === 'asc' ? -1 :  1;
-      if (av > bv) return sortDir === 'asc' ?  1 : -1;
-      return 0;
-    });
+  // ── Actions ────────────────────────────────────────────────
+  const handleApprove = useCallback(async (row) => {
+    if (!confirm('Approve this bill?')) return;
+    setLoadingAction(row.id);
+    try {
+      await updateDoc(doc(db, 'orders', row.id), {
+        status: 'approved',
+        approvedAt: serverTimestamp(),
+      });
+      toast.success('Bill approved ✓');
+    } catch (e) { toast.error(e.message); }
+    finally { setLoadingAction(null); }
+  }, []);
 
-    return list;
-  }, [bills, search, filter, dateFilter, branchFilter, sortKey, sortDir]);
+  const handleMarkPaid = useCallback(async (row) => {
+    if (!confirm('Mark as Paid?')) return;
+    const total = Number(row.grandTotal || row.totalAmount || row.total || 0);
+    setLoadingAction(row.id);
+    try {
+      await updateDoc(doc(db, 'orders', row.id), {
+        paymentStatus: 'paid',
+        paidAmount: total,
+        outstandingAmount: 0,
+        paidAt: serverTimestamp(),
+      });
+      toast.success('Marked as Paid ✓');
+    } catch (e) { toast.error(e.message); }
+    finally { setLoadingAction(null); }
+  }, []);
 
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE));
-  const paginated  = useMemo(
-    () => filtered.slice((page - 1) * PAGE, page * PAGE),
-    [filtered, page],
-  );
+  const handleRestore = useCallback(async (row) => {
+    setLoadingAction(row.id);
+    try {
+      await updateDoc(doc(db, 'orders', row.id), {
+        deleted: false,
+        isDeleted: false,
+        restoredAt: serverTimestamp(),
+        paymentStatus: 'unpaid',
+      });
+      toast.success(`Bill restored ✓`);
+    } catch (e) { toast.error(e.message); }
+    finally { setLoadingAction(null); }
+  }, []);
 
-  useEffect(() => setPage(1),
-    [search, filter, dateFilter, branchFilter, sortKey, sortDir]);
+  const handleResetPending = useCallback(async (row) => {
+    if (!confirm('Reset to Pending?')) return;
+    const total = Number(row.grandTotal || row.totalAmount || row.total || 0);
+    setLoadingAction(row.id);
+    try {
+      await updateDoc(doc(db, 'orders', row.id), {
+        paymentStatus: 'unpaid',
+        paidAmount: 0,
+        outstandingAmount: total,
+        status: 'pending',
+      });
+      toast.success('Reset ✓');
+    } catch (e) { toast.error(e.message); }
+    finally { setLoadingAction(null); }
+  }, []);
 
-  const handleSort = (k) => {
-    if (sortKey === k) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
-    else { setSortKey(k); setSortDir('desc'); }
-  };
-
-  const SortIcon = ({ k }) => sortKey === k
-    ? sortDir === 'asc'
-      ? <ChevronUp   className="w-3 h-3 inline ml-0.5" />
-      : <ChevronDown className="w-3 h-3 inline ml-0.5" />
-    : null;
-
-  // ── Soft Delete ────────────────────────────────────────────
   const executeSoftDelete = useCallback(async () => {
-    if (!deleteTarget || !deleteReason.trim()) {
-      toast.error('Reason required'); return;
-    }
+    if (!deleteTarget || !deleteReason.trim()) { toast.error('Reason required'); return; }
     setSubmittingDelete(true);
     try {
       await updateDoc(doc(db, 'orders', deleteTarget.id), {
-        deleted: true, isDeleted: true,
+        deleted: true,
+        isDeleted: true,
         deletedAt: serverTimestamp(),
         deleteReason: deleteReason.trim(),
         cancelReason: deleteReason.trim(),
         status: 'cancelled',
         paymentStatus: 'deleted',
       });
-      // Audit log
       await addDoc(collection(db, 'auditLogs'), {
-        action: 'SOFT_DELETE', billId: deleteTarget.id,
+        action: 'SOFT_DELETE',
+        billId: deleteTarget.id,
         billSerial: deleteTarget.serial,
         reason: deleteReason.trim(),
         timestamp: serverTimestamp(),
-      }).catch(() => {});
-      toast.success(`Bill ${deleteTarget.serial} cancelled`);
-      setDeleteTarget(null); setDeleteReason('');
-    } catch (e) {
-      toast.error(e.message);
-    } finally { setSubmittingDelete(false); }
+      }).catch(() => { });
+      toast.success(`Bill cancelled`);
+      setDeleteTarget(null);
+      setDeleteReason('');
+    } catch (e) { toast.error(e.message); }
+    finally { setSubmittingDelete(false); }
   }, [deleteTarget, deleteReason]);
 
-  // ── Hard Delete ────────────────────────────────────────────
   const executeHardDelete = useCallback(async () => {
-    if (!deleteTarget || !deleteReason.trim()) {
-      toast.error('Reason required'); return;
-    }
+    if (!deleteTarget || !deleteReason.trim()) { toast.error('Reason required'); return; }
     setSubmittingDelete(true);
     try {
       const target = bills.find(b => b.id === deleteTarget.id);
       if (target) {
         await addDoc(collection(db, 'deletedBills'), {
-          ...target, deletedAt: serverTimestamp(),
+          ...target,
+          deletedAt: serverTimestamp(),
           hardDeleteReason: deleteReason.trim(),
-        }).catch(() => {});
+        }).catch(() => { });
       }
       await deleteDoc(doc(db, 'orders', deleteTarget.id));
-      toast.success(`Bill ${deleteTarget.serial} permanently deleted`);
-      setDeleteTarget(null); setDeleteReason('');
-    } catch (e) {
-      toast.error(e.message);
-    } finally { setSubmittingDelete(false); }
+      toast.success(`Permanently deleted`);
+      setDeleteTarget(null);
+      setDeleteReason('');
+    } catch (e) { toast.error(e.message); }
+    finally { setSubmittingDelete(false); }
   }, [deleteTarget, deleteReason, bills]);
 
-  // ── Restore ────────────────────────────────────────────────
-  const handleRestore = useCallback(async (b) => {
-    try {
-      await updateDoc(doc(db, 'orders', b.id), {
-        deleted: false, isDeleted: false,
-        restoredAt: serverTimestamp(),
-        paymentStatus: 'unpaid',
-      });
-      toast.success(`Bill ${b.billSerial || b.id.slice(0, 8)} restored`);
-    } catch (e) { toast.error(e.message); }
-  }, []);
-
-  // ── Export ─────────────────────────────────────────────────
   const handleExport = useCallback(() => {
-    if (!filtered.length) return;
+    if (!filtered.length) { toast.error('No data'); return; }
     const rows = filtered.map(b => [
-      b.billSerial || b.id.slice(0, 8),
+      b.billSerial || b.serialNo || b.id.slice(0, 8),
       b.storeId || 'Main',
       b.customer?.name || 'Walk-in',
       b.customer?.phone || '',
@@ -260,429 +391,438 @@ const BillsControl = () => {
       b.billerName || '',
     ].map(v => `"${String(v).replace(/"/g, '""')}"`).join(','));
 
-    const csv  = `data:text/csv;charset=utf-8,\uFEFFBill#,Branch,Customer,Phone,Amount,Status,Date,Biller\n${rows.join('\n')}`;
+    const csv = `data:text/csv;charset=utf-8,\uFEFFBill#,Branch,Customer,Phone,Amount,Status,Date,Biller\n${rows.join('\n')}`;
     const link = document.createElement('a');
-    link.href  = encodeURI(csv);
+    link.href = encodeURI(csv);
     link.download = `bills_${Date.now()}.csv`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
-    toast.success('Exported successfully');
+    toast.success('Exported ✓');
   }, [filtered]);
 
-  // ── Th helper ──────────────────────────────────────────────
-  const Th = ({ label, k, end, center }) => (
-    <th
-      onClick={() => handleSort(k)}
-      className={cn(
-        'px-4 py-3.5 font-semibold cursor-pointer select-none whitespace-nowrap text-xs',
-        end ? 'text-end' : center ? 'text-center' : 'text-start',
-      )}
-    >
-      {label}<SortIcon k={k} />
-    </th>
-  );
-
-  // ── RENDER ─────────────────────────────────────────────────
-  return (
-    <div className="p-4 sm:p-6 max-w-[1600px] mx-auto space-y-6">
-
-      <PageHeader
-        icon={ShoppingBag}
-        title="Bills Control Center"
-        description={`${bills.length.toLocaleString()} total orders loaded`}
-        actions={
-          <Button variant="primary"
-            leftIcon={<Download className="w-4 h-4" />}
-            onClick={handleExport}
-            disabled={!filtered.length}>
-            Export Registry
-          </Button>
-        }
-      />
-
-      {/* Stats */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-4">
-        <StatCard label="Total Bills"    value={stats.total}   icon={ShoppingBag} color="amber" />
-        <StatCard label="Active"         value={stats.active}  icon={FileCheck}   color="green" />
-        <StatCard label="Pending"        value={stats.pending} icon={Coins}       color="rose"  />
-        <StatCard label="Soft Deleted"   value={stats.deleted} icon={AlertTriangle} color="purple" />
-      </div>
-
-      {/* Filter bar */}
-      <div className={cn(
-        'rounded-2xl border p-4 flex flex-col lg:flex-row gap-3',
-        isDark ? 'bg-[#0f0a05] border-[#2a1f0d]' : 'bg-white border-amber-200',
-      )}>
-        <Input
-          value={search}
-          onChange={e => setSearch(e.target.value)}
-          placeholder="Search serial, customer, phone, biller..."
-          leftIcon={<Search className="w-4 h-4" />}
-          className="flex-1"
-        />
-        <div className="flex flex-wrap gap-2">
-          {/* Branch */}
-          <select value={branchFilter} onChange={e => setBranchFilter(e.target.value)}
-            className={cn('rounded-xl border px-3 py-2 text-xs outline-none',
-              isDark ? 'bg-[#0a0805] border-[#2a1f0d] text-white' : 'bg-white border-amber-200 text-gray-900')}>
-            <option value="all">All Branches</option>
-            {branches.map(b => (
-              <option key={b} value={b}>{b.slice(0, 14)}...</option>
-            ))}
-          </select>
-          {/* Date */}
-          <select value={dateFilter} onChange={e => setDateFilter(e.target.value)}
-            className={cn('rounded-xl border px-3 py-2 text-xs outline-none',
-              isDark ? 'bg-[#0a0805] border-[#2a1f0d] text-white' : 'bg-white border-amber-200 text-gray-900')}>
-            <option value="all">All Time</option>
-            <option value="today">Today</option>
-            <option value="week">Past 7 Days</option>
-            <option value="month">Past 30 Days</option>
-          </select>
-          {/* Status */}
-          <select value={filter} onChange={e => setFilter(e.target.value)}
-            className={cn('rounded-xl border px-3 py-2 text-xs outline-none',
-              isDark ? 'bg-[#0a0805] border-[#2a1f0d] text-white' : 'bg-white border-amber-200 text-gray-900')}>
-            <option value="all">All Statuses</option>
-            <option value="active">Active</option>
-            <option value="deleted">Deleted</option>
-            <option value="pending">Pending</option>
-          </select>
-
-          <p className={cn('self-center text-xs whitespace-nowrap px-1',
-            isDark ? 'text-gray-500' : 'text-gray-400')}>
-            {filtered.length.toLocaleString()} records
+  // ── COMPACT Columns — fit screen ──────────────────────────
+  const columns = useMemo(() => [
+    {
+      label: 'Serial',
+      field: 'billSerial',
+      width: '95px',
+      sortable: true,
+      sortValue: (row) => row.billSerial || row.serialNo || row.id,
+      render: (row) => (
+        <div className="min-w-0">
+          <p className="font-mono font-semibold text-[15px] text-gray-100 truncate leading-tight">
+            {(row.billSerial || row.serialNo || row.id.slice(0, 8) || '').slice(-12)}
+          </p>
+          <p className="text-[15px] text-slate-500 mt-0.5">
+            {toDate(row.createdAt).toLocaleDateString('en-PK', { day: '2-digit', month: 'short' })}
           </p>
         </div>
+      ),
+    },
+    {
+      label: 'Customer',
+      field: 'customerName',
+      width: '110px',
+      sortable: true,
+      sortValue: (row) => row.customer?.name || row.customerName || 'Walk-in',
+      render: (row) => (
+        <div className="min-w-0">
+          <p className="text-[15px] font-medium text-gray-200 truncate">
+            {row.customer?.name || row.customerName || 'Walk-in'}
+          </p>
+          {row.customer?.phone && (
+            <p className="text-[15px] text-slate-500 font-mono truncate">{row.customer.phone}</p>
+          )}
+        </div>
+      ),
+    },
+    {
+      label: 'Biller',
+      field: 'billerName',
+      width: '70px',
+      sortable: true,
+      sortValue: (row) => row.billerName || row.cashierName || '',
+      render: (row) => (
+        <span className="text-[14px] text-slate-400 truncate block">
+          {row.billerName || row.cashierName || '—'}
+        </span>
+      ),
+    },
+    {
+      label: 'Amount',
+      field: 'grandTotal',
+      width: '80px',
+      sortable: true,
+      align: 'right',
+      sortValue: (row) => Number(row.grandTotal || row.totalAmount || row.total || 0),
+      render: (row) => (
+        <span className="text-[14px] font-semibold text-gray-100 font-mono">
+          {fmt(row.grandTotal || row.totalAmount || row.total)}
+        </span>
+      ),
+    },
+    {
+      label: 'Payment',
+      field: 'paymentStatus',
+      width: '80px',
+      sortable: true,
+      sortValue: (row) => row.deleted || row.isDeleted ? 'deleted' : (row.paymentStatus || 'unpaid'),
+      render: (row) => {
+        const isDel = row.deleted || row.isDeleted;
+        if (isDel) return <StatusBadge variant="destructive">DELETED</StatusBadge>;
+        if (row.paymentStatus === 'paid') return <StatusBadge variant="success">PAID</StatusBadge>;
+        return <StatusBadge variant="warning">{row.paymentStatus?.toUpperCase() || 'UNPAID'}</StatusBadge>;
+      },
+    },
+    {
+      label: 'Sync',
+      field: 'synced',
+      width: '60px',
+      sortable: false,
+      render: (row) => (
+        row.synced !== false ? (
+          <div className="flex items-center gap-1">
+            <Wifi className="w-2.5 h-2.5 text-emerald-500" />
+            <span className="text-[13px] text-emerald-500">OK</span>
+          </div>
+        ) : (
+          <div className="flex items-center gap-1">
+            <Database className="w-2.5 h-2.5 text-amber-500 animate-pulse" />
+            <span className="text-[13px] text-amber-500">Wait</span>
+          </div>
+        )
+      ),
+    },
+    {
+      label: '',
+      width: '40px',
+      sortable: false,
+      align: 'right',
+      render: (row) => {
+        if (loadingAction === row.id) {
+          return (
+            <div className="flex justify-end">
+              <motion.div animate={{ rotate: 360 }} transition={{ repeat: Infinity, duration: 1, ease: 'linear' }}>
+                <RefreshCw className="w-3.5 h-3.5 text-amber-500" />
+              </motion.div>
+            </div>
+          );
+        }
+        const isDel = row.deleted || row.isDeleted;
+        const serial = row.billSerial || row.id.slice(0, 8);
+        return (
+          <ActionMenu
+            row={row}
+            onView={() => setSelectedBill(row)}
+            onApprove={() => handleApprove(row)}
+            onMarkPaid={() => handleMarkPaid(row)}
+            onReset={() => isDel ? handleRestore(row) : handleResetPending(row)}
+            onSoftDelete={() => setDeleteTarget({ id: row.id, type: 'soft', serial })}
+            onHardDelete={() => setDeleteTarget({ id: row.id, type: 'hard', serial })}
+          />
+        );
+      },
+    },
+  ], [loadingAction, handleApprove, handleMarkPaid, handleRestore, handleResetPending]);
+
+  const mobileCard = useCallback((row) => {
+    const isDel = row.deleted || row.isDeleted;
+    const total = Number(row.grandTotal || row.totalAmount || row.total || 0);
+    const paid = Number(row.paidAmount || 0);
+    const out = total - paid;
+    return (
+      <motion.div
+        initial={{ opacity: 0, y: 4 }}
+        animate={{ opacity: 1, y: 0 }}
+        onClick={() => setSelectedBill(row)}
+        className="p-2.5 rounded-lg border border-[#2a1f0d] bg-gradient-to-br from-[#1a1208] to-[#0f0a05] hover:border-amber-500/30 cursor-pointer transition-all"
+      >
+        <div className="flex items-center justify-between gap-2 mb-1.5">
+          <span className="text-[11px] font-semibold text-gray-100 font-mono truncate">
+            {(row.billSerial || row.serialNo || row.id.slice(0, 8) || '').slice(-12)}
+          </span>
+          {isDel
+            ? <StatusBadge variant="destructive">Deleted</StatusBadge>
+            : row.paymentStatus === 'paid'
+              ? <StatusBadge variant="success">Paid</StatusBadge>
+              : <StatusBadge variant="warning">{row.paymentStatus?.toUpperCase() || 'UNPAID'}</StatusBadge>
+          }
+        </div>
+        <p className="text-[11px] text-gray-300 truncate mb-1">
+          {row.customer?.name || row.customerName || 'Walk-in'}
+        </p>
+        <div className="flex items-center justify-between text-[10px]">
+          <span className="text-gray-200 font-medium font-mono">{fmt(total)}</span>
+          {out > 0 && !isDel && (
+            <span className="text-rose-400 font-medium">Due {fmt(out)}</span>
+          )}
+        </div>
+      </motion.div>
+    );
+  }, []);
+
+  return (
+    <div className="p-2 sm:p-3 lg:p-4 max-w-[1600px] mx-auto space-y-3">
+
+      {/* ── Header ─────────────────────────────────────────────── */}
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+        <div>
+          <h1 className="text-base sm:text-lg font-bold text-gray-100 flex items-center gap-2">
+            <ShoppingBag className="w-4 h-4 text-amber-500" />
+            Bills Control Center
+            {loading && <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />}
+          </h1>
+          <p className="text-[10px] text-slate-500 mt-0.5">
+            {bills.length.toLocaleString()} orders • {filtered.length.toLocaleString()} shown
+          </p>
+        </div>
+        <Button
+          variant="primary"
+          leftIcon={<Download className="w-4 h-4" />}
+          onClick={handleExport}
+          disabled={!filtered.length}
+        >
+          Export CSV
+        </Button>
       </div>
 
-      {/* Table */}
-      {loading ? (
-        <div className="text-center py-16">
-          <RefreshCw className="w-8 h-8 animate-spin mx-auto mb-3 text-amber-500" />
-          <p className="text-sm text-gray-500">Loading orders...</p>
-        </div>
-      ) : filtered.length === 0 ? (
-        <EmptyState icon={ShoppingBag} title="No bills found"
-          description="Adjust filters or check connection" />
-      ) : (
-        <>
-          <div className={cn(
-            'rounded-2xl border overflow-hidden shadow-lg',
-            isDark ? 'bg-[#0f0a05] border-[#2a1f0d]' : 'bg-white border-amber-200',
-          )}>
-            <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
-              <table className="w-full text-xs">
-                <thead className={cn(
-                  'sticky top-0 z-10',
-                  isDark ? 'bg-[#1a1208] text-gray-400' : 'bg-amber-50 text-gray-600',
-                )}>
-                  <tr>
-                    <Th label="Serial"   k="serial"   />
-                    <Th label="Customer" k="customer" />
-                    <Th label="Biller"   k="billerName" />
-                    <Th label="Amount"   k="amount" end />
-                    <Th label="Status"   k="paymentStatus" center />
-                    <Th label="Date"     k="date"    />
-                    <th className="px-4 py-3.5 text-center font-semibold">Sync</th>
-                    <th className="px-4 py-3.5 text-end font-semibold">Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {paginated.map(b => {
-                    const isDel = b.deleted || b.isDeleted;
-                    return (
-                      <tr key={b.id} className={cn(
-                        'border-t transition-colors',
-                        isDark
-                          ? 'border-[#2a1f0d] hover:bg-[#1a1208]/60'
-                          : 'border-amber-100 hover:bg-amber-50/50',
-                        isDel && 'opacity-60 bg-rose-500/[0.03]',
-                      )}>
-                        {/* Serial */}
-                        <td className={cn('px-4 py-3 font-mono font-bold',
-                          isDark ? 'text-gray-200' : 'text-gray-800')}>
-                          {b.billSerial || b.serialNo || b.id.slice(0, 8)}
-                        </td>
+      {/* ── Stats ──────────────────────────────────────────────── */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
+        <StatCard label="Total" value={stats.total} icon={ShoppingBag} color="amber" />
+        <StatCard label="Active" value={stats.active} icon={FileCheck} color="green" />
+        <StatCard label="Pending" value={stats.pending} icon={Clock} color="red" />
+        <StatCard label="Deleted" value={stats.deleted} icon={AlertTriangle} color="purple" />
+        <StatCard label="Total Value" value={stats.totalAmount} icon={DollarSign} color="blue" />
+      </div>
 
-                        {/* Customer */}
-                        <td className="px-4 py-3">
-                          <p className={cn('font-semibold',
-                            isDark ? 'text-gray-200' : 'text-gray-800')}>
-                            {b.customer?.name || b.customerName || 'Walk-in'}
-                          </p>
-                          <p className="text-[10px] text-gray-500 font-mono">
-                            {b.customer?.phone || '—'}
-                          </p>
-                        </td>
-
-                        {/* Biller */}
-                        <td className={cn('px-4 py-3',
-                          isDark ? 'text-gray-400' : 'text-gray-600')}>
-                          {b.billerName || b.cashierName || '—'}
-                        </td>
-
-                        {/* Amount */}
-                        <td className={cn('px-4 py-3 text-end font-bold font-mono',
-                          isDark ? 'text-white' : 'text-gray-900')}>
-                          {fmt(b.grandTotal || b.totalAmount || b.total)}
-                        </td>
-
-                        {/* Status */}
-                        <td className="px-4 py-3 text-center">
-                          <Badge variant={
-                            isDel ? 'destructive'
-                              : b.paymentStatus === 'paid' ? 'success'
-                              : 'warning'
-                          }>
-                            {isDel ? 'Deleted'
-                              : (b.paymentStatus || 'unpaid').toUpperCase()}
-                          </Badge>
-                        </td>
-
-                        {/* Date */}
-                        <td className={cn('px-4 py-3 whitespace-nowrap',
-                          isDark ? 'text-gray-400' : 'text-gray-500')}>
-                          <span className="flex items-center gap-1">
-                            <Clock className="w-3 h-3" />
-                            {toDate(b.createdAt).toLocaleDateString('en-PK')}
-                          </span>
-                        </td>
-
-                        {/* Sync */}
-                        <td className="px-4 py-3 text-center">
-                          {b.synced !== false
-                            ? <Wifi     className="w-4 h-4 text-emerald-500 inline" />
-                            : <Database className="w-4 h-4 text-amber-500 inline animate-pulse" />}
-                        </td>
-
-                        {/* Actions */}
-                        <td className="px-4 py-3 text-end">
-                          <div className="inline-flex gap-1">
-                            <button onClick={() => setSelectedBill(b)}
-                              className="p-1.5 rounded-lg hover:bg-amber-500/10 text-amber-500">
-                              <Eye className="w-4 h-4" />
-                            </button>
-                            {isDel ? (
-                              <>
-                                <button onClick={() => handleRestore(b)}
-                                  className="p-1.5 rounded-lg hover:bg-emerald-500/10 text-emerald-500">
-                                  <RotateCcw className="w-4 h-4" />
-                                </button>
-                                <button onClick={() => setDeleteTarget({
-                                  id: b.id, type: 'hard',
-                                  serial: b.billSerial || b.id.slice(0, 8),
-                                })}
-                                  className="p-1.5 rounded-lg hover:bg-rose-500/10 text-rose-500">
-                                  <Trash2 className="w-4 h-4" />
-                                </button>
-                              </>
-                            ) : (
-                              <button onClick={() => setDeleteTarget({
-                                id: b.id, type: 'soft',
-                                serial: b.billSerial || b.id.slice(0, 8),
-                              })}
-                                className="p-1.5 rounded-lg hover:bg-rose-500/10 text-rose-400">
-                                <Trash2 className="w-4 h-4" />
-                              </button>
-                            )}
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-
-            {/* Footer */}
-            <div className={cn(
-              'px-4 py-3 border-t text-xs flex items-center justify-between',
-              isDark ? 'border-[#2a1f0d] text-gray-500' : 'border-amber-100 text-gray-400',
-            )}>
-              <span>
-                Page {page}/{totalPages} •{' '}
-                {filtered.length.toLocaleString()} filtered •{' '}
-                {bills.length.toLocaleString()} total
-              </span>
-              {totalPages > 1 && (
-                <div className="flex items-center gap-1">
-                  <button disabled={page === 1}
-                    onClick={() => setPage(p => p - 1)}
-                    className="px-2 py-1 rounded hover:bg-amber-500/10 disabled:opacity-30">
-                    ←
-                  </button>
-                  {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
-                    let p = page <= 3 ? i + 1
-                      : page >= totalPages - 2 ? totalPages - 4 + i
-                      : page - 2 + i;
-                    p = Math.max(1, Math.min(totalPages, p));
-                    return (
-                      <button key={p} onClick={() => setPage(p)}
-                        className={cn(
-                          'w-7 h-7 rounded text-xs font-medium transition-colors',
-                          page === p
-                            ? 'bg-amber-500 text-white'
-                            : 'hover:bg-amber-500/10',
-                        )}>
-                        {p}
-                      </button>
-                    );
-                  })}
-                  <button disabled={page === totalPages}
-                    onClick={() => setPage(p => p + 1)}
-                    className="px-2 py-1 rounded hover:bg-amber-500/10 disabled:opacity-30">
-                    →
-                  </button>
-                </div>
-              )}
-            </div>
+      {/* ── Filter Bar ─────────────────────────────────────────── */}
+      <div className="rounded-xl border border-[#2a1f0d] bg-gradient-to-br from-[#1a1208] to-[#0f0a05] p-2.5">
+        <div className="flex flex-col sm:flex-row gap-2 mb-2">
+          <div className="flex-1 relative">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-500" />
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search..."
+              className="w-full pl-8 pr-3 py-1.5 text-xs bg-[#0f0a05] border border-[#2a1f0d] rounded-lg text-gray-200 placeholder-slate-500 outline-none focus:border-amber-500/50"
+            />
           </div>
-        </>
-      )}
-
-      {/* ── Delete Modal ──────────────────────────────────── */}
-      <AnimatePresence>
-        {deleteTarget && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center
-                          bg-black/80 backdrop-blur-sm p-4">
-            <motion.div
-              initial={{ scale: 0.95, opacity: 0 }}
-              animate={{ scale: 1,    opacity: 1 }}
-              exit={{   scale: 0.95, opacity: 0 }}
+          <div className="flex gap-2">
+            <button
+              onClick={() => setShowFilters(!showFilters)}
               className={cn(
-                'w-full max-w-md rounded-3xl border p-6 shadow-2xl relative overflow-hidden',
-                isDark ? 'bg-[#0f0a05] border-[#2a1f0d]' : 'bg-white border-amber-200',
+                'flex items-center gap-1 px-2.5 py-1.5 rounded-lg border text-xs font-medium',
+                showFilters
+                  ? 'bg-amber-500/10 border-amber-500/30 text-amber-400'
+                  : 'bg-[#0f0a05] border-[#2a1f0d] text-slate-400'
               )}
             >
-              <div className="absolute top-0 inset-x-0 h-1 bg-rose-500" />
-              <div className="flex items-center gap-2 text-rose-500 font-bold mb-3">
-                <AlertTriangle className="w-5 h-5 animate-pulse" />
-                <h3>{deleteTarget.type === 'hard'
-                  ? 'Permanent Delete' : 'Cancel Bill'}</h3>
+              <Filter className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Filters</span>
+              {showFilters ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+            </button>
+            {(search || filter !== 'all' || dateFilter !== 'all' || branchFilter !== 'all') && (
+              <button
+                onClick={() => { setSearch(''); setFilter('all'); setDateFilter('all'); setBranchFilter('all'); }}
+                className="flex items-center justify-center p-1.5 text-slate-500 hover:text-rose-400"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            )}
+          </div>
+        </div>
+
+        <AnimatePresence>
+          {showFilters && (
+            <motion.div
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: 'auto', opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              className="overflow-hidden"
+            >
+              <div className="flex flex-wrap gap-2 pt-2 border-t border-[#2a1f0d]">
+                <select
+                  value={branchFilter}
+                  onChange={(e) => setBranchFilter(e.target.value)}
+                  className="bg-[#0f0a05] border border-[#2a1f0d] text-gray-200 text-xs px-2 py-1.5 rounded-lg outline-none focus:border-amber-500/50"
+                >
+                  <option value="all">All Branches</option>
+                  {branches.map(b => (
+                    <option key={b} value={b}>{b.length > 14 ? b.slice(0, 14) + '…' : b}</option>
+                  ))}
+                </select>
+                <select
+                  value={dateFilter}
+                  onChange={(e) => setDateFilter(e.target.value)}
+                  className="bg-[#0f0a05] border border-[#2a1f0d] text-gray-200 text-xs px-2 py-1.5 rounded-lg outline-none focus:border-amber-500/50"
+                >
+                  <option value="all">All Time</option>
+                  <option value="today">Today</option>
+                  <option value="week">7 Days</option>
+                  <option value="month">30 Days</option>
+                </select>
+                <select
+                  value={filter}
+                  onChange={(e) => setFilter(e.target.value)}
+                  className="bg-[#0f0a05] border border-[#2a1f0d] text-gray-200 text-xs px-2 py-1.5 rounded-lg outline-none focus:border-amber-500/50"
+                >
+                  <option value="all">All Statuses</option>
+                  <option value="active">Active</option>
+                  <option value="deleted">Deleted</option>
+                  <option value="pending">Pending</option>
+                </select>
               </div>
-              <p className={cn('text-xs mb-4 leading-relaxed',
-                isDark ? 'text-gray-400' : 'text-gray-600')}>
-                Action on Bill <strong>#{deleteTarget.serial}</strong> will be
-                logged to immutable audit registers.
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        <div className="flex items-center justify-between text-[10px] text-slate-500 mt-2 pt-2 border-t border-[#2a1f0d]">
+          <span>{filtered.length.toLocaleString()} records</span>
+          <span>Loaded: {bills.length.toLocaleString()}</span>
+        </div>
+      </div>
+
+      {/* ── Data Table ─────────────────────────────────────────── */}
+      <div className="w-full overflow-hidden">
+        <DataTable
+          columns={columns}
+          data={filtered}
+          loading={loading}
+          emptyMessage="No bills found"
+          emptySubtext="Check connection or filters"
+          rowKey="id"
+          onRowClick={(row) => setSelectedBill(row)}
+          mobileCardRenderer={mobileCard}
+          pageSize={50}
+          enableVirtualization={true}
+          virtualizationThreshold={50}
+          maxHeight="600px"
+          className="rounded-xl border border-[#2a1f0d] overflow-hidden w-full"
+        />
+      </div>
+
+      {/* ── Delete Modal ───────────────────────────────────────── */}
+      <AnimatePresence>
+        {deleteTarget && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="w-full max-w-md rounded-2xl border border-[#2a1f0d] bg-gradient-to-b from-[#1a1208] to-[#0f0a05] p-5 shadow-2xl"
+            >
+              <div className="flex items-center gap-2 pb-3 border-b border-[#2a1f0d] mb-4">
+                <AlertTriangle className="w-5 h-5 text-rose-500" />
+                <h3 className="text-sm font-semibold text-gray-100">
+                  {deleteTarget.type === 'hard' ? 'Permanent Delete' : 'Cancel Bill'}
+                </h3>
+              </div>
+              <p className="text-xs text-slate-400 mb-4">
+                Action on <strong className="text-gray-200">#{deleteTarget.serial}</strong> will be logged.
               </p>
               <textarea
                 value={deleteReason}
-                onChange={e => setDeleteReason(e.target.value)}
-                placeholder="Enter justification reason..."
+                onChange={(e) => setDeleteReason(e.target.value)}
+                placeholder="Enter reason..."
                 rows={3}
-                className={cn(
-                  'w-full rounded-2xl border p-3 text-xs outline-none resize-none mb-4',
-                  isDark
-                    ? 'bg-[#070503] border-[#2a1f0d] text-white'
-                    : 'bg-amber-50 border-amber-200 text-gray-900',
-                )}
+                className="w-full rounded-xl border border-[#2a1f0d] bg-[#0f0a05] p-3 text-xs text-gray-200 placeholder-slate-500 outline-none focus:border-rose-500/50 mb-4 resize-none"
               />
               <div className="flex gap-2">
-                <Button variant="secondary" className="flex-1 rounded-xl"
+                <Button
+                  variant="secondary"
+                  className="flex-1"
                   disabled={submittingDelete}
-                  onClick={() => { setDeleteTarget(null); setDeleteReason(''); }}>
+                  onClick={() => { setDeleteTarget(null); setDeleteReason(''); }}
+                >
                   Cancel
                 </Button>
-                <Button
-                  className="flex-1 rounded-xl font-bold bg-rose-500 hover:bg-rose-600 text-white"
+                <button
                   disabled={!deleteReason.trim() || submittingDelete}
-                  onClick={deleteTarget.type === 'hard'
-                    ? executeHardDelete : executeSoftDelete}>
-                  {submittingDelete ? 'Processing...'
-                    : deleteTarget.type === 'hard'
-                      ? 'Erase Forever' : 'Confirm Cancel'}
-                </Button>
+                  onClick={deleteTarget.type === 'hard' ? executeHardDelete : executeSoftDelete}
+                  className="flex-1 rounded-xl bg-rose-500 hover:bg-rose-600 py-2.5 text-xs font-semibold text-white disabled:opacity-40"
+                >
+                  {submittingDelete
+                    ? 'Processing...'
+                    : deleteTarget.type === 'hard' ? 'Erase Forever' : 'Confirm'
+                  }
+                </button>
               </div>
             </motion.div>
           </div>
         )}
       </AnimatePresence>
 
-      {/* ── Bill Detail Drawer ────────────────────────────── */}
+      {/* ── Bill Detail Drawer — LARGE READABLE RECEIPT ───────── */}
       <AnimatePresence>
         {selectedBill && (
-          <div className="fixed inset-0 z-50 flex items-center justify-end
-                          bg-black/75 backdrop-blur-sm">
+          <div className="fixed inset-0 z-50 flex items-center justify-end bg-black/75 backdrop-blur-sm">
             <motion.div
               initial={{ x: '100%' }}
               animate={{ x: 0 }}
-              exit={{   x: '100%' }}
+              exit={{ x: '100%' }}
               transition={{ type: 'spring', damping: 28, stiffness: 220 }}
-              className={cn(
-                'w-full max-w-lg h-full p-6 shadow-2xl flex flex-col',
-                isDark
-                  ? 'bg-[#0f0a05] border-l border-[#2a1f0d]'
-                  : 'bg-white border-l border-amber-200',
-              )}
+              className="w-full max-w-md sm:max-w-xl h-full flex flex-col bg-gradient-to-b from-[#1a1208] to-[#0f0a05] border-l border-[#2a1f0d] shadow-2xl"
             >
               {/* Header */}
-              <div className={cn(
-                'flex items-center justify-between pb-4 border-b mb-4 shrink-0',
-                isDark ? 'border-[#2a1f0d]' : 'border-amber-100',
-              )}>
+              <div className="flex items-center justify-between p-4 border-b border-[#2a1f0d] shrink-0">
                 <div className="flex items-center gap-2">
                   <FileText className="w-5 h-5 text-amber-500" />
-                  <h3 className={cn('font-bold text-sm',
-                    isDark ? 'text-white' : 'text-gray-900')}>
-                    Receipt Details
-                  </h3>
+                  <h3 className="text-sm font-semibold text-gray-100">Receipt Details</h3>
                 </div>
                 <div className="flex gap-1">
-                  <button onClick={() => window.print()}
-                    className="p-1.5 rounded-lg text-gray-400 hover:text-amber-500
-                               hover:bg-amber-500/10 transition-colors">
+                  <button
+                    onClick={() => window.print()}
+                    className="p-1.5 rounded-lg text-slate-400 hover:text-amber-500 hover:bg-amber-500/10 transition-all"
+                  >
                     <Printer className="w-4 h-4" />
                   </button>
-                  <button onClick={() => setSelectedBill(null)}
-                    className="p-1.5 rounded-lg text-gray-400 hover:text-gray-300
-                               hover:bg-white/5 transition-colors">
+                  <button
+                    onClick={() => setSelectedBill(null)}
+                    className="p-1.5 rounded-lg text-slate-400 hover:text-gray-200 hover:bg-[#2a1f0d] transition-all"
+                  >
                     <X className="w-4 h-4" />
                   </button>
                 </div>
               </div>
 
-              {/* Body */}
-              <div className="flex-1 overflow-y-auto space-y-5 pr-1">
+              {/* Scrollable Body */}
+              <div className="flex-1 overflow-y-auto p-4 sm:p-5 space-y-4">
 
-                {/* Thermal receipt */}
-                <div className="bg-white text-gray-900 p-5 rounded-2xl
-                                border-4 border-dashed border-gray-300
-                                mx-auto max-w-[340px] font-mono shadow-inner">
-                  <div className="text-center space-y-0.5 mb-4">
-                    <h4 className="font-bold text-base">A-ONE JEWELRY</h4>
-                    <p className="text-[10px] text-gray-500">Tariq Road Gold Bazar, Karachi</p>
-                    <p className="text-[9px] text-gray-500">PH: 0316-2502498</p>
-                    <div className="border-b border-dashed border-gray-300 pt-1" />
+                {/* ─── LARGER RECEIPT — readable ───────────────── */}
+                <div className="bg-white text-gray-900 p-5 rounded-xl border-4 border-dashed border-gray-300 mx-auto max-w-[400px] font-mono shadow-inner">
+
+                  <div className="text-center space-y-1 mb-4">
+                    <h4 className="font-bold text-xl">A-ONE JEWELRY</h4>
+                    <p className="text-xs text-gray-600">Tariq Road Gold Bazar, Karachi</p>
+                    <p className="text-xs text-gray-600">PH: 0316-2502498</p>
+                    <div className="border-b-2 border-dashed border-gray-400 pt-1.5" />
                   </div>
 
-                  <div className="space-y-1 text-[9px] text-gray-700 mb-3">
-                    <p>Bill No: <strong>
-                      {selectedBill.billSerial || selectedBill.serialNo || selectedBill.id.slice(0, 10)}
-                    </strong></p>
-                    <p>Date: {toDate(selectedBill.createdAt).toLocaleString('en-PK')}</p>
-                    <p>Cashier: {selectedBill.billerName || selectedBill.cashierName || '—'}</p>
-                    <p>Customer: {selectedBill.customer?.name || 'Walk-in'}</p>
-                    <p>Phone: {selectedBill.customer?.phone || '—'}</p>
-                    <div className="border-b border-dashed border-gray-300 py-0.5" />
+                  <div className="space-y-1.5 text-sm text-gray-800 mb-4">
+                    <p><strong>Bill No:</strong> {selectedBill.billSerial || selectedBill.serialNo || selectedBill.id?.slice(0, 10)}</p>
+                    <p><strong>Date:</strong> {toDate(selectedBill.createdAt).toLocaleString('en-PK')}</p>
+                    <p><strong>Cashier:</strong> {selectedBill.billerName || selectedBill.cashierName || '—'}</p>
+                    <p><strong>Customer:</strong> {selectedBill.customer?.name || 'Walk-in'}</p>
+                    <p><strong>Phone:</strong> {selectedBill.customer?.phone || '—'}</p>
+                    <div className="border-b-2 border-dashed border-gray-400 pt-1" />
                   </div>
 
-                  {/* Items */}
-                  <div className="space-y-2 mb-3 text-[9px]">
-                    <div className="flex justify-between font-bold text-black">
+                  <div className="space-y-2.5 mb-4">
+                    <div className="flex justify-between font-bold text-black text-sm">
                       <span>Item</span><span>Total</span>
                     </div>
-                    <div className="border-b border-dashed border-gray-300" />
+                    <div className="border-b border-dashed border-gray-400" />
                     {(selectedBill.items || []).map((item, i) => (
-                      <div key={i} className="space-y-0.5 text-gray-800">
-                        <div className="flex justify-between font-semibold">
-                          <span className="truncate max-w-[150px]">
+                      <div key={i} className="space-y-1 text-gray-800">
+                        <div className="flex justify-between font-semibold text-sm">
+                          <span className="truncate max-w-[200px]">
                             {item.productName || `Item #${item.serialId || i + 1}`}
                           </span>
                           <span>{fmt(item.total || item.price * item.qty)}</span>
                         </div>
-                        <div className="text-gray-500 flex justify-between">
+                        <div className="text-xs text-gray-600 flex justify-between">
                           <span>{item.qty} × {fmt(item.price)}</span>
                           {item.discount > 0 && <span>-{item.discount}%</span>}
                         </div>
@@ -690,13 +830,12 @@ const BillsControl = () => {
                     ))}
                   </div>
 
-                  <div className="border-b border-dashed border-gray-300 mb-2" />
+                  <div className="border-b-2 border-dashed border-gray-400 mb-3" />
 
-                  {/* Totals */}
-                  <div className="space-y-1 text-[10px] text-black mb-3">
+                  <div className="space-y-1.5 text-sm text-black mb-4">
                     <div className="flex justify-between">
                       <span>Subtotal:</span>
-                      <span>{fmt(selectedBill.subtotal)}</span>
+                      <span className="font-medium">{fmt(selectedBill.subtotal)}</span>
                     </div>
                     {Number(selectedBill.totalDiscount) > 0 && (
                       <div className="flex justify-between text-rose-600">
@@ -704,81 +843,61 @@ const BillsControl = () => {
                         <span>-{fmt(selectedBill.totalDiscount)}</span>
                       </div>
                     )}
-                    <div className="flex justify-between font-bold border-t
-                                    border-dashed border-gray-300 pt-1 text-xs">
+                    <div className="flex justify-between font-bold border-t-2 border-dashed border-gray-400 pt-1.5 text-base">
                       <span>Grand Total:</span>
                       <span>{fmt(selectedBill.grandTotal || selectedBill.totalAmount)}</span>
                     </div>
-                    <div className="border-b border-dashed border-gray-300 py-0.5" />
+                    <div className="border-b border-dashed border-gray-400 py-0.5" />
                     <div className="flex justify-between">
                       <span>Received:</span>
-                      <span>{fmt(selectedBill.amountReceived)}</span>
+                      <span className="font-medium">{fmt(selectedBill.amountReceived)}</span>
                     </div>
                     <div className="flex justify-between">
                       <span>Change:</span>
-                      <span>{fmt(selectedBill.changeGiven)}</span>
+                      <span className="font-medium">{fmt(selectedBill.changeGiven)}</span>
                     </div>
                   </div>
 
-                  <div className="text-center text-[9px] text-gray-500
-                                  border-t border-dashed border-gray-300 pt-2 space-y-1">
-                    <p className="font-bold">22K Gold Purity Certified</p>
+                  <div className="text-center text-xs text-gray-600 border-t-2 border-dashed border-gray-400 pt-3 space-y-1">
+                    <p className="font-bold text-sm">22K Gold Purity Certified</p>
                     <p>Thank you for your purchase!</p>
                   </div>
                 </div>
 
-                {/* Audit panel */}
+                {/* Audit Info */}
                 <div className="space-y-3">
-                  <h4 className={cn('text-[9px] font-bold uppercase tracking-wider',
-                    isDark ? 'text-gray-400' : 'text-gray-500')}>
-                    Audit Information
-                  </h4>
-                  <div className="grid grid-cols-2 gap-2 text-[10px]">
+                  <h4 className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Audit Information</h4>
+                  <div className="grid grid-cols-2 gap-2 text-[11px]">
                     {[
-                      { label: 'Store ID',   value: selectedBill.storeId || '—'             },
-                      { label: 'Source',     value: (selectedBill.source || 'biller').toUpperCase() },
-                      { label: 'Payment',    value: selectedBill.paymentType || selectedBill.paymentMethod || '—' },
-                      { label: 'Sync',       value: selectedBill.synced !== false ? '✅ Synced' : '⏳ Pending' },
+                      { label: 'Store ID', value: selectedBill.storeId || '—' },
+                      { label: 'Source', value: (selectedBill.source || 'biller').toUpperCase() },
+                      { label: 'Payment', value: selectedBill.paymentType || selectedBill.paymentMethod || '—' },
+                      { label: 'Sync', value: selectedBill.synced !== false ? '✅ Synced' : '⏳ Pending' },
                     ].map(f => (
-                      <div key={f.label} className={cn(
-                        'p-2.5 rounded-xl border',
-                        isDark ? 'bg-[#070503] border-[#2a1f0d]' : 'bg-gray-50 border-gray-200',
-                      )}>
-                        <p className="text-[8px] text-gray-500 font-bold uppercase mb-1">
-                          {f.label}
-                        </p>
-                        <p className={cn('font-semibold truncate',
-                          isDark ? 'text-gray-300' : 'text-gray-800')}>
-                          {f.value}
-                        </p>
+                      <div key={f.label} className="p-2.5 rounded-lg border border-[#2a1f0d] bg-[#070503]">
+                        <p className="text-[9px] text-slate-500 font-bold uppercase mb-1">{f.label}</p>
+                        <p className="font-medium text-gray-300 truncate">{f.value}</p>
                       </div>
                     ))}
                   </div>
 
                   {selectedBill.deleteReason && (
-                    <div className="bg-rose-500/5 p-3 rounded-2xl border
-                                    border-rose-500/20 text-[10px]">
-                      <p className="text-[8px] text-rose-400 font-bold uppercase mb-1">
-                        Delete Reason
-                      </p>
-                      <p className={cn('font-mono', isDark ? 'text-rose-300' : 'text-rose-700')}>
-                        {selectedBill.deleteReason}
-                      </p>
+                    <div className="bg-rose-500/5 p-3 rounded-lg border border-rose-500/20 text-xs">
+                      <p className="text-[9px] text-rose-400 font-bold uppercase mb-1">Delete Reason</p>
+                      <p className="font-mono text-rose-300">{selectedBill.deleteReason}</p>
                     </div>
                   )}
 
-                  <div className="flex items-center justify-center gap-1.5 py-2
-                                  text-emerald-500 text-[10px] bg-emerald-500/5
-                                  rounded-xl border border-emerald-500/10">
+                  <div className="flex items-center justify-center gap-1.5 py-2 text-emerald-500 text-[11px] bg-emerald-500/5 rounded-lg border border-emerald-500/10">
                     <CheckCircle2 className="w-3.5 h-3.5" />
                     Transaction locked in sync registry
                   </div>
                 </div>
               </div>
 
-              <div className="mt-4 shrink-0">
-                <Button variant="primary" className="w-full rounded-xl"
-                  onClick={() => setSelectedBill(null)}>
+              {/* Footer */}
+              <div className="p-4 shrink-0 border-t border-[#2a1f0d]">
+                <Button variant="primary" className="w-full" onClick={() => setSelectedBill(null)}>
                   Close
                 </Button>
               </div>

@@ -45,12 +45,19 @@ export const getRelativeTime = (timestamp) => {
 
 // Get payment status of bill
 export const getBillPaymentStatus = (bill) => {
+    if (!bill) return { status: 'empty', label: 'Empty', color: 'gray' };
+    const isCancelled = bill.status === 'cancelled' || bill.deleted || bill.isDeleted;
+    if (isCancelled) return { status: 'cancelled', label: 'Cancelled', color: 'red' };
+
     const total = Number(bill.totalAmount || bill.total || 0);
     const paid = Number(bill.paidAmount || 0);
     const outstanding = total - paid;
 
     if (total === 0) return { status: 'empty', label: 'Empty', color: 'gray' };
-    if (outstanding <= 0) return { status: PAYMENT_STATUS.paid, label: 'Paid', color: 'green' };
+    if (outstanding <= 0) {
+        const isApproved = bill.status === 'completed' || bill.status === 'approved' || bill.status === 'manager_approved';
+        return { status: PAYMENT_STATUS.paid, label: isApproved ? 'Manager Paid' : 'Cashier Paid', color: 'green' };
+    }
     if (paid > 0) return { status: PAYMENT_STATUS.partial, label: 'Partial', color: 'orange' };
     return { status: PAYMENT_STATUS.unpaid, label: 'Unpaid', color: 'red' };
 };
@@ -60,6 +67,8 @@ export const getBillStatusInfo = (status) => {
     const map = {
         [BILL_STATUS.draft]: { label: 'Draft', color: 'gray', bg: 'bg-gray-500/15', text: 'text-gray-400' },
         [BILL_STATUS.completed]: { label: 'Approved', color: 'green', bg: 'bg-green-500/15', text: 'text-green-400' },
+        'approved': { label: 'Approved', color: 'green', bg: 'bg-green-500/15', text: 'text-green-400' },
+        'manager_approved': { label: 'Approved', color: 'green', bg: 'bg-green-500/15', text: 'text-green-400' },
         [BILL_STATUS.synced]: { label: 'Synced', color: 'blue', bg: 'bg-blue-500/15', text: 'text-blue-400' },
         [BILL_STATUS.pending]: { label: 'Pending Manager', color: 'orange', bg: 'bg-orange-500/15', text: 'text-orange-400' },
         [BILL_STATUS.pending_superadmin]: { label: 'Pending Super Admin', color: 'yellow', bg: 'bg-yellow-500/15', text: 'text-yellow-400' },

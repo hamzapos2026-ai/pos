@@ -2,9 +2,12 @@ import { useState, useEffect, useMemo } from 'react';
 import { 
   HardDrive, Download, Upload, FileSpreadsheet, FileText, AlertTriangle, 
   Trash2, Search, Wifi, Database, Check, X, ShieldAlert, 
-  Clock, Server, RefreshCw, FileCode, ServerCrash, Activity
+  Clock, Server, RefreshCw, FileCode, ServerCrash, Activity, Archive
 } from 'lucide-react';
-import { collection, doc, onSnapshot, setDoc, deleteDoc, serverTimestamp, db, isFirebaseReady } from '../../services/firebase';
+import { 
+  collection, doc, onSnapshot, setDoc, deleteDoc, serverTimestamp, db, 
+  isFirebaseReady, query, where, getDocs, writeBatch 
+} from '../../services/firebase';
 import toast from 'react-hot-toast';
 import { cn } from '../../utils/cn';
 import { useTheme } from '../../context/ThemeContext';
@@ -38,6 +41,8 @@ const BackupExport = () => {
   const [exporting, setExporting] = useState(false);
   const [syncQueueCount, setSyncQueueCount] = useState(0);
   const [cacheStats, setCacheStats] = useState(null);
+  const [archivingMonth, setArchivingMonth] = useState('');
+  const [isArchiving, setIsArchiving] = useState(false);
 
   // Search & Filters
   const [search, setSearch] = useState('');
@@ -328,6 +333,102 @@ const BackupExport = () => {
     }
   };
 
+  // Archive and Clear dashboard data for selected month
+  const handleArchiveAndClear = async () => {
+    if (!archivingMonth) {
+      toast.error('Please select a month range to archive.');
+      return;
+    }
+    
+    if (!isOnline) {
+      toast.error('You must be online to archive cloud data.');
+      return;
+    }
+    
+    if (!confirm(`⚠️ DANGER: Are you absolutely sure you want to Archive & Clear active dashboard data for ${archivingMonth}?\n\nThis will hide these bills from all Cashier, Manager, and Super Admin active dashboards, but they will still be stored in Firebase and visible in historical Reports & Cashflow!`)) {
+      return;
+    }
+    
+    setIsArchiving(true);
+    const toastId = toast.loading(`Archiving orders for ${archivingMonth}...`);
+    
+    try {
+      // 1. Fetch active orders in Firebase
+      const q = query(
+        collection(db, 'orders'),
+        where('isActiveOrder', '==', true)
+      );
+      const snap = await getDocs(q);
+      
+      if (snap.empty) {
+        toast.success(`No active orders found to archive for ${archivingMonth}`, { id: toastId });
+        setIsArchiving(false);
+        return;
+      }
+      
+      const ordersToArchive = snap.docs.filter(d => {
+        const order = d.data();
+        const savedAt = order.savedAt || order.createdAt || '';
+        return savedAt.startsWith(archivingMonth);
+      });
+      
+      if (ordersToArchive.length === 0) {
+        toast.success(`No active orders found starting with ${archivingMonth}`, { id: toastId });
+        setIsArchiving(false);
+        return;
+      }
+      
+      // 2. Perform write batch to update isActiveOrder: false and isArchived: true
+      const batch = writeBatch(db);
+      for (const d of ordersToArchive) {
+        batch.update(d.ref, {
+          isActiveOrder: false,
+          isArchived: true,
+          archivedAt: new Date().toISOString(),
+          archivedBy: user?.email || 'System Admin',
+        });
+      }
+      await batch.commit();
+      
+      // 3. Update local IndexedDB so they disappear there too
+      if (localDB?.orders) {
+        try {
+          const localArr = await localDB.orders.toArray();
+          for (const lo of localArr) {
+            const savedAt = lo.savedAt || lo.createdAt || '';
+            if (savedAt.startsWith(archivingMonth)) {
+              await localDB.orders.update(lo.localId || lo.id, {
+                isActiveOrder: false,
+                isArchived: true,
+              });
+            }
+          }
+        } catch (idbErr) {
+          console.warn('[ArchiveAndClear] Dexie update failed:', idbErr);
+        }
+      }
+      
+      // 4. Log Admin activity securely
+      await logActivity(
+        'database:archive_and_clear',
+        userData?.uid || 'unknown',
+        userData?.primaryStore || 'default',
+        {
+          month: archivingMonth,
+          count: ordersToArchive.length,
+        }
+      );
+      
+      toast.success(`Successfully archived ${ordersToArchive.length} bills for ${archivingMonth}! Dashboard cleared.`, { id: toastId });
+      setArchivingMonth('');
+    } catch (e) {
+      console.error(e);
+      toast.error(`Archiving failed: ${e.message || String(e)}`, { id: toastId });
+    } finally {
+      setIsArchiving(false);
+    }
+  };
+
   return (
     <div className="p-4 sm:p-6 max-w-[1600px] mx-auto space-y-6">
       {/* Header */}
@@ -455,6 +556,54 @@ const BackupExport = () => {
           >
             Coming Soon
           </Button>
+        </div>
+      </div>
+
+      {/* Archive & Clear Dashboard Data */}
+      <div className={cn(
+        'p-6 rounded-2xl border transition-all duration-300',
+        isDark ? 'bg-[#0f0a05] border-[#2a1f0d]' : 'bg-white border-amber-100'
+      )}>
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6">
+          <div className="flex items-start gap-4">
+            <div className="w-12 h-12 rounded-xl bg-amber-500/10 text-amber-500 flex items-center justify-center flex-shrink-0">
+              <Archive className="w-6 h-6" />
+            </div>
+            <div>
+              <h3 className={cn('font-bold text-base mb-1', isDark ? 'text-white' : 'text-gray-900')}>
+                Archive & Clear Active Dashboard Data
+              </h3>
+              <p className="text-xs text-gray-500 max-w-2xl leading-relaxed">
+                Purge completed or old processed orders of a selected month from active dashboards to maintain maximum performance. Old records will be flagged as archived: they will disappear from cashier, manager, and super admin active lists, but will remain 100% saved in cloud databases for historical Reports and Cashflow.
+              </p>
+            </div>
+          </div>
+          
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-end gap-3 flex-shrink-0 lg:w-[420px]">
+            <div className="flex-1">
+              <label className={cn('block text-[10px] font-bold uppercase tracking-wider mb-1.5', isDark ? 'text-gray-500' : 'text-gray-400')}>
+                Select Target Month
+              </label>
+              <input
+                type="month"
+                value={archivingMonth}
+                onChange={(e) => setArchivingMonth(e.target.value)}
+                className={cn(
+                  'w-full px-3 py-2 text-xs rounded-xl border font-medium bg-transparent cursor-pointer transition-all outline-none font-mono',
+                  isDark ? 'border-[#2a1f0d] text-white hover:border-amber-500/30' : 'border-amber-200 text-gray-900 hover:border-amber-500'
+                )}
+              />
+            </div>
+            <Button
+              variant="primary"
+              onClick={handleArchiveAndClear}
+              disabled={isArchiving || !archivingMonth}
+              leftIcon={<Archive className="w-4 h-4" />}
+              className="px-6 font-semibold"
+            >
+              {isArchiving ? 'Archiving...' : 'Archive & Clear'}
+            </Button>
+          </div>
         </div>
       </div>
 

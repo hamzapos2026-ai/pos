@@ -82,73 +82,306 @@ const Reports = () => {
   const columns = useMemo(() => {
     switch (reportType) {
       case 'sales': return [
-        { label: 'Serial', field: 'serialNo', render: r => <span className="text-xs font-medium">{r.serialNo || r.billSerial || (r.localId || '').slice(-8)}</span> },
-        { label: 'Customer', field: 'customerName', render: r => <span className="text-xs">{r.customer?.name || r.customerName || 'Walk-in'}</span> },
-        { label: 'Biller', field: 'billerName', render: r => <span className="text-xs text-gray-400">{r.billerName || r.billerId || '—'}</span> },
-        { label: 'Total', field: 'totalAmount', align: 'right', render: r => <span className="text-sm font-semibold">{formatPKR(r.totalAmount || r.total)}</span> },
-        { label: 'Paid', field: 'paidAmount', align: 'right', render: r => <span className="text-sm text-green-400">{formatPKR(r.paidAmount || 0)}</span> },
-        { label: 'Date', field: 'savedAt', render: r => <span className="text-[10px] text-gray-500">{getRelativeTime(r.savedAt)}</span> },
+        { 
+          label: 'Serial / Date', 
+          field: 'serialNo', 
+          render: r => (
+            <div>
+              <span className="text-xs font-semibold font-mono text-gray-200 block truncate max-w-[120px]">
+                {r.serialNo || r.billSerial || (r.localId || '').slice(-8)}
+              </span>
+              <span className="text-[11px] text-slate-400 block mt-0.5">
+                {getRelativeTime(r.savedAt || r.createdAt)}
+              </span>
+            </div>
+          ) 
+        },
+        { 
+          label: 'Customer / Biller', 
+          field: 'customerName', 
+          render: r => (
+            <div>
+              <span className="text-xs text-slate-300 font-medium block truncate max-w-[120px]">
+                {r.customer?.name || r.customerName || 'Walk-in'}
+              </span>
+              <span className="text-[11px] text-slate-400 block mt-0.5 truncate max-w-[100px]">
+                Biller: {r.billerName || r.billerId || '—'}
+              </span>
+            </div>
+          ) 
+        },
+        { 
+          label: 'Financials (Total / Paid)', 
+          field: 'totalAmount', 
+          align: 'right', 
+          render: r => (
+            <div className="text-right">
+              <span className="text-xs font-bold text-gray-200 block font-mono">
+                {formatPKR(r.totalAmount || r.total)}
+              </span>
+              <span className="text-[11px] text-emerald-400 block font-mono mt-0.5">
+                Paid: {formatPKR(r.paidAmount || 0)}
+              </span>
+            </div>
+          ) 
+        },
       ];
       case 'expense': return [
-        { label: 'Category', field: 'category', render: r => <span className="text-xs capitalize">{r.category}</span> },
-        { label: 'Description', field: 'description', render: r => <span className="text-xs text-gray-400">{r.description}</span> },
-        { label: 'Amount', field: 'amount', align: 'right', render: r => <span className="text-sm font-semibold text-orange-400">{formatPKR(r.amount)}</span> },
-        { label: 'Status', field: 'status', render: r => <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-400">{r.status}</span> },
-        { label: 'Date', field: 'date', render: r => <span className="text-[10px] text-gray-500">{getRelativeTime(r.date || r.createdAt)}</span> },
+        { 
+          label: 'Category', 
+          field: 'category', 
+          width: '90px',
+          render: r => <span className="text-xs font-bold capitalize text-amber-500">{r.category}</span> 
+        },
+        { 
+          label: 'Description / Date', 
+          field: 'description', 
+          render: r => (
+            <div>
+              <p className="text-xs text-slate-300 line-clamp-2">{r.description || '—'}</p>
+              <span className="text-[9px] text-slate-500 block mt-0.5">
+                {getRelativeTime(r.date || r.createdAt)}
+              </span>
+            </div>
+          ) 
+        },
+        { 
+          label: 'Amount / Status', 
+          field: 'amount', 
+          align: 'right', 
+          width: '120px',
+          render: r => (
+            <div className="text-right">
+              <span className="text-xs font-bold text-orange-400 font-mono block">
+                {formatPKR(r.amount)}
+              </span>
+              <span className="text-[9px] px-1.5 py-0.2 rounded bg-amber-500/10 text-amber-400 border border-amber-500/10 font-bold inline-block mt-0.5">
+                {r.status}
+              </span>
+            </div>
+          ) 
+        },
       ];
       case 'credit': return [
-        { label: 'Bill', field: 'serialNo', render: r => <span className="text-xs">{r.serialNo || (r.localId || '').slice(-8)}</span> },
-        { label: 'Customer', field: 'customerName', render: r => <span className="text-xs">{r.customer?.name || r.customerName || 'Walk-in'}</span> },
-        { label: 'Total', field: 'totalAmount', align: 'right', render: r => <span className="text-sm">{formatPKR(r.totalAmount)}</span> },
-        { label: 'Paid', field: 'paidAmount', align: 'right', render: r => <span className="text-sm text-green-400">{formatPKR(r.paidAmount || 0)}</span> },
-        {
-          label: 'Outstanding', align: 'right',
-          render: r => <span className="text-sm font-bold text-red-400">{formatPKR(Number(r.totalAmount || 0) - Number(r.paidAmount || 0))}</span>,
+        { 
+          label: 'Bill / Date', 
+          field: 'serialNo', 
+          render: r => (
+            <div>
+              <span className="text-xs font-semibold font-mono text-gray-200 block">
+                {r.serialNo || (r.localId || '').slice(-8)}
+              </span>
+              <span className="text-[9px] text-slate-500 block mt-0.5">
+                {getRelativeTime(r.savedAt || r.createdAt)}
+              </span>
+            </div>
+          ) 
+        },
+        { 
+          label: 'Customer', 
+          field: 'customerName', 
+          render: r => (
+            <div>
+              <p className="text-xs text-slate-300 font-medium truncate max-w-[120px]">
+                {r.customer?.name || r.customerName || 'Walk-in'}
+              </p>
+              <p className="text-[9px] text-slate-500 font-mono mt-0.5">
+                {r.customer?.phone || '—'}
+              </p>
+            </div>
+          ) 
+        },
+        { 
+          label: 'Financials (Total / Due)', 
+          align: 'right', 
+          render: r => {
+            const out = Number(r.totalAmount || 0) - Number(r.paidAmount || 0);
+            return (
+              <div className="text-right">
+                <span className="text-xs font-bold text-gray-200 font-mono block">
+                  {formatPKR(r.totalAmount)}
+                </span>
+                <span className="text-[10px] text-rose-400 font-bold font-mono block mt-0.5">
+                  Due: {formatPKR(out)}
+                </span>
+              </div>
+            );
+          }
         },
       ];
       case 'cash': return [
-        { label: 'Type', field: 'type', render: r => <span className="text-xs capitalize">{r.type}</span> },
-        { label: 'Amount', field: 'amount', align: 'right', render: r => <span className="text-sm font-semibold">{formatPKR(r.amount)}</span> },
-        { label: 'Reason', field: 'reason', render: r => <span className="text-xs text-gray-400">{r.reason}</span> },
-        { label: 'Branch', field: 'storeId', render: r => <span className="text-[10px] text-gray-500">{r.storeId}</span> },
-        { label: 'Date', field: 'createdAt', render: r => <span className="text-[10px] text-gray-500">{getRelativeTime(r.createdAt)}</span> },
+        { 
+          label: 'Type / Branch', 
+          field: 'type', 
+          width: '100px',
+          render: r => (
+            <div>
+              <span className="text-xs font-bold capitalize text-amber-500 block">{r.type}</span>
+              <span className="text-[9px] text-slate-500 font-mono block mt-0.5 truncate max-w-[80px]">
+                {r.storeId || '—'}
+              </span>
+            </div>
+          )
+        },
+        { 
+          label: 'Reason / Date', 
+          field: 'reason', 
+          render: r => (
+            <div>
+              <p className="text-xs text-slate-300 line-clamp-2">{r.reason || '—'}</p>
+              <span className="text-[9px] text-slate-500 block mt-0.5">
+                {getRelativeTime(r.createdAt)}
+              </span>
+            </div>
+          )
+        },
+        { 
+          label: 'Amount', 
+          field: 'amount', 
+          align: 'right', 
+          width: '90px',
+          render: r => <span className="text-xs font-bold text-gray-100 font-mono">{formatPKR(r.amount)}</span> 
+        },
       ];
       case 'commission': return [
-        { label: 'Salesperson', field: 'name', render: r => <span className="text-xs font-medium">{r.name || r.displayName || r.email}</span> },
-        { label: 'Earned', field: 'commissionEarned', align: 'right', render: r => <span className="text-sm text-green-400">{formatPKR(r.commissionEarned || 0)}</span> },
-        { label: 'Pending', field: 'commissionPending', align: 'right', render: r => <span className="text-sm text-orange-400">{formatPKR(r.commissionPending || 0)}</span> },
-        { label: 'Paid', field: 'commissionPaid', align: 'right', render: r => <span className="text-sm text-blue-400">{formatPKR(r.commissionPaid || 0)}</span> },
+        { 
+          label: 'Salesperson', 
+          field: 'name', 
+          render: r => <span className="text-xs font-bold text-gray-200">{r.name || r.displayName || r.email}</span> 
+        },
+        { 
+          label: 'Commission (Earned / Pending / Paid)', 
+          field: 'commissionEarned', 
+          align: 'right', 
+          render: r => (
+            <div className="text-right">
+              <span className="text-xs font-bold text-green-400 font-mono block">
+                Earned: {formatPKR(r.commissionEarned || 0)}
+              </span>
+              <div className="flex gap-2 justify-end text-[10px] mt-0.5 font-mono">
+                <span className="text-orange-400">Pend: {formatPKR(r.commissionPending || 0)}</span>
+                <span className="text-blue-400">Paid: {formatPKR(r.commissionPaid || 0)}</span>
+              </div>
+            </div>
+          ) 
+        },
       ];
       case 'discount': return [
-        { label: 'Bill', field: 'serialNo', render: r => <span className="text-xs">{r.serialNo || (r.localId || '').slice(-8)}</span> },
-        { label: 'Customer', field: 'customerName', render: r => <span className="text-xs">{r.customer?.name || r.customerName || 'Walk-in'}</span> },
-        { label: 'Total', field: 'totalAmount', align: 'right', render: r => <span className="text-sm">{formatPKR(r.totalAmount)}</span> },
-        { label: 'Discount', field: 'discountAmount', align: 'right', render: r => <span className="text-sm font-bold text-pink-400">{formatPKR(r.discountAmount || 0)}</span> },
-        { label: 'Date', field: 'savedAt', render: r => <span className="text-[10px] text-gray-500">{getRelativeTime(r.savedAt)}</span> },
+        { 
+          label: 'Bill / Date', 
+          field: 'serialNo', 
+          render: r => (
+            <div>
+              <span className="text-xs font-semibold font-mono text-gray-200 block">
+                {r.serialNo || (r.localId || '').slice(-8)}
+              </span>
+              <span className="text-[9px] text-slate-500 block mt-0.5">
+                {getRelativeTime(r.savedAt)}
+              </span>
+            </div>
+          ) 
+        },
+        { 
+          label: 'Customer', 
+          field: 'customerName', 
+          render: r => <span className="text-xs text-slate-300">{r.customer?.name || r.customerName || 'Walk-in'}</span> 
+        },
+        { 
+          label: 'Total / Discount', 
+          field: 'discountAmount', 
+          align: 'right', 
+          render: r => (
+            <div className="text-right">
+              <span className="text-xs font-medium text-slate-400 font-mono block">
+                {formatPKR(r.totalAmount)}
+              </span>
+              <span className="text-xs font-bold text-pink-400 font-mono block mt-0.5">
+                Disc: {formatPKR(r.discountAmount || 0)}
+              </span>
+            </div>
+          ) 
+        },
       ];
       case 'return': return [
-        { label: 'Return ID', field: 'returnId', render: r => <span className="text-xs font-mono">{(r.returnId || '').slice(-10)}</span> },
-        { label: 'Bill', field: 'originalBillId', render: r => <span className="text-xs">{(r.originalBillId || '').slice(-10)}</span> },
-        { label: 'Reason', field: 'reason', render: r => <span className="text-xs text-gray-400">{r.reason}</span> },
-        { label: 'Refund', field: 'refundAmount', align: 'right', render: r => <span className="text-sm font-bold text-red-400">{formatPKR(r.refundAmount)}</span> },
-        { label: 'Status', field: 'status', render: r => <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-400">{r.status}</span> },
+        { 
+          label: 'IDs (Return / Bill)', 
+          field: 'returnId', 
+          render: r => (
+            <div>
+              <span className="text-xs font-mono font-bold text-gray-200 block">
+                Ret: {(r.returnId || '').slice(-8)}
+              </span>
+              <span className="text-[9px] font-mono text-slate-500 block mt-0.5">
+                Bill: {(r.originalBillId || '').slice(-8)}
+              </span>
+            </div>
+          ) 
+        },
+        { 
+          label: 'Reason / Status', 
+          field: 'reason', 
+          render: r => (
+            <div>
+              <p className="text-xs text-slate-300 line-clamp-1">{r.reason || '—'}</p>
+              <span className="text-[9px] px-1.5 py-0.2 rounded bg-amber-500/10 text-amber-400 border border-amber-500/10 font-bold inline-block mt-0.5">
+                {r.status}
+              </span>
+            </div>
+          ) 
+        },
+        { 
+          label: 'Refund', 
+          field: 'refundAmount', 
+          align: 'right', 
+          render: r => <span className="text-xs font-bold text-rose-400 font-mono">{formatPKR(r.refundAmount)}</span> 
+        },
       ];
       case 'managerApproved': return [
-        { label: 'Bill', field: 'billId', render: r => <span className="text-xs">{r.billId || r.billSnapshot?.serialNo || '—'}</span> },
-        { label: 'Total', field: 'billSnapshot.totalAmount', align: 'right', render: r => <span className="text-sm font-semibold">{formatPKR(r.billSnapshot?.totalAmount || r.total || 0)}</span> },
-        { label: 'Approved By', field: 'approvedByName', render: r => <span className="text-xs text-gray-400">{r.approvedByName || r.approvedBy}</span> },
-        { label: 'Approved At', field: 'approvedAt', render: r => <span className="text-[10px] text-gray-500">{getRelativeTime(r.approvedAt)}</span> },
-        { label: 'Store', field: 'storeId', render: r => <span className="text-[10px] text-gray-500">{r.storeId}</span> },
+        { 
+          label: 'Bill / Store', 
+          field: 'billId', 
+          render: r => (
+            <div>
+              <span className="text-xs font-semibold font-mono text-gray-200 block">
+                {r.billId || r.billSnapshot?.serialNo || '—'}
+              </span>
+              <span className="text-[9px] text-slate-500 font-mono block mt-0.5">
+                Store: {r.storeId || '—'}
+              </span>
+            </div>
+          ) 
+        },
+        { 
+          label: 'Approved By / Time', 
+          field: 'approvedByName', 
+          render: r => (
+            <div>
+              <span className="text-xs text-slate-300 font-medium block">
+                {r.approvedByName || r.approvedBy}
+              </span>
+              <span className="text-[9px] text-slate-500 block mt-0.5">
+                {getRelativeTime(r.approvedAt)}
+              </span>
+            </div>
+          ) 
+        },
+        { 
+          label: 'Total', 
+          field: 'billSnapshot.totalAmount', 
+          align: 'right', 
+          render: r => <span className="text-xs font-bold text-gray-100 font-mono">{formatPKR(r.billSnapshot?.totalAmount || r.total || 0)}</span> 
+        },
       ];
       default: return [];
     }
   }, [reportType]);
 
   return (
-    <div className="space-y-4">
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
-        <h2 className="text-xl font-bold text-gray-100 flex items-center gap-2">
-          <BarChart3 className="w-5 h-5 text-amber-500" /> Reports
+    <div className="p-3 sm:p-4 lg:p-6 max-w-[1600px] mx-auto space-y-3.5">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+        <h2 className="text-lg sm:text-xl font-bold text-gray-100 flex items-center gap-2">
+          <BarChart3 className="w-5 h-5 text-amber-500" /> 
+          Reports Analytics
         </h2>
         <ExportMenu
           data={results}
@@ -166,9 +399,9 @@ const Reports = () => {
       </div>
 
       {/* Report Type Selector */}
-      <div className="rounded-xl border border-[#2a1f0d] bg-[#1a1208] p-3">
-        <p className="text-[10px] font-semibold uppercase tracking-wider text-gray-500 mb-2">Select Report</p>
-        <div className="grid grid-cols-3 sm:grid-cols-7 gap-1.5">
+      <div className="rounded-xl border border-[#2a1f0d] bg-gradient-to-br from-[#1a1208]/90 to-[#0f0a05]/95 backdrop-blur-md p-2.5">
+        <p className="text-[9px] sm:text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-2">Select Report Type</p>
+        <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-8 gap-1.5">
           {Object.entries(REPORT_TYPE_LABELS).filter(([k]) => REPORT_ICONS[k]).map(([key, label]) => {
             const meta = REPORT_ICONS[key];
             const Icon = meta.icon;
@@ -176,14 +409,14 @@ const Reports = () => {
             return (
               <button key={key} onClick={() => setReportType(key)}
                 className={
-                  'flex flex-col items-center gap-1.5 p-2.5 rounded-xl border transition-all ' +
+                  'flex flex-col items-center justify-center gap-1.5 p-2 rounded-xl border transition-all duration-200 ' +
                   (active
-                    ? 'bg-amber-500/15 border-amber-500/40 text-amber-400'
-                    : 'bg-[#0a0805] border-[#2a1f0d] text-gray-500 hover:text-gray-300 hover:border-amber-500/20')
+                    ? 'bg-amber-500/15 border-amber-500/40 text-amber-400 shadow-md shadow-amber-500/5'
+                    : 'bg-[#0a0805] border-[#2a1f0d] text-slate-500 hover:text-slate-200 hover:border-amber-500/20')
                 }
               >
-                <Icon className="w-4 h-4" />
-                <span className="text-[10px] font-medium text-center">{label.replace(' Report', '')}</span>
+                <Icon className="w-3.5 h-3.5" />
+                <span className="text-[9px] font-bold tracking-tight text-center truncate w-full">{label.replace(' Report', '')}</span>
               </button>
             );
           })}
@@ -192,7 +425,7 @@ const Reports = () => {
 
       {/* Stats Bar */}
       {stats && (
-        <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
           {stats.total !== undefined && <StatCard label="Total Amount" value={stats.total} prefix="Rs " icon={DollarSign} color="amber" loading={loading} />}
           {stats.count !== undefined && <StatCard label="Records" value={stats.count} icon={FileText} color="blue" loading={loading} />}
           {stats.avg !== undefined && <StatCard label="Average" value={Math.round(stats.avg)} prefix="Rs " icon={BarChart3} color="green" loading={loading} />}
@@ -221,6 +454,7 @@ const Reports = () => {
         rowKey={results[0]?.localId ? 'localId' : results[0]?.expenseId ? 'expenseId' : results[0]?.returnId ? 'returnId' : results[0]?.txId ? 'txId' : results[0]?.uid ? 'uid' : 'id'}
         pageSize={50}
         enableVirtualization
+        className="rounded-xl border border-[#2a1f0d] overflow-hidden"
       />
     </div>
   );

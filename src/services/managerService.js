@@ -469,6 +469,18 @@ export const getBills = async (filters = {}) => {
 
     let all = await fetchAllOrders({ lim: filters.limit || 10000 });
 
+    // Performance optimization: by default, hide processed/completed, paid, cancelled, and archived bills from active dashboard lists.
+    const hasActiveFilters = filters.status || filters.paymentStatus || filters.from || filters.to || filters.search || filters.customerId || filters.billerId;
+    if (!hasActiveFilters) {
+      all = all.filter(o => {
+        const isPaid = o.status === 'paid' || o.paymentStatus === 'paid';
+        const isCancelled = o.status === 'cancelled';
+        return o.isActiveOrder !== false && !o.isArchived && !isPaid && !isCancelled;
+      });
+    } else {
+      all = all.filter(o => !o.isArchived);
+    }
+
     if (branchIds.length > 0)
       all = all.filter(o => branchIds.includes(o.storeId));
 
@@ -595,8 +607,18 @@ export const updateBill = async (localId, updates) => {
       await localDB.orders.where('billId').equals(localId).first();
     if (!bill) throw new Error('Bill not found');
 
+    const finalStatus = updates.status || bill.status;
+    const finalPayment = updates.paymentStatus || bill.paymentStatus;
+    const isFinished = ['paid', 'completed', 'cancelled'].includes(String(finalStatus).toLowerCase()) ||
+                       ['paid'].includes(String(finalPayment).toLowerCase());
+                       
+    const statusUpdates = {
+      ...updates,
+      ...(isFinished ? { isActiveOrder: false } : {}),
+    };
+
     await localDB.orders.put({
-      ...bill, ...updates,
+      ...bill, ...statusUpdates,
       updatedAt: nowISO(), syncStatus: SYNC_STATUS.pending, synced: 0,
     });
 
@@ -604,13 +626,13 @@ export const updateBill = async (localId, updates) => {
       try {
         await updateDoc(
           doc(firestore, COLLECTION_NAMES.orders, bill.id || bill.localId),
-          { ...updates, updatedAt: serverTimestamp(), updatedBy: ctx.uid }
+          { ...statusUpdates, updatedAt: serverTimestamp(), updatedBy: ctx.uid }
         );
       } catch {
-        await queueSync('bill', 'update', { id: bill.id, localId, updates });
+        await queueSync('bill', 'update', { id: bill.id, localId, updates: statusUpdates });
       }
     } else {
-      await queueSync('bill', 'update', { id: bill.id, localId, updates });
+      await queueSync('bill', 'update', { id: bill.id, localId, updates: statusUpdates });
     }
 
     await logActivity('BILL_UPDATED', {
@@ -665,6 +687,7 @@ export const collectPayment = async ({
       paidAmount: newPaid, outstandingAmount: newOutstanding,
       paymentStatus: newOutstanding <= 0 ? PAYMENT_STATUS.paid : PAYMENT_STATUS.partial,
       lastPaymentAt: nowISO(), updatedAt: nowISO(),
+      ...(newOutstanding <= 0 ? { isActiveOrder: false } : {}),
     };
 
     await localDB.orders.put({
@@ -2074,6 +2097,112 @@ export const processApprovalRequest = async (requestDocIdOrRequestId, action = '
       await queueSync('approval_request', 'update', { requestId: request.requestId || request.id, ...updates });
     }
 
+    // Special handling for cancellation requests
+    if (request.type === 'cancellation') {
+      if (updates.status === APPROVAL_STATUS.approved) {
+        // Manager confirms cancellation -> moves to "manager_cancelled", escalates to Super Admin
+        const managerReason = reason || 'Confirmed by manager';
+        
+        // 1. Update local order status if exists
+        try {
+          const local = await localDB.orders.where('localId').equals(request.localBillId).first()
+            || await localDB.orders.where('billId').equals(request.localBillId).first();
+          if (local) {
+            await localDB.orders.update(local.id, {
+              status: 'manager_cancelled',
+              isActiveOrder: false,
+              managerCancelReason: managerReason,
+              managerCancelledBy: ctx.name,
+              managerCancelledAt: nowISO()
+            });
+          }
+        } catch { }
+
+        // 2. Update Firestore order if online
+        if (isFirebaseReady() && isOnline() && request.billId) {
+          try {
+            await updateDoc(doc(firestore, COLLECTION_NAMES.orders, request.billId), {
+              status: 'manager_cancelled',
+              isActiveOrder: false,
+              managerCancelReason: managerReason,
+              managerCancelledBy: ctx.name,
+              managerCancelledAt: serverTimestamp()
+            });
+          } catch { }
+        }
+
+        // 3. Create a super-admin approval request so super-admin can finalize
+        const superReq = {
+          requestId: generateId('superreq'),
+          parentRequestId: request.requestId || request.id || null,
+          type: 'cancellation',
+          billId: request.billId || null,
+          localBillId: request.localBillId || null,
+          status: APPROVAL_STATUS.pending,
+          requestedBy: ctx.uid,
+          requestedByName: ctx.name,
+          requestedByRole: 'manager',
+          storeId: request.storeId || ctx.primaryBranch,
+          cashierCancelReason: request.cashierCancelReason || request.reason || '',
+          managerCancelReason: managerReason,
+          billSnapshot: request.billSnapshot || request.bill || {},
+          createdAt: nowISO(),
+        };
+
+        if (localDB.super_approval_requests) {
+          try {
+            await localDB.super_approval_requests.add({
+              ...superReq,
+              synced: isFirebaseReady() && isOnline() ? 1 : 0,
+            });
+          } catch { }
+        }
+
+        if (isFirebaseReady() && isOnline()) {
+          try {
+            await addDoc(collection(firestore, COLLECTION_NAMES.superApprovalRequests), {
+              ...superReq,
+              createdAt: serverTimestamp()
+            });
+          } catch {
+            await queueSync('super_approval_request', 'create', superReq);
+          }
+        } else {
+          await queueSync('super_approval_request', 'create', superReq);
+        }
+      } else if (updates.status === APPROVAL_STATUS.rejected) {
+        // Manager rejects cancellation -> reset order back to pending/active
+        try {
+          const local = await localDB.orders.where('localId').equals(request.localBillId).first()
+            || await localDB.orders.where('billId').equals(request.localBillId).first();
+          if (local) {
+            await localDB.orders.update(local.id, {
+              status: 'pending',
+              isActiveOrder: true,
+              managerRejectionReason: reason || 'Rejected by manager',
+              managerRejectedBy: ctx.name,
+              managerRejectedAt: nowISO()
+            });
+          }
+        } catch { }
+
+        if (isFirebaseReady() && isOnline() && request.billId) {
+          try {
+            await updateDoc(doc(firestore, COLLECTION_NAMES.orders, request.billId), {
+              status: 'pending',
+              isActiveOrder: true,
+              managerRejectionReason: reason || 'Rejected by manager',
+              managerRejectedBy: ctx.name,
+              managerRejectedAt: serverTimestamp()
+            });
+          } catch { }
+        }
+      }
+
+      await logActivity('APPROVAL_REQUEST_PROCESSED', { requestId: request.requestId || request.id, action, by: ctx.uid });
+      return { success: true };
+    }
+
     // If approved, update the original bill and copy to manager-specific collection
     if (updates.status === APPROVAL_STATUS.approved) {
       try {
@@ -2271,6 +2400,118 @@ export const processSuperApprovalRequest = async (requestIdOrDocId, action = 'ap
       try { await updateDoc(doc(firestore, COLLECTION_NAMES.superApprovalRequests, request.id), { ...updates, updatedAt: serverTimestamp() }); } catch { await queueSync('super_approval_request', 'update', { requestId: request.requestId || request.id, ...updates }); }
     } else {
       await queueSync('super_approval_request', 'update', { requestId: request.requestId || request.id, ...updates });
+    }
+
+    // Special handling for cancellation requests
+    if (request.type === 'cancellation') {
+      if (updates.status === APPROVAL_STATUS.approved) {
+        // Super Admin confirms/clears cancellation -> set status: "cancelled", isDeleted: true, isActiveOrder: false
+        const superReason = reason || 'Cleared by Super Admin';
+        const finalReason = superReason || request.managerCancelReason || request.cashierCancelReason || 'Cancelled';
+
+        // 1. Update local order
+        try {
+          const local = await localDB.orders.where('localId').equals(request.localBillId).first()
+            || await localDB.orders.where('billId').equals(request.localBillId).first();
+          if (local) {
+            await localDB.orders.update(local.id, {
+              status: 'cancelled',
+              isDeleted: true,
+              isActiveOrder: false,
+              superAdminCancelReason: superReason,
+              superAdminCancelledBy: ctx.name,
+              superAdminCancelledAt: nowISO(),
+              cancelReason: finalReason,
+              cancelledBy: ctx.name,
+              cancelledAt: nowISO()
+            });
+          }
+        } catch { }
+
+        // 2. Update Firestore order if online
+        if (isFirebaseReady() && isOnline() && request.billId) {
+          try {
+            await updateDoc(doc(firestore, COLLECTION_NAMES.orders, request.billId), {
+              status: 'cancelled',
+              isDeleted: true,
+              isActiveOrder: false,
+              superAdminCancelReason: superReason,
+              superAdminCancelledBy: ctx.name,
+              superAdminCancelledAt: serverTimestamp(),
+              cancelReason: finalReason,
+              cancelledBy: ctx.name,
+              cancelledAt: serverTimestamp()
+            });
+          } catch { }
+        }
+
+        // 3. Write copy to deletedBills
+        const deletedRecord = {
+          originalOrderId: request.billId || request.localBillId,
+          billSerial: request.billSnapshot?.billSerial || request.billSnapshot?.serialNo || '—',
+          serialNo: request.billSnapshot?.serialNo || request.billSnapshot?.billSerial || '—',
+          storeId: request.storeId || 'default',
+          orderSnapshot: request.billSnapshot || {},
+          cashierCancelReason: request.cashierCancelReason || '',
+          managerCancelReason: request.managerCancelReason || '',
+          superAdminCancelReason: superReason,
+          reason: finalReason,
+          cancelledAt: nowISO(),
+          cancelledBy: ctx.name,
+        };
+
+        if (isFirebaseReady() && isOnline()) {
+          try {
+            await addDoc(collection(firestore, 'deletedBills'), {
+              ...deletedRecord,
+              cancelledAt: serverTimestamp()
+            });
+          } catch {
+            await queueSync('deleted_bill', 'create', deletedRecord);
+          }
+        } else {
+          await queueSync('deleted_bill', 'create', deletedRecord);
+        }
+
+        try {
+          if (localDB.deleted_bills) {
+            await localDB.deleted_bills.add({
+              ...deletedRecord,
+              synced: isFirebaseReady() && isOnline() ? 1 : 0
+            });
+          }
+        } catch { }
+      } else if (updates.status === APPROVAL_STATUS.rejected) {
+        // Super Admin rejects cancellation -> reset order back to pending/active
+        try {
+          const local = await localDB.orders.where('localId').equals(request.localBillId).first()
+            || await localDB.orders.where('billId').equals(request.localBillId).first();
+          if (local) {
+            await localDB.orders.update(local.id, {
+              status: 'pending',
+              isActiveOrder: true,
+              superAdminRejectionReason: reason || 'Rejected by Super Admin',
+              superAdminRejectedBy: ctx.name,
+              superAdminRejectedAt: nowISO()
+            });
+          }
+        } catch { }
+
+        if (isFirebaseReady() && isOnline() && request.billId) {
+          try {
+            await updateDoc(doc(firestore, COLLECTION_NAMES.orders, request.billId), {
+              status: 'pending',
+              isActiveOrder: true,
+              superAdminRejectionReason: reason || 'Rejected by Super Admin',
+              superAdminRejectedBy: ctx.name,
+              superAdminRejectedAt: serverTimestamp()
+            });
+          } catch { }
+        }
+      }
+
+      await logActivity('SUPER_APPROVAL_REQUEST_PROCESSED', { requestId: request.requestId || request.id, action, by: ctx.uid });
+      return { success: true };
     }
 
     // If approved by super-admin, finalize bill and add to super-admin approved collection

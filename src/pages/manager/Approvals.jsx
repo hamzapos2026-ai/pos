@@ -86,11 +86,34 @@ const Approvals = () => {
 
   const handleAction = async (req, action) => {
     if (!req) return;
+    
+    let reason = '';
+    if (req.type === 'cancellation') {
+      if (action === 'approve') {
+        const resReason = prompt('Confirm cancellation for this bill? Enter manager reason/justification:');
+        if (resReason === null) return;
+        if (!resReason.trim()) {
+          toast.error('Reason is required to confirm cancellation!');
+          return;
+        }
+        reason = resReason.trim();
+      } else {
+        const rejReason = prompt('Reject cashier cancellation request? Enter rejection reason:');
+        if (rejReason === null) return;
+        reason = rejReason.trim() || 'Rejected by manager';
+      }
+    } else {
+      reason = action === 'reject' ? 'Rejected by manager' : 'Approved by manager';
+    }
+
     setProcessingId(req.requestId || req.id);
     try {
-      const res = await managerService.processApprovalRequest(req.requestId || req.id, action, action === 'reject' ? 'Rejected by manager' : 'Approved by manager');
+      const res = await managerService.processApprovalRequest(req.requestId || req.id, action, reason);
       if (res.success) {
-        toast.success(`${action === 'approve' ? 'Approved' : 'Rejected'} successfully`);
+        toast.success(req.type === 'cancellation'
+          ? (action === 'approve' ? 'Cancellation confirmed and escalated' : 'Cancellation request rejected')
+          : `${action === 'approve' ? 'Approved' : 'Rejected'} successfully`
+        );
         await load();
       } else {
         toast.error(res.error || 'Action failed');
@@ -98,7 +121,9 @@ const Approvals = () => {
     } catch (err) {
       console.error('[Approvals] process:', err);
       toast.error('Action failed');
-    } finally { setProcessingId(null); }
+    } finally {
+      setProcessingId(null);
+    }
   };
 
   return (
@@ -136,24 +161,45 @@ const Approvals = () => {
             </thead>
             <tbody>
               {requests.map((r) => (
-                <tr key={r.requestId || r.id} className="border-t border-[#22180f]">
-                  <td className="py-2 text-gray-200">{r.billSnapshot?.serialNo || r.billId || '—'}</td>
-                  <td className="py-2 text-gray-200">{Number(r.billSnapshot?.totalAmount || 0).toLocaleString('en-PK')}</td>
-                  <td className="py-2 text-gray-200">{r.requestedByName || r.requestedBy}</td>
-                  <td className="py-2 text-gray-200">{fmtDate(r.createdAt || r.createdAt)}</td>
-                  <td className="py-2">
+                <tr key={r.requestId || r.id} className="border-t border-[#22180f] hover:bg-white/[0.02]">
+                  <td className="py-2.5 text-gray-200">
+                    <div>
+                      <span className="font-semibold">{r.billSnapshot?.serialNo || r.billId || '—'}</span>
+                      {r.type === 'cancellation' && (
+                        <span className="ml-2 px-1.5 py-0.5 rounded text-[10px] font-bold bg-red-500/20 text-red-400 border border-red-500/30">
+                          Cancellation Request
+                        </span>
+                      )}
+                    </div>
+                    {r.type === 'cancellation' && r.cashierCancelReason && (
+                      <div className="text-[11px] text-red-400/90 mt-1 italic">
+                        Reason: {r.cashierCancelReason}
+                      </div>
+                    )}
+                  </td>
+                  <td className="py-2.5 text-gray-200">{Number(r.billSnapshot?.totalAmount || r.billSnapshot?.total || 0).toLocaleString('en-PK')}</td>
+                  <td className="py-2.5 text-gray-200">
+                    <div>{r.requestedByName || r.requestedBy}</div>
+                    <div className="text-[10px] text-gray-500 capitalize">{r.requestedByRole || 'cashier'}</div>
+                  </td>
+                  <td className="py-2.5 text-gray-200">{fmtDate(r.createdAt || r.createdAt)}</td>
+                  <td className="py-2.5">
                     <div className="flex gap-2">
                       <button
                         disabled={processingId === (r.requestId || r.id)}
                         onClick={() => handleAction(r, 'approve')}
-                        className="px-2 py-1 rounded-md bg-green-600 text-white flex items-center gap-2"
+                        className={`px-2 py-1 rounded-md text-white flex items-center gap-1 text-xs font-semibold active:scale-95 transition-all ${
+                          r.type === 'cancellation'
+                            ? 'bg-red-600 hover:bg-red-700'
+                            : 'bg-green-600 hover:bg-green-700'
+                        }`}
                       >
-                        <Check size={14} /> Approve
+                        <Check size={14} /> {r.type === 'cancellation' ? 'Confirm Cancel' : 'Approve'}
                       </button>
                       <button
                         disabled={processingId === (r.requestId || r.id)}
                         onClick={() => handleAction(r, 'reject')}
-                        className="px-2 py-1 rounded-md bg-red-600 text-white flex items-center gap-2"
+                        className="px-2 py-1 rounded-md bg-zinc-700 hover:bg-zinc-600 text-white flex items-center gap-1 text-xs font-semibold active:scale-95 transition-all"
                       >
                         <X size={14} /> Reject
                       </button>

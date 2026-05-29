@@ -45,7 +45,7 @@ const Badge = memo(({
   return (
     <span
       className={cn(
-        'inline-flex items-center justify-center font-medium rounded-full',
+        'inline-flex items-center justify-center font-medium rounded-full whitespace-nowrap',
         variantStyles[variant],
         sizeStyles[size],
         className

@@ -1,5 +1,5 @@
 // src/pages/biller/BillerDashboard.jsx
-// ✅ MASTER PROMPT v9 — CRITICAL FIXES COMPLETE
+// ✅ MASTER PROMPT v10 — SALESPERSON SYSTEM FULLY INTEGRATED
 // ✅ §1:  Offline-first — IDB primary, Firebase secondary
 // ✅ §2:  Calculator-speed billing engine
 // ✅ §3:  Serial format BRANCH-USER-DATE-COUNTER, atomic locks
@@ -8,13 +8,9 @@
 // ✅ §8:  BroadcastChannel unified 'aone_pos_orders'
 // ✅ §9:  Multi-tab safe, shared serial
 // ✅ §11: Zero UI lag, memo, callbacks
-// ✅ v9 FIX 1:  F8 locks — single release point, no race conditions
-// ✅ v9 FIX 2:  Print modal opens BEFORE save (instant)
-// ✅ v9 FIX 3:  localId for deduplication
-// ✅ v9 FIX 4:  BroadcastChannel — order_deleted event
-// ✅ v9 FIX 5:  F8 response <16ms target
-// ✅ v9 FIX 6:  All modals F8-aware
-// ✅ v9 FIX 7:  Customer dialog close <100ms
+// ✅ v10 FIX: BillItemsTable replaces inline plain table
+// ✅ v10 FIX: Salesperson UI conditional rendering, no gaps
+// ✅ v10 FIX: Table always full-height when SP disabled
 
 import {
   useEffect, useMemo, useRef, useState,
@@ -23,7 +19,7 @@ import {
 import { AnimatePresence, motion } from "framer-motion";
 import {
   Loader2, Printer, Trash2, Clock3, WifiOff, Lock,
-  ShoppingCart, Search, User, Package, X, CreditCard, Send,
+  ShoppingCart, Search, User, Package, X, CreditCard, Send, AlertCircle,
 } from "lucide-react";
 import {
   collection, addDoc, serverTimestamp,
@@ -42,7 +38,7 @@ import useBillerHotkeys from "../../hooks/useBillerHotkeys";
 import { useLanguage } from "../../hooks/useLanguage";
 
 import { db } from "../../services/firebase";
-import { createAuditLog } from "../../services/activityLogger";
+import { createAuditLog, logActivity } from "../../services/activityLogger";
 import { saveOrder } from "../../services/localBillService";
 import { getStoreById, updateStore } from "../../services/storeService";
 import {
@@ -73,12 +69,13 @@ import CustomerDialog, {
 } from "../../components/biller/CustomerDialog";
 import BillSummary from "../../components/biller/BillSummary";
 import InvoicePrint from "../../components/biller/InvoicePrint";
+import useSalesperson, { calcItemCommission } from "../../hooks/useSalesperson";
+import { CurrentSPBar, CommissionSummaryPanel } from "../../components/biller/SalespersonSelector";
+import BillItemsTable from "../../components/biller/BillItemsTable";
 
 // ══════════════════════════════════════════════════════════════
-// ✅ v9 FIX 1: UTILITIES — Zero-crash, Pakistan-aware
+// UTILITIES
 // ══════════════════════════════════════════════════════════════
-
-/** Safe ISO string from ANY date type — no crash on Firebase Timestamp */
 const _safeISO = (v) => {
   if (!v) return null;
   try {
@@ -91,10 +88,8 @@ const _safeISO = (v) => {
   } catch { return null; }
 };
 
-/** Current ISO string — always safe */
 const _nowISO = () => new Date().toISOString();
 
-/** Pakistan UTC+5 date string YYYYMMDD — for serial queries */
 const _todayDateStr = () => {
   const ms = Date.now() + 5 * 3600000;
   const d = new Date(ms);
@@ -105,7 +100,6 @@ const _todayDateStr = () => {
   );
 };
 
-/** Extract counter number from formatted serial "KHI-BIL21-20260514-00001" → 1 */
 const _extractSerialNum = (serial) => {
   if (!serial || typeof serial !== "string") return 0;
   const parts = serial.split("-");
@@ -116,7 +110,6 @@ const _extractSerialNum = (serial) => {
   return 0;
 };
 
-/** SuperAdmin check — handles all variants */
 const _isSuperAdminRole = (userData) => {
   const roles = Array.isArray(userData?.roles)
     ? userData.roles
@@ -126,14 +119,12 @@ const _isSuperAdminRole = (userData) => {
   );
 };
 
-/** Safe qty parse — handles "", undefined, NaN */
 const _safeQty = (v) => {
   if (v === "" || v === undefined || v === null) return 1;
   const n = parseInt(String(v).replace(/\D/g, ""), 10);
   return Number.isFinite(n) && n > 0 ? n : 1;
 };
 
-/** ✅ v9 FIX 3: Generate localId for deduplication */
 const generateLocalId = () => {
   return `local_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
 };
@@ -195,7 +186,6 @@ const mergeItemsByPrice = (items) => {
       order.push(key);
       return;
     }
-
     const existing = groups.get(key);
     existing.qty = Number(existing.qty || 0) + Number(item.qty || 0);
   });
@@ -221,7 +211,11 @@ const getFriendlyError = (err) => {
 };
 
 const _cleanItem = (item) => {
-  const res = { id: item.id, serialId: item.serialId, productName: item.productName, price: item.price, qty: item.qty, discount: item.discount, discountType: item.discountType };
+  const res = {
+    id: item.id, serialId: item.serialId, productName: item.productName,
+    price: item.price, qty: item.qty, discount: item.discount,
+    discountType: item.discountType,
+  };
   if (item.salespersonId) {
     res.salespersonId = item.salespersonId;
     res.salespersonName = item.salespersonName;
@@ -250,7 +244,10 @@ const _loadCC = async (storeId, force = false) => {
     const seen = new Map();
     snap.docs.forEach((d) => {
       const c = d.data(), key = c.phone || c.name;
-      if (key) seen.set(key, { name: c.name || "", phone: c.phone || "", city: c.city || "", market: c.market || "" });
+      if (key) seen.set(key, {
+        name: c.name || "", phone: c.phone || "",
+        city: c.city || "", market: c.market || "",
+      });
     });
     _cc.data = [...seen.values()];
     _cc.loaded = true; _cc.storeId = sid; _cc.loadedAt = Date.now();
@@ -267,7 +264,10 @@ const _enrichCC = async (storeId, billerId) => {
     snap.docs.forEach((d) => {
       const c = d.data().customer || {}, key = c.phone || c.name;
       if (key && !_cc.data.find((x) => (x.phone || x.name) === key))
-        _cc.data.push({ name: c.name || "", phone: c.phone || "", city: c.city || "", market: c.market || "" });
+        _cc.data.push({
+          name: c.name || "", phone: c.phone || "",
+          city: c.city || "", market: c.market || "",
+        });
     });
   } catch { /* ignore */ }
 };
@@ -288,7 +288,10 @@ const _searchCC = (term) => {
 const _pushCC = (c) => {
   const key = c.phone || c.name;
   if (key && !_cc.data.find((x) => (x.phone || x.name) === key))
-    _cc.data.unshift({ name: c.name || "", phone: c.phone || "", city: c.city || "", market: c.market || "" });
+    _cc.data.unshift({
+      name: c.name || "", phone: c.phone || "",
+      city: c.city || "", market: c.market || "",
+    });
 };
 
 let _autoCustomerCount = null;
@@ -302,13 +305,11 @@ const _saveCustomerBg = async (storeId, billerId, data, isAutoSerial = false) =>
   const phone = normalizePhone(data.phone || "");
   const rawName = (data.name || "").trim();
 
-  // Pure walk-in (no phone, no name) → never save
   if (!phone && (!rawName || isAutoGeneratedName(rawName))) return;
 
   const sid = storeId || "default";
   let finalName = rawName;
 
-  // Phone given but no real name → auto-number as "Customer N"
   if (phone && (!rawName || isAutoGeneratedName(rawName))) {
     try {
       if (_autoCustomerCount === null) {
@@ -421,7 +422,6 @@ const Dashboard = () => {
   const draftRestoredRef = useRef(false);
   const submittingRef = useRef(false);
   const deleteLockRef = useRef(false);
-  // ✅ v9 FIX 1: Single lock ref for all F8 operations
   const f8LockRef = useRef(false);
   const minusUsedRef = useRef(false);
   const saveDoneRef = useRef(false);
@@ -449,15 +449,27 @@ const Dashboard = () => {
   const storeId = userData?.storeId || "default";
   const billerId = userData?.uid;
   const showOfflineInvoice = settings?.billFlow?.showOfflineInvoice !== false;
-  const salespersonEnabled = settings?.salesperson?.enabled === true;
-  const salespersonMultiple = settings?.salesperson?.allowMultiplePerBill === true;
-  const salespersonRequireSelection = settings?.salesperson?.requireSelection === true;
+
+  // ── Salesperson System ────────────────────────────────────
+  const {
+    enabled: salespersonEnabled,
+    multiSP: salespersonMultiple,
+    showColumn: showSalespersonColumn,
+    required: salespersonRequireSelection,
+    activeAgents: salespersonAgents,
+    currentSPId,
+    setCurrentSPId,
+    currentAgent,
+    enrichItem,
+    reassignItem,
+    buildCommissionSummary,
+    validateAssignment,
+    hasAgents,
+  } = useSalesperson();
+
   const salespersonDefaultType = settings?.salesperson?.commissionType || "percent";
   const salespersonDefaultRate = Number(settings?.salesperson?.commissionRate || 5);
   const salespersonDefaultFixed = Number(settings?.salesperson?.commissionFixed || 0);
-  const salespersonAgents = Array.isArray(settings?.salesperson?.agents)
-    ? settings.salesperson.agents : [];
-  const showSalespersonColumn = settings?.salesperson?.showOnTable === true;
 
   const userRoles = userData?.roles || (userData?.role ? [userData.role] : []);
   const isDualRole = (userRoles.includes("biller") || userData?.role === "biller") &&
@@ -496,6 +508,11 @@ const Dashboard = () => {
     custPhoneSearch, selectedRowIndex, lastItemId,
     billSerial: currentBillSerial, salespersonId,
   } = activeTab;
+
+  // Sync tab's salespersonId → hook
+  useEffect(() => {
+    setCurrentSPId(salespersonId || null);
+  }, [salespersonId, setCurrentSPId]);
 
   // ── UI state ──────────────────────────────────────────────
   const [submitting, setSubmitting] = useState(false);
@@ -540,12 +557,9 @@ const Dashboard = () => {
   const canToggleCashierMode =
     isSuperAdmin || isDualRole || permissions.allowCashierMode;
 
-  // Auto-approval should only apply when dual/cashier toggle is available and active (both button ON and permission present)
   const isAutoApproved = (cashierModeActive && (isSuperAdmin || isDualRole || permissions.allowCashierMode))
     || settings?.autoApproval?.autoApproval === true;
 
-  // Show dual-mode button only when user has toggle permission AND
-  // the current active bill is not already approved.
   const showDualButton = Boolean(canToggleCashierMode && ((activeTab?.status || '') !== 'approved'));
   const dualModeEnabled = Boolean(settings?.dualMode === true);
 
@@ -593,8 +607,8 @@ const Dashboard = () => {
   );
 
   const salespersonCommission = useMemo(() => {
-    if (!salespersonEnabled) return 0;
-    
+    if (!salespersonEnabled || !hasAgents) return 0;
+
     if (salespersonMultiple) {
       let total = 0;
       items.forEach((item) => {
@@ -620,7 +634,9 @@ const Dashboard = () => {
       if (type === "fixed") return Math.max(0, Number(rate || salespersonDefaultFixed));
       return Math.round((finalTotal * Math.max(0, Math.min(100, rate))) / 100);
     }
-  }, [items, finalTotal, salespersonEnabled, salespersonMultiple, selectedSalesperson, salespersonId, salespersonDefaultType, salespersonDefaultRate, salespersonDefaultFixed, maxBillDiscountPercent]);
+  }, [items, finalTotal, salespersonEnabled, hasAgents, salespersonMultiple,
+    selectedSalesperson, salespersonId, salespersonDefaultType,
+    salespersonDefaultRate, salespersonDefaultFixed, maxBillDiscountPercent]);
 
   const changeAmount = useMemo(() => {
     const r = Number(amountReceived || 0);
@@ -643,29 +659,22 @@ const Dashboard = () => {
     (n) => {
       if (!soundEnabled) return;
       try {
-        // Force play add sound regardless of soundMode so users always hear add feedback
         if (n === "add") { sound.play(n); return; }
         if (soundMode === "music") sound.play(n);
       } catch { }
     },
     [soundEnabled, soundMode, sound],
   );
-  // Counting speech for item-add: speak price × qty = total (and count)
+
   const speakEntry = useCallback((price, qty, discount = 0) => {
     if (!countingEnabled || !soundEnabled) return;
     try {
       const lang = countingLang === 'ur' ? 'ur-PK' : 'en-US';
       const p = Number(price || 0);
       const q = Number(qty || 0);
-      const d = Number(discount || 0);
-      // discount interpreted as percent if between 0-100, otherwise as absolute
-      const discountAmt = (d > 0 && d <= 100) ? Math.round((p * q * d) / 100) : d;
-      const lineTotal = Math.max(0, Math.round(p * q - discountAmt));
-      const text = lang === 'ur-PK'
-        ? `${p} ضرب ${q}`
-        : `${p} times ${q}`;
+      const text = lang === 'ur-PK' ? `${p} ضرب ${q}` : `${p} times ${q}`;
       if (sound && typeof sound.speak === 'function') sound.speak(text, lang);
-    } catch { /* ignore */ }
+    } catch { }
   }, [countingEnabled, soundEnabled, countingLang, sound]);
 
   const speakCount = useCallback((delta = 0, explicitNumber) => {
@@ -680,7 +689,7 @@ const Dashboard = () => {
       } else if (sound && typeof sound.speak === 'function') {
         sound.speak(String(num), lang);
       }
-    } catch { /* ignore */ }
+    } catch { }
   }, [countingEnabled, soundEnabled, countingLang, sound, totalQty]);
 
   const showToast = useCallback((text, type = "warning") => {
@@ -694,7 +703,7 @@ const Dashboard = () => {
       const next = typeof nextOrUpdater === "function"
         ? nextOrUpdater(soundEnabled) : Boolean(nextOrUpdater);
       setSoundEnabled(next);
-      try { localStorage.setItem(`aone_sound_enabled_${userData?.uid || 'default'}`, String(next)); } catch { /* ignore */ }
+      try { localStorage.setItem(`aone_sound_enabled_${userData?.uid || 'default'}`, String(next)); } catch { }
     },
     [soundEnabled, userData?.uid],
   );
@@ -704,7 +713,7 @@ const Dashboard = () => {
     try {
       localStorage.setItem(`aone_sound_mode_${userData?.uid || 'default'}`, mode);
       localStorage.setItem(`aone_sound_enabled_${userData?.uid || 'default'}`, 'true');
-    } catch { /* ignore */ }
+    } catch { }
   }, [userData?.uid]);
 
   const fmtTime = useCallback((d) => {
@@ -772,7 +781,7 @@ const Dashboard = () => {
     [currentBillSerial, customer, userData, billerId, storeId],
   );
 
-  // ✅ v9 FIX 4: BroadcastChannel with order_deleted event
+  // ── BroadcastChannel ──────────────────────────────────────
   useEffect(() => {
     const channel = new BroadcastChannel(BROADCAST_CHANNELS.ORDERS);
     broadcastChannelRef.current = channel;
@@ -805,10 +814,8 @@ const Dashboard = () => {
           { id: `syncfail_${billSerial}`, duration: 4000 });
       }
 
-      // ✅ v9 FIX 4: Handle order deletion cascade
       if (type === "ORDER_DELETED" || type === "order_deleted") {
         console.log(`[Dashboard] Order deleted: ${billSerial} (localId: ${localId})`);
-        // Refresh Top5 if viewing
         refreshOfflineCount();
         return;
       }
@@ -816,12 +823,8 @@ const Dashboard = () => {
     return () => channel.close();
   }, [refreshOfflineCount]);
 
-
-  // ══════════════════════════════════════════════════════════════
-  // ✅ v9 FIX 1: CENTRALIZED LOCK RELEASE — No race conditions
-  // ══════════════════════════════════════════════════════════════
+  // ── F8 Lock helpers ───────────────────────────────────────
   const releaseF8Lock = useCallback(() => {
-    // Use requestAnimationFrame for instant UI update
     requestAnimationFrame(() => {
       f8LockRef.current = false;
     });
@@ -929,7 +932,7 @@ const Dashboard = () => {
       const sid = storeIdRef.current;
       await restoreDrafts();
       if (isOnline) {
-        try { await syncSerialFromFirebase(sid, userData); } catch { /* ignore */ }
+        try { await syncSerialFromFirebase(sid, userData); } catch { }
         await _loadCC(sid).catch(() => { });
       }
       await refreshSerialPreview(sid);
@@ -944,7 +947,6 @@ const Dashboard = () => {
     clearTimeout(wifiTimerRef.current);
   }, [userData?.uid]);
 
-  // ── Cross-tab serial sync ─────────────────────────────────
   useEffect(() => {
     const handler = (e) => {
       const sid = storeIdRef.current || "default";
@@ -954,13 +956,12 @@ const Dashboard = () => {
         const lastNum = data?.lastSerial || data?.max || 0;
         if (lastNum <= 0) return;
         setNextPreviewSerial(fmt5(lastNum + 1));
-      } catch { /* ignore */ }
+      } catch { }
     };
     window.addEventListener("storage", handler);
     return () => window.removeEventListener("storage", handler);
   }, []);
 
-  // ── WiFi reconnect ────────────────────────────────────────
   useEffect(() => {
     const prev = wasOnlineRef.current;
     wasOnlineRef.current = isOnline;
@@ -979,8 +980,8 @@ const Dashboard = () => {
           toast.success(`✅ ${result.synced} bills synced!`, { duration: 3000 });
           refreshOfflineCount();
         }
-      } catch { /* ignore */ }
-      try { await syncSerialFromFirebase(sid, userData); } catch { /* ignore */ }
+      } catch { }
+      try { await syncSerialFromFirebase(sid, userData); } catch { }
       if (!activeTab?.activeBill) await refreshSerialPreview(sid);
       try { const s = await getStoreById(sid); if (s) setStore(s); } catch { }
       _loadCC(sid, true).catch(() => { });
@@ -1041,6 +1042,7 @@ const Dashboard = () => {
     minusUsedRef.current = false; deleteLockRef.current = false;
     saveDoneRef.current = false; lastF8Ref.current = 0;
     intentionalDupRef.current = false;
+    setCurrentSPId(null);
     const defName = settings?.customer?.defaultCustomerName || CUSTOMER_CONFIG.WALK_IN_NAME;
     updateTab({
       items: [], selectedRowIndex: -1, lastItemId: null,
@@ -1051,6 +1053,7 @@ const Dashboard = () => {
       f8Step: 0, paymentType: "cash", amountReceived: "",
       activeBill: false, screenLocked: true,
       billStartTime: null, billEndTime: null,
+      salespersonId: "",
     });
     setCustSuggestions([]); setShowSug(false);
     setActiveField(""); setForm(EMPTY_FORM);
@@ -1059,14 +1062,37 @@ const Dashboard = () => {
     _clearDraft(storeId, billerId, activeTabId);
     refreshSerialPreview(storeIdRef.current);
   }, [currentBillSerial, settings?.customer?.defaultCustomerName,
-    updateTab, storeId, billerId, activeTabId]);
+    updateTab, storeId, billerId, activeTabId, setCurrentSPId, refreshSerialPreview]);
+
+  const handleSelectSalesperson = useCallback((id) => {
+    setCurrentSPId(id);
+    updateTab({ salespersonId: id });
+  }, [setCurrentSPId, updateTab]);
+
+  const handleReassignItem = useCallback((item, agentId) => {
+    updateTab((tab) => ({
+      ...tab,
+      items: tab.items.map((i) =>
+        i.id === item.id ? reassignItem(i, agentId) : i
+      ),
+    }));
+    try {
+      const agent = salespersonAgents.find((a) => a.id === agentId) || null;
+      logActivity("ITEM_SALESPERSON_REASSIGN", userData?.uid, storeId, {
+        itemId: item.id,
+        salespersonId: agentId || null,
+        salespersonName: agent?.name || null,
+        serialNo: currentBillSerial || "----",
+      }).catch(() => {});
+    } catch (e) { /* ignore */ }
+  }, [reassignItem, updateTab]);
 
   const _afterClear = useCallback(async () => {
     saveDoneRef.current = false;
     resetBill();
     play("delete");
     speakCount(0, 0);
-  }, [resetBill, play]);
+  }, [resetBill, play, speakCount]);
 
   // ══════════════════════════════════════════════════════════════
   // CUSTOMER SEARCH
@@ -1121,7 +1147,6 @@ const Dashboard = () => {
     requestAnimationFrame(() => priceInputRef.current?.focus());
   }, [updateTab]);
 
-  // ✅ v9 FIX 6: All modals F8-aware
   const openCustDialog = useCallback(() => {
     if (screenLocked) { showToast("Press INSERT first.", "error"); return; }
     setShowCustomerDialog(true); updateTab({ f8Step: 1 }); play("keyPress");
@@ -1159,20 +1184,10 @@ const Dashboard = () => {
       const priceValid = !priceEmpty && Number.isFinite(price) && price > 0;
       const qtyVal = _safeQty(form.qty);
 
-      const currentAgent = salespersonId ? salespersonAgents.find(a => a.id === salespersonId) : null;
-      if (salespersonEnabled && salespersonMultiple && salespersonRequireSelection && !currentAgent) {
+      if (salespersonEnabled && salespersonMultiple && salespersonRequireSelection && !currentAgent && hasAgents) {
         showToast("Select a Salesperson first.", "error"); play("error"); return;
       }
-      
-      const spProps = (salespersonEnabled && salespersonMultiple && currentAgent) ? {
-        salespersonId: currentAgent.id,
-        salespersonName: currentAgent.name,
-        commissionPercent: Number(currentAgent.commissionRate || salespersonDefaultRate),
-        commissionType: currentAgent.commissionType || salespersonDefaultType,
-        commissionFixed: Number(currentAgent.commissionFixed || salespersonDefaultFixed),
-      } : {};
 
-      // ── CASE A: blank price → duplicate last ──────────────
       if (priceEmpty) {
         if (!items.length) { showToast("Enter a price first.", "warning"); play("error"); return; }
         const last = items[items.length - 1];
@@ -1182,16 +1197,25 @@ const Dashboard = () => {
         if (discRaw > maxBillDiscountPercent)
           toast.error(`Max discount: ${maxBillDiscountPercent}%`, { duration: 1800 });
 
-        const newItem = {
+        const newItem = enrichItem({
           id: generateLineItemId(), serialId: getNextItemSerial(),
           productName: last.productName, price: lineUnitPrice(last.price),
           qty: dupQty, discount: dupDisc, discountType: "percent",
-          ...spProps
-        };
+        });
         updateTab((tab) => ({
           ...tab, items: [...tab.items, newItem],
           lastItemId: newItem.id, activeBill: true,
         }));
+        try {
+          if (newItem.salespersonId) {
+            logActivity("ITEM_SALESPERSON_ASSIGN", userData?.uid, storeId, {
+              itemId: newItem.id,
+              salespersonId: newItem.salespersonId,
+              salespersonName: newItem.salespersonName || null,
+              serialNo: currentBillSerial || "----",
+            }).catch(() => {});
+          }
+        } catch (e) { /* ignore */ }
         intentionalDupRef.current = false;
         play("add"); speakEntry(last.price, dupQty, dupDisc);
         showToast(`✅ Duplicated: Rs.${last.price?.toLocaleString()} ×${dupQty}`, "success");
@@ -1200,12 +1224,10 @@ const Dashboard = () => {
         return;
       }
 
-      // ── CASE B: invalid price ─────────────────────────────
       if (!priceValid) { showToast("Valid price required.", "error"); play("error"); priceInputRef.current?.focus(); return; }
       if (qtyVal <= 0) { showToast("Enter quantity first.", "warning"); play("error"); qtyInputRef.current?.focus(); return; }
       if (showProductName && !(form.productName || "").trim()) { showToast("Product name required.", "error"); play("error"); return; }
 
-      // ── CASE C: valid price → new or merged row ───────────
       const discRaw = form.discount !== "" ? Number(form.discount) : Number(lastEntryRef.current.discount) || 0;
       const discAmt = Math.min(maxBillDiscountPercent, Math.max(0, discRaw));
       if (discRaw > maxBillDiscountPercent)
@@ -1218,7 +1240,7 @@ const Dashboard = () => {
 
       const mergeTarget = items.find((item) => {
         if (salespersonEnabled && salespersonMultiple) {
-          return isSamePriceItem(item, price, discAmt, spProps.salespersonId);
+          return isSamePriceItem(item, price, discAmt, currentAgent?.id);
         }
         return isSamePriceItem(item, price, discAmt, item.salespersonId);
       });
@@ -1243,17 +1265,26 @@ const Dashboard = () => {
         return;
       }
 
-      const newItem = {
+      const newItem = enrichItem({
         id: generateLineItemId(), serialId, productName: prodName,
         price, qty: qtyVal, discount: discAmt, discountType: "percent",
-        ...spProps
-      };
+      });
       updateTab((tab) => ({
         ...tab,
         items: mergeItemsByPrice([...tab.items, newItem]),
         lastItemId: newItem.id, activeBill: true,
         billStartTime: tab.billStartTime || new Date(),
       }));
+      try {
+        if (newItem.salespersonId) {
+          logActivity("ITEM_SALESPERSON_ASSIGN", userData?.uid, storeId, {
+            itemId: newItem.id,
+            salespersonId: newItem.salespersonId,
+            salespersonName: newItem.salespersonName || null,
+            serialNo: currentBillSerial || "----",
+          }).catch(() => {});
+        }
+      } catch (e) { /* ignore */ }
       intentionalDupRef.current = false;
       lastEntryRef.current = { price: String(price), qty: qtyVal, discount: discAmt, discountType: "percent" };
       setForm({ productName: "", serialId: "", price: "", qty: 1, discount: "", discountType: "percent" });
@@ -1266,9 +1297,9 @@ const Dashboard = () => {
     }
   }, [
     form, screenLocked, items, showProductName, play, speakEntry,
-    showToast, updateTab, maxBillDiscountPercent, salespersonEnabled, 
-    salespersonRequireSelection, salespersonId, salespersonAgents, 
-    salespersonDefaultRate, salespersonDefaultType, salespersonDefaultFixed
+    showToast, updateTab, maxBillDiscountPercent, salespersonEnabled,
+    salespersonMultiple, salespersonRequireSelection, hasAgents,
+    enrichItem, currentAgent
   ]);
 
   const deleteRow = useCallback((id) => {
@@ -1279,7 +1310,7 @@ const Dashboard = () => {
     play("delete");
     if (item) speakCount(-Number(item.qty || 0));
     requestAnimationFrame(() => priceInputRef.current?.focus());
-  }, [screenLocked, items, play, logClearedData, updateTab]);
+  }, [screenLocked, items, play, logClearedData, updateTab, speakCount]);
 
   const changeQty = useCallback((id, v) => {
     if (screenLocked) return;
@@ -1308,7 +1339,6 @@ const Dashboard = () => {
   // ══════════════════════════════════════════════════════════════
   // BILL ACTIONS
   // ══════════════════════════════════════════════════════════════
-
   const clearBill = useCallback(() => {
     if (screenLocked) { play("error"); return; }
     if (!items.length) {
@@ -1354,14 +1384,13 @@ const Dashboard = () => {
   }, [
     screenLocked, items, currentBillSerial, subtotal, totalDiscount, totalQty,
     customer, billStartTime, billEndTime, userData, billerId, storeId, isOnline,
-    play, logClearedData, showToast, updateTab,
+    play, logClearedData, showToast, updateTab, speakCount,
   ]);
 
   const cancelBill = useCallback(() => {
     if (!items.length) { showToast("No bill to cancel.", "warning"); return; }
     if (!_isSuperAdminRole(userData) && !isSuperAdmin) {
       showToast("🚫 Only Super Admin can cancel bills", "error");
-      console.warn("[BillerDashboard] cancelBill denied:", userData?.email);
       return;
     }
     if (!window.confirm("Cancel this bill?")) return;
@@ -1382,13 +1411,11 @@ const Dashboard = () => {
   ]);
 
   // ══════════════════════════════════════════════════════════════
-  // ✅ v9 FIX 2: SAVE IN BACKGROUND — localId for deduplication
+  // SAVE IN BACKGROUND
   // ══════════════════════════════════════════════════════════════
   const saveInBackground = useCallback(async (snapshot) => {
     try {
       const online = navigator.onLine && isOnlineRef.current;
-
-      // ✅ v9 FIX 3: Generate localId for deduplication
       const localId = snapshot.localId || generateLocalId();
 
       const claimedSerial = await claimNextSerial(
@@ -1416,7 +1443,6 @@ const Dashboard = () => {
       });
 
       const orderData = {
-        // ✅ v9 FIX 3: localId for single write path deduplication
         localId,
         serialNo: claimedSerial,
         billSerial: claimedSerial,
@@ -1441,9 +1467,11 @@ const Dashboard = () => {
         paymentStatus: (dualModeEnabled ? (snapshot.isAutoApproved ? "paid" : "pending_approval") : "pending_payment"),
         salesperson: snapshot.salesperson || null,
         salespersonCommission: snapshot.salesperson?.commissionAmount || 0,
+        salespersonBreakdown: snapshot.salespersonBreakdown || [],
+        salespersonId: snapshot.salespersonId || null,
+        salespersonName: snapshot.salespersonName || null,
         status: snapshot.isAutoApproved ? "approved" : "pending",
         cashierHandover: !snapshot.isAutoApproved,
-        // Mark whether this bill requires manager approval (dual/approval flow)
         dualMode: dualModeEnabled ? !snapshot.isAutoApproved : false,
         billerSubmittedAt: serverTimestamp(),
         billerName: snapshot.billerName || userData?.name || "Unknown",
@@ -1462,10 +1490,8 @@ const Dashboard = () => {
         toast.error("Duplicate bill.", { duration: 2500 }); return;
       }
 
-      // If bill saved but requires manager approval (dual mode/pending), create approval request
       try {
         if (result.success && !snapshot.isAutoApproved) {
-          // submit approval using localId to link
           await managerService.submitBillForManagerApproval(localId, undefined, "Submitted via cashier (dual mode)");
         }
       } catch (err) {
@@ -1485,7 +1511,7 @@ const Dashboard = () => {
             JSON.stringify({ lastSerial: serialNum, max: serialNum, date: _todayDateStr(), savedAt: Date.now() }),
           );
         }
-      } catch { /* ignore */ }
+      } catch { }
 
       broadcastChannelRef.current?.postMessage({
         type: "new_order", serialNo: realSerial,
@@ -1498,13 +1524,12 @@ const Dashboard = () => {
 
       if (!printModalOpenRef.current) await refreshSerialPreview(sid);
 
-      // Non-critical background tasks
       queueMicrotask(() => {
         try {
           _saveCustomerBg(snapshot.storeId, snapshot.billerId, {
-             name: resolvedName, phone: (snapshot.customer.phone || "").trim(),
-             city: snapshot.customer.city || "", market: snapshot.customer.market || "",
-           }, false);
+            name: resolvedName, phone: (snapshot.customer.phone || "").trim(),
+            city: snapshot.customer.city || "", market: snapshot.customer.market || "",
+          }, false);
           if (!result.offline && result.id)
             createAuditLog({ ...orderData, id: result.id, serialNo: realSerial },
               "ORDER_SUBMITTED", snapshot.billerId).catch(() => { });
@@ -1528,7 +1553,7 @@ const Dashboard = () => {
           : `📤 Bill #${realSerial} sent to cashier!`,
         { duration: 2200 },
       );
-      // Speak final serial number once after successful save (opt-in enabled)
+
       try {
         const lang = countingLang === 'ur' ? 'ur-PK' : 'en-US';
         const serialNum = _extractSerialNum(realSerial);
@@ -1537,39 +1562,57 @@ const Dashboard = () => {
         } else if (sound && typeof sound.speak === 'function') {
           sound.speak(realSerial, lang);
         }
-      } catch (e) { /* ignore speech errors */ }
+      } catch { }
     } catch (err) {
       console.error("[Dashboard] saveInBackground:", err);
       toast.error(getFriendlyError(err), { duration: 3000 });
       play("error");
     }
-  }, [play, resolveCustomerName, refreshSerialPreview, refreshOfflineCount,
-    maxBillDiscountPercent, userData, activeTabId]);
+  }, [play, refreshSerialPreview, refreshOfflineCount,
+    maxBillDiscountPercent, userData, activeTabId, dualModeEnabled,
+    countingLang, sound]);
 
   // ══════════════════════════════════════════════════════════════
-  // ✅ v9 FIX 1: FINALIZE & PRINT — Single lock release point
-  // ✅ v9 FIX 2: Print modal opens BEFORE save
+  // FINALIZE & PRINT
   // ══════════════════════════════════════════════════════════════
   const finalizeAndPrint = useCallback(async (overridePayment = null) => {
-    // Check if already saving
     if (saveDoneRef.current || submittingRef.current) return;
     if (!items.length) { showToast("Add at least one item.", "error"); return; }
-    if (salespersonEnabled && !salespersonMultiple && salespersonRequireSelection && !salespersonId) {
+
+    const validation = validateAssignment(items);
+    if (!validation.valid) {
+      toast.error(validation.message || "Invalid salesperson assignment.");
+      releaseF8Lock();
+      return;
+    }
+
+    if (salespersonEnabled && !salespersonMultiple && salespersonRequireSelection && hasAgents && !salespersonId) {
       showToast("Select a salesperson.", "error"); setShowSummaryPopup(true); return;
     }
 
-    // ✅ v9 FIX 5: Instant F8 response - set flags immediately
     saveDoneRef.current = true;
     submittingRef.current = true;
     const endTime = new Date();
     const displaySerial = nextPreviewSerial;
-
-    // ✅ v9 FIX 3: Generate localId for deduplication
     const localId = generateLocalId();
 
-    // ✅ Capture snapshot BEFORE any reset
+    const commissionSummary = buildCommissionSummary(items, finalTotal, subtotal);
+    let finalSPId = null;
+    let finalSPName = null;
+    if (!salespersonMultiple) {
+      finalSPId = salespersonId || null;
+      finalSPName = selectedSalesperson?.name || null;
+    } else {
+      const assignedSPIds = [...new Set(items.map(i => i.salespersonId).filter(Boolean))];
+      if (assignedSPIds.length === 1) {
+        finalSPId = assignedSPIds[0];
+        const agent = salespersonAgents.find(a => a.id === finalSPId);
+        finalSPName = agent ? agent.name : null;
+      }
+    }
+
     const snapshot = {
-      localId, // ✅ v9 FIX 3: Include localId
+      localId,
       items: items.map(_cleanItem),
       customer: { ...customer },
       totalQty,
@@ -1586,6 +1629,9 @@ const Dashboard = () => {
       isOnline: isOnlineRef.current,
       overridePayment,
       paymentType: paymentType || "cash",
+      salespersonBreakdown: commissionSummary,
+      salespersonId: finalSPId,
+      salespersonName: finalSPName,
       salesperson: (salespersonEnabled && !salespersonMultiple) && salespersonId
         ? {
           id: salespersonId,
@@ -1597,7 +1643,6 @@ const Dashboard = () => {
         : null,
     };
 
-    // ✅ v9 FIX 2: Prepare order for print BEFORE save
     const orderForPrint = {
       serialNo: displaySerial,
       billSerial: displaySerial,
@@ -1615,24 +1660,18 @@ const Dashboard = () => {
       billEndTime: endTime,
     };
 
-    // ✅ v9 FIX 6: Close all dialogs immediately
     setShowSummaryPopup(false);
     setShowCustomerDialog(false);
     setShowCashierPayment(false);
     setSubmitting(false);
 
-    // ✅ v9 FIX 2: Show print modal IMMEDIATELY (before save)
     setPrintOrder(orderForPrint);
     setShowPrintModal(true);
 
-    // ✅ Reset bill immediately so F8 is unblocked
     resetBill();
     submittingRef.current = false;
-
-    // ✅ v9 FIX 1: Single release point - no race conditions
     releaseF8Lock();
 
-    // ✅ Save in background (non-blocking)
     try {
       await saveInBackground(snapshot);
     } catch (err) {
@@ -1644,6 +1683,7 @@ const Dashboard = () => {
     nextPreviewSerial, showToast, resetBill, saveInBackground, releaseF8Lock,
     salespersonEnabled, salespersonMultiple, salespersonRequireSelection, salespersonId,
     selectedSalesperson, salespersonDefaultType, salespersonDefaultRate, salespersonCommission,
+    validateAssignment, buildCommissionSummary, salespersonAgents, hasAgents, paymentType,
   ]);
 
   const onPrintClose = useCallback(() => {
@@ -1661,12 +1701,10 @@ const Dashboard = () => {
     });
     setShowCustomerDialog(false);
     if (items.length > 0 && !screenLocked) { setShowSummaryPopup(true); updateTab({ f8Step: 2 }); }
-    
-    // ✅ v9 FIX 7: Release lock <100ms
+
     releaseF8Lock();
-    
     play("keyPress");
-    
+
     queueMicrotask(() => {
       try {
         const phone = normalizePhone(cData.phone || "");
@@ -1682,7 +1720,6 @@ const Dashboard = () => {
   const onSummaryProceed = useCallback(() => {
     setShowSummaryPopup(false);
     updateTab({ billEndTime: new Date() });
-    // Only show the payment collection screen for offline save flow.
     if (!isOnline) {
       setShowCashierPayment(true); updateTab({ f8Step: 4 }); releaseF8Lock();
     } else {
@@ -1706,46 +1743,37 @@ const Dashboard = () => {
   }, [amountReceived, finalTotal, paymentType, showToast, finalizeAndPrint]);
 
   // ══════════════════════════════════════════════════════════════
-  // ✅ v9 FIX 1: KEYBOARD HANDLERS — F8 <16ms response
+  // KEYBOARD HANDLERS
   // ══════════════════════════════════════════════════════════════
   const handleF8 = useCallback(() => {
-    // ✅ Instant check - no async
     if (saveDoneRef.current) return;
-    
+
     const now = Date.now();
-    // ✅ Anti-spam: 200ms minimum between F8 presses
     if (now - lastF8Ref.current < 200) return;
     lastF8Ref.current = now;
-    
-    // ✅ v9 FIX 1: Try to acquire lock - instant fail if locked
+
     if (!acquireF8Lock()) {
       showToast("Processing... please wait.", "warning");
       return;
     }
-    
-    // ✅ Print modal close takes priority
+
     if (showPrintModal) {
       onPrintClose();
       return;
     }
-    
-    // ✅ No items = nothing to checkout
+
     if (!items.length) {
       showToast("Add items first.", "error");
       releaseF8Lock();
       return;
     }
-    
-    // ✅ v9 FIX 6: F8 works in ALL modals
+
     switch (f8Step) {
       case 0:
-        // No customer dialog yet → open it
         openCustDialog();
         break;
       case 1:
-        // Customer dialog open → treat as Enter (save + next)
         if (showCustomerDialog) {
-          // Close customer dialog, move to summary
           setShowCustomerDialog(false);
           if (items.length > 0) {
             setShowSummaryPopup(true);
@@ -1757,7 +1785,6 @@ const Dashboard = () => {
         }
         break;
       case 2:
-        // Summary popup → finalize
         if (showSummaryPopup) {
           onSummaryProceed();
         } else {
@@ -1765,7 +1792,6 @@ const Dashboard = () => {
         }
         break;
       case 4:
-        // Cashier payment → confirm
         if (showCashierPayment) {
           onCashierConfirm();
         } else {
@@ -1773,43 +1799,36 @@ const Dashboard = () => {
         }
         break;
       default:
-        // Fallback: open customer dialog
         openCustDialog();
     }
   }, [
     f8Step, items.length, showPrintModal, showSummaryPopup,
     showCustomerDialog, showCashierPayment,
-    openCustDialog, onSummaryProceed, onPrintClose, onCashierConfirm, 
+    openCustDialog, onSummaryProceed, onPrintClose, onCashierConfirm,
     showToast, acquireF8Lock, releaseF8Lock, updateTab,
   ]);
 
   const handleEscape = useCallback(() => {
-    // Print modal close takes priority
     if (showPrintModal) { onPrintClose(); return; }
-    
-    // Cashier payment → back to summary
+
     if (showCashierPayment) {
       setShowCashierPayment(false);
       releaseF8Lock();
       setShowSummaryPopup(true); updateTab({ f8Step: 2 }); return;
     }
-    
-    // Summary → back to customer
+
     if (f8Step === 2 && showSummaryPopup) {
       setShowSummaryPopup(false); setShowCustomerDialog(true);
       updateTab({ f8Step: 1 }); releaseF8Lock(); return;
     }
-    
-    // Customer dialog → close and back to bill
+
     if (showCustomerDialog) {
       setShowCustomerDialog(false); updateTab({ f8Step: 0 }); releaseF8Lock();
       requestAnimationFrame(() => priceInputRef.current?.focus()); return;
     }
-    
-    // Suggestions → close
+
     if (showSug) { setShowSug(false); setCustSuggestions([]); setActiveField(""); requestAnimationFrame(() => priceInputRef.current?.focus()); return; }
-    
-    // Default: clear selection, focus price
+
     updateTab({ selectedRowIndex: -1 }); setShowSug(false); priceInputRef.current?.focus();
   }, [f8Step, showPrintModal, showSummaryPopup, showCustomerDialog, showCashierPayment, showSug, onPrintClose, updateTab, releaseF8Lock]);
 
@@ -1882,7 +1901,7 @@ const Dashboard = () => {
       const up = { ...(store.billerPermissions || {}), [key]: nv };
       await updateStore(store.id, { billerPermissions: up });
       setStore((p) => ({ ...p, billerPermissions: up }));
-    } catch { /* ignore */ }
+    } catch { }
   }, [isSuperAdmin, permissions, store]);
 
   // ── Keyboard shortcuts ────────────────────────────────────
@@ -2014,6 +2033,14 @@ const Dashboard = () => {
     ? "rounded-2xl border border-yellow-500/20 bg-[#15120d]/95"
     : "rounded-2xl border border-yellow-200 bg-white";
 
+  // ✅ Show salesperson UI only when feature enabled + agents exist
+  // Show selector in Entry (left) to avoid duplicate header — hide right bar if entry bar present
+  const showSPInEntry = salespersonEnabled && hasAgents;
+  const showSPSelectorBar = salespersonEnabled && salespersonMultiple && hasAgents && !showSPInEntry;
+  const showSPColumnInTable = salespersonEnabled && showSalespersonColumn && hasAgents;
+  const enableMultiSPEdit = salespersonEnabled && salespersonMultiple && hasAgents;
+  const showCommissionPanel = salespersonEnabled && hasAgents && items.length > 0;
+
   return (
     <div className="flex flex-col h-screen overflow-hidden" style={{ fontSize: `${billerFontSize}px` }}>
       <BillerHeader
@@ -2071,7 +2098,6 @@ const Dashboard = () => {
         setCountingLang={setCountingLang}
       />
 
-
       {/* Lock overlay */}
       {screenLocked && items.length === 0 && tabs.length === 1 && (
         <div className={`fixed inset-0 z-50 flex items-center justify-center ${isDark ? "bg-black/80" : "bg-white/80"}`}>
@@ -2117,6 +2143,16 @@ const Dashboard = () => {
               {offlineCount} pending
             </span>
           )}
+        </div>
+      )}
+
+      {/* ✅ Salesperson system enabled but no active agents */}
+      {salespersonEnabled && !hasAgents && (
+        <div className="flex items-center gap-2 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 mx-3 mt-1 shrink-0">
+          <AlertCircle size={14} className="text-red-400 shrink-0" />
+          <p className="font-semibold text-red-400 text-xs">
+            ⚠️ Salesperson system is enabled but no active agents are configured. Contact SuperAdmin.
+          </p>
         </div>
       )}
 
@@ -2198,27 +2234,6 @@ const Dashboard = () => {
                 </div>
               )}
 
-              {salespersonEnabled && salespersonMultiple && (
-                <div>
-                  <label className="block text-[10px] font-semibold text-gray-500 mb-1 uppercase">
-                    Current Salesperson {salespersonRequireSelection ? "*" : ""}
-                  </label>
-                  <select
-                    value={salespersonId || ""}
-                    onChange={(e) => updateTab({ salespersonId: e.target.value })}
-                    disabled={screenLocked}
-                    className={`w-full rounded-xl border px-3 py-2 text-sm outline-none ${isDark ? "border-yellow-500/20 bg-[#0f0d09] text-white" : "border-yellow-200 bg-white text-gray-900"} disabled:opacity-50`}
-                  >
-                    <option value="">{salespersonRequireSelection ? "-- Select Salesperson --" : "-- None --"}</option>
-                    {salespersonAgents.map((agent) => (
-                      <option key={agent.id} value={agent.id}>
-                        {agent.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              )}
-
               {showProductName && (
                 <div>
                   <label className="block text-[10px] font-semibold text-gray-500 mb-1 uppercase">Product Name *</label>
@@ -2231,6 +2246,54 @@ const Dashboard = () => {
               )}
 
               <div className="grid grid-cols-2 gap-2">
+                {/* Entry Salesperson selector (avoids duplicate header) */}
+                {showSPInEntry && (
+                  <div className="col-span-2 mb-1">
+                    <CurrentSPBar
+                      agents={salespersonAgents}
+                      currentSPId={currentSPId}
+                      onSelect={handleSelectSalesperson}
+                      required={salespersonRequireSelection}
+                      isDark={isDark}
+                    />
+                    <div className="flex items-center gap-2 mt-2">
+                      <button
+                        type="button"
+                        onClick={() => setGroupBySalesperson((g) => !g)}
+                        className={`text-xs font-medium px-2 py-1 rounded-lg ${groupBySalesperson ? (isDark ? 'bg-amber-500/15 text-amber-400' : 'bg-amber-50 text-amber-700') : (isDark ? 'bg-[#0f0d09] text-gray-400' : 'bg-white text-gray-600')} `}
+                      >
+                        {groupBySalesperson ? 'Flat View' : 'Group by SP'}
+                      </button>
+                      { /* Live commission preview */ }
+                      {salespersonEnabled && hasAgents && (salespersonMultiple ? currentAgent : selectedSalesperson) && (
+                        <div className="text-xs text-gray-400 ml-auto">
+                          <span className="font-semibold text-emerald-400">Preview:</span>
+                          <span className="ml-2 font-bold text-emerald-300">
+                            Rs.{(() => {
+                              try {
+                                const priceN = Number(form.price || 0);
+                                const qtyN = Number(form.qty || 1);
+                                const discN = Number(form.discount || 0);
+                                const agent = salespersonMultiple ? currentAgent : selectedSalesperson;
+                                const item = {
+                                  price: priceN,
+                                  qty: qtyN,
+                                  discount: discN,
+                                  discountType: form.discountType || 'percent',
+                                  commissionType: agent?.commissionType || salespersonDefaultType,
+                                  commissionPercent: agent?.commissionRate ?? salespersonDefaultRate,
+                                  commissionFixed: agent?.commissionFixed ?? salespersonDefaultFixed,
+                                };
+                                const { rawComm } = calcItemCommission(item);
+                                return Math.round(rawComm).toLocaleString();
+                              } catch { return '0'; }
+                            })()}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
                 <div>
                   <label className="block text-[10px] font-semibold text-gray-500 mb-1 uppercase">Price *</label>
                   <input ref={priceInputRef} type="text" inputMode="numeric" value={form.price}
@@ -2377,229 +2440,62 @@ const Dashboard = () => {
           </div>
         </section>
 
-        {/* RIGHT: Table + Footer */}
+        {/* ════════════════════════════════════════════════════ */}
+        {/* RIGHT: Table + Footer                                 */}
+        {/* ════════════════════════════════════════════════════ */}
         <div className="flex flex-col min-h-0 gap-1.5 overflow-hidden">
+
+          {/* Main table section */}
           <section className={`${cardClass} flex flex-col flex-1 min-h-0 overflow-hidden`}>
-            {/* Table header */}
-            <div className={`shrink-0 ${isDark ? "bg-[#1a1508]" : "bg-yellow-50"}`}>
-              <div className="px-3 py-2 flex items-center justify-end gap-2">
-                {salespersonEnabled && (showSalespersonColumn || salespersonMultiple) && (
-                  <button onClick={() => setGroupBySalesperson(s => !s)}
-                    className={`text-xs px-2 py-1 rounded-xl border ${isDark ? "border-yellow-500/10 text-yellow-300" : "border-yellow-200 text-yellow-700"}`}>
-                    {groupBySalesperson ? 'Ungroup' : 'Group by Salesperson'}
-                  </button>
+
+            {/* ✅ Current Salesperson Bar — only when SP feature ON + multi + agents exist */}
+            {showSPSelectorBar && (
+              <div className={`px-3 py-2 flex flex-wrap items-center justify-between gap-2 border-b shrink-0 ${isDark ? "border-yellow-500/10 bg-[#160f08]" : "border-yellow-100 bg-yellow-50/50"
+                }`}>
+                <CurrentSPBar
+                  agents={salespersonAgents}
+                  currentSPId={currentSPId}
+                  onSelect={handleSelectSalesperson}
+                  required={salespersonRequireSelection}
+                  isDark={isDark}
+                />
+                {currentAgent && (
+                  <span className="text-xs font-bold text-amber-500 animate-pulse">
+                    Next items → {currentAgent.name}
+                  </span>
                 )}
               </div>
-              <table className="w-full table-fixed" style={{ fontSize: `${Math.max(billerFontSize, 15)}px` }}>
-                <colgroup>
-                  <col style={{ width: "36px" }} />
-                  {showProductName && <col />}
-                  <col style={{ width: "100px" }} />
-                  <col style={{ width: "72px" }} />
-                  {showDiscColumn && <col style={{ width: "76px" }} />}
-                  <col style={{ width: "96px" }} />
-                  <col style={{ width: "28px" }} />
-                </colgroup>
-                <thead>
-                  <tr className={isDark ? "text-yellow-500" : "text-yellow-700"}>
-                    <th className="px-2 py-1 text-left font-bold text-[12px]">#</th>
-                    {showProductName && <th className="px-2 py-1 text-left font-bold text-[12px]">Product</th>}
-                    <th className="px-2 py-1 text-left font-bold text-[12px]">Price</th>
-                    {showSalespersonColumn && <th className="px-2 py-1 text-left font-bold text-[12px]">Salesperson</th>}
-                    <th className="px-2 py-1 text-left font-bold text-[12px]">Qty</th>
-                    {showDiscColumn && <th className="px-2 py-1 text-left font-bold text-[12px]">Disc</th>}
-                    <th className="px-2 py-1 text-left font-bold text-[12px]">Total</th>
-                    <th className="px-2 py-1" />
-                  </tr>
-                </thead>
-              </table>
-              <div className={`h-px ${isDark ? "bg-yellow-500/20" : "bg-yellow-200"}`} />
+            )}
+
+
+
+            {/* ✅ BillItemsTable — full flex space */}
+            <div ref={tableContainerRef} className="flex-1 min-h-0 overflow-auto">
+              <BillItemsTable
+                items={items}
+                agents={salespersonAgents}
+                showSalesperson={showSPColumnInTable || showSPInEntry}
+                multiSP={enableMultiSPEdit}
+                groupBy={groupBySalesperson}
+                onGroupToggle={(v) => setGroupBySalesperson(Boolean(v))}
+                onItemRemove={deleteRow}
+                onItemReassign={handleReassignItem}
+                onQtyChange={changeQty}
+                onDiscountChange={changeDiscount}
+                isDark={isDark}
+              />
             </div>
 
-            {/* Table body */}
-            <div ref={tableContainerRef} className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden" style={{ scrollBehavior: "smooth" }}>
-              <table className="w-full table-fixed" style={{ fontSize: `${Math.max(billerFontSize, 15)}px` }}>
-                <colgroup>
-                  <col style={{ width: "36px" }} />
-                  {showProductName && <col />}
-                  <col style={{ width: "100px" }} />
-                  {showSalespersonColumn && <col style={{ width: "120px" }} />}
-                  <col style={{ width: "72px" }} />
-                  {showDiscColumn && <col style={{ width: "76px" }} />}
-                  <col style={{ width: "96px" }} />
-                  <col style={{ width: "28px" }} />
-                </colgroup>
-                <tbody>
-                  {items.length === 0 ? (
-                    <tr>
-                      <td colSpan={20} className="px-4 py-8 text-center">
-                        <Package size={26} className="mx-auto mb-2 text-yellow-500/40" />
-                        <p className={`text-sm ${isDark ? "text-gray-400" : "text-gray-500"}`}>No items</p>
-                        <p className={`text-xs mt-1 ${isDark ? "text-gray-600" : "text-gray-400"}`}>INSERT → price → Enter</p>
-                      </td>
-                    </tr>
-                  ) : groupBySalesperson ? (
-                    (() => {
-                      const groups = {};
-                      items.forEach((it) => {
-                        const key = it.salespersonName || 'Unassigned';
-                        if (!groups[key]) groups[key] = [];
-                        groups[key].push(it);
-                      });
-                      return Object.entries(groups).map(([spName, arr], gi) => (
-                        <>
-                          <tr key={`group-${gi}`} className={isDark ? "bg-[#11100c] text-yellow-400" : "bg-yellow-50 text-yellow-700"}>
-                            <td colSpan={showProductName ? 7 : 6} className="px-3 py-2 font-semibold">{`--- ${spName} ---`}</td>
-                          </tr>
-                          {arr.map((item, index) => {
-                            const unit = lineUnitPrice(item.price);
-                            const itemDisc = Math.min(maxBillDiscountPercent, Number(item.discount) || 0);
-                            const discAmt = Math.round((unit * itemDisc) / 100);
-                            const hasDisc = discAmt > 0;
-                            const lineTotal = (unit - discAmt) * item.qty;
-                            const origTotal = unit * item.qty;
-                            const isSel = selectedRowIndex === index;
-                            const isLast = lastItemId === item.id;
-                            return (
-                              <tr key={item.id} onClick={() => updateTab({ selectedRowIndex: index })}
-                                className={`cursor-pointer border-b transition-colors ${isSel
-                                  ? isDark ? "border-yellow-500/40 bg-yellow-500/15" : "border-yellow-300 bg-yellow-100/60"
-                                  : isLast
-                                    ? isDark ? "border-yellow-500/10 bg-green-500/5" : "border-yellow-100 bg-green-50/30"
-                                    : isDark ? "border-yellow-500/10 text-white hover:bg-white/5" : "border-yellow-100 text-gray-900 hover:bg-gray-50"
-                                  }`}>
-                                <td className="px-2 py-1.5">
-                                  <span className={`inline-flex h-6 w-6 items-center justify-center rounded-full text-[12px] font-bold ${isSel ? "bg-yellow-500 text-black" : isDark ? "bg-yellow-500/20 text-yellow-400" : "bg-yellow-100 text-yellow-700"}`}>
-                                    {fmtItemSerial(index + 1)}
-                                  </span>
-                                </td>
-                                {showProductName && (
-                                  <td className={`px-2 py-1.5 truncate text-[12px] ${isDark ? "text-gray-200" : "text-gray-800"}`}>{(item.productName || "").replace(/^ITEM-[\w-]+\s*/i, "").replace(/^Item\s*-\s*ITEM-[\w-]+/i, `Item ${fmtItemSerial(index + 1)}`) || `Item ${fmtItemSerial(index + 1)}`}</td>
-                                )}
-                                <td className="px-2 py-1.5">
-                                  {hasDisc ? (
-                                    <div className="leading-none">
-                                      <span className={`text-[13px] font-bold line-through decoration-2 block ${isDark ? "text-red-300/70 decoration-red-400" : "text-red-500 decoration-red-500"}`}>{unit.toLocaleString()} −{itemDisc}%</span>
-                                      <span className={`font-bold ${isDark ? "text-green-400" : "text-green-600"}`} style={{ fontSize: `${Math.max(billerFontSize + 2, 17)}px` }}>{(unit - discAmt).toLocaleString()}</span>
-                                    </div>
-                                  ) : (
-                                    <span className={`font-bold ${isDark ? "text-gray-200" : "text-gray-700"}`} style={{ fontSize: `${Math.max(billerFontSize + 1, 15)}px` }}>{unit.toLocaleString()}</span>
-                                  )}
-                                </td>
-                                <td className="px-2 py-1.5">
-                                  <input type="text" inputMode="numeric" value={item.qty} data-bill-input="true"
-                                    onChange={(e) => changeQty(item.id, e.target.value.replace(/\D/g, ""))}
-                                    disabled={screenLocked}
-                                    onClick={(e) => { e.stopPropagation(); e.target.select(); }}
-                                    onKeyDown={(e) => { if (e.key === "Delete" || e.key === "Backspace") e.stopPropagation(); if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); priceInputRef.current?.focus(); } }}
-                                    style={{ fontSize: `${Math.max(billerFontSize + 1, 15)}px` }}
-                                    className={`w-16 min-w-[56px] rounded-lg border px-2 py-1 text-center font-semibold outline-none ${isDark ? "border-yellow-500/20 bg-black/30 text-white" : "border-yellow-200 bg-white text-gray-900"} disabled:opacity-50`} />
-                                </td>
-                                {showDiscColumn && (
-                                  <td className="px-2 py-1.5">{showDiscountField ? (<div className="relative w-20"><input type="text" inputMode="decimal" value={item.discount} data-bill-input="true" onChange={(e) => changeDiscount(item.id, e.target.value)} disabled={screenLocked} onClick={(e) => { e.stopPropagation(); e.target.select(); }} onKeyDown={(e) => { if (e.key === "Delete" || e.key === "Backspace") e.stopPropagation(); }} className={`w-full rounded-lg border px-2 py-1 pr-5 text-center text-[15px] font-bold outline-none ${isDark ? "border-yellow-500/20 bg-black/30 text-white" : "border-yellow-200 bg-white text-gray-900"} disabled:opacity-50`} /><span className="absolute right-1.5 top-1/2 -translate-y-1/2 text-[10px] font-bold text-yellow-500">%</span></div>) : hasDisc ? (<span className="text-[12px] text-red-400">-{discAmt.toLocaleString()}</span>) : null}</td>
-                                )}
-                                <td className="px-2 py-1.5"><span className="font-extrabold text-yellow-500" style={{ fontSize: `${Math.max(billerFontSize + 1, 15)}px` }}>{lineTotal.toLocaleString()}</span></td>
-                                <td className="px-2 py-1.5"><button onClick={(e) => { e.stopPropagation(); deleteRow(item.id); }} disabled={screenLocked} className={`rounded-lg p-0.5 transition ${isDark ? "bg-red-500/10 text-red-400 hover:bg-red-500/20" : "bg-red-50 text-red-500 hover:bg-red-100"} disabled:opacity-40`}><X size={10} /></button></td>
-                              </tr>
-                            );
-                          })}
-                        </>
-                      ));
-                    })()
-                  ) : (
-                    items.map((item, index) => {
-                      const unit = lineUnitPrice(item.price);
-                      const itemDisc = Math.min(maxBillDiscountPercent, Number(item.discount) || 0);
-                      const discAmt = Math.round((unit * itemDisc) / 100);
-                      const hasDisc = discAmt > 0;
-                      const lineTotal = (unit - discAmt) * item.qty;
-                      const origTotal = unit * item.qty;
-                      const isSel = selectedRowIndex === index;
-                      const isLast = lastItemId === item.id;
-                      return (
-                        <tr key={item.id} onClick={() => updateTab({ selectedRowIndex: index })}
-                          className={`cursor-pointer border-b transition-colors ${isSel
-                            ? isDark ? "border-yellow-500/40 bg-yellow-500/15" : "border-yellow-300 bg-yellow-100/60"
-                            : isLast
-                              ? isDark ? "border-yellow-500/10 bg-green-500/5" : "border-yellow-100 bg-green-50/30"
-                              : isDark ? "border-yellow-500/10 text-white hover:bg-white/5" : "border-yellow-100 text-gray-900 hover:bg-gray-50"
-                            }`}>
-                          <td className="px-2 py-1.5">
-                            <span className={`inline-flex h-6 w-6 items-center justify-center rounded-full text-[12px] font-bold ${isSel ? "bg-yellow-500 text-black" : isDark ? "bg-yellow-500/20 text-yellow-400" : "bg-yellow-100 text-yellow-700"}`}>
-                              {fmtItemSerial(index + 1)}
-                            </span>
-                          </td>
-                          {showProductName && (
-                            <td className={`px-2 py-1.5 truncate text-[12px] ${isDark ? "text-gray-200" : "text-gray-800"}`}>{(item.productName || "").replace(/^ITEM-[\w-]+\s*/i, "").replace(/^Item\s*-\s*ITEM-[\w-]+/i, `Item ${fmtItemSerial(index + 1)}`) || `Item ${fmtItemSerial(index + 1)}`}</td>
-                          )}
-                          <td className="px-2 py-1.5">
-                            {hasDisc ? (
-                              <div className="leading-none">
-                                <span className={`text-[13px] font-bold line-through decoration-2 block ${isDark ? "text-red-300/70 decoration-red-400" : "text-red-500 decoration-red-500"}`}>{unit.toLocaleString()} −{itemDisc}%</span>
-                                <span className={`font-bold ${isDark ? "text-green-400" : "text-green-600"}`} style={{ fontSize: `${Math.max(billerFontSize + 2, 17)}px` }}>{(unit - discAmt).toLocaleString()}</span>
-                              </div>
-                            ) : (
-                              <span className={`font-bold ${isDark ? "text-gray-200" : "text-gray-700"}`} style={{ fontSize: `${Math.max(billerFontSize + 1, 15)}px` }}>{unit.toLocaleString()}</span>
-                            )}
-                          </td>
-                          {showSalespersonColumn && (
-                            <td className={`px-2 py-1.5 text-[12px] ${isDark ? "text-purple-300" : "text-purple-700"}`}>
-                              {item.salespersonName || ''}
-                            </td>
-                          )}
-                          <td className="px-2 py-1.5">
-                            <input type="text" inputMode="numeric" value={item.qty} data-bill-input="true"
-                              onChange={(e) => changeQty(item.id, e.target.value.replace(/\D/g, ""))}
-                              disabled={screenLocked}
-                              onClick={(e) => { e.stopPropagation(); e.target.select(); }}
-                              onKeyDown={(e) => {
-                                if (e.key === "Delete" || e.key === "Backspace") e.stopPropagation();
-                                if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); priceInputRef.current?.focus(); }
-                              }}
-                              style={{ fontSize: `${Math.max(billerFontSize + 1, 15)}px` }}
-                              className={`w-16 min-w-[56px] rounded-lg border px-2 py-1 text-center font-semibold outline-none ${isDark ? "border-yellow-500/20 bg-black/30 text-white" : "border-yellow-200 bg-white text-gray-900"} disabled:opacity-50`} />
-                          </td>
-                          {showDiscColumn && (
-                            <td className="px-2 py-1.5">
-                              {showDiscountField ? (
-                                <div className="relative w-20">
-                                  <input type="text" inputMode="decimal" value={item.discount} data-bill-input="true"
-                                    onChange={(e) => changeDiscount(item.id, e.target.value)}
-                                    disabled={screenLocked}
-                                    onClick={(e) => { e.stopPropagation(); e.target.select(); }}
-                                    onKeyDown={(e) => { if (e.key === "Delete" || e.key === "Backspace") e.stopPropagation(); }}
-                                    className={`w-full rounded-lg border px-2 py-1 pr-5 text-center text-[15px] font-bold outline-none ${isDark ? "border-yellow-500/20 bg-black/30 text-white" : "border-yellow-200 bg-white text-gray-900"} disabled:opacity-50`} />
-                                  <span className="absolute right-1.5 top-1/2 -translate-y-1/2 text-[10px] font-bold text-yellow-500">%</span>
-                                </div>
-                              ) : hasDisc ? (
-                                <span className="text-[12px] text-red-400">-{discAmt.toLocaleString()}</span>
-                              ) : null}
-                            </td>
-                          )}
-                          <td className="px-2 py-1.5">
-                            {hasDisc ? (
-                              <div className="leading-none">
-                                <span className={`text-[12px] font-bold line-through decoration-2 block ${isDark ? "text-red-300/70 decoration-red-400" : "text-red-500 decoration-red-500"}`}>{origTotal.toLocaleString()} −{itemDisc}%</span>
-                                <span className="font-extrabold text-yellow-500" style={{ fontSize: `${Math.max(billerFontSize + 1, 15)}px` }}>{lineTotal.toLocaleString()}</span>
-                              </div>
-                            ) : (
-                              <span className="font-extrabold text-yellow-500" style={{ fontSize: `${Math.max(billerFontSize + 1, 15)}px` }}>{lineTotal.toLocaleString()}</span>
-                            )}
-                          </td>
-                          <td className="px-2 py-1.5">
-                            <button onClick={(e) => { e.stopPropagation(); deleteRow(item.id); }}
-                              disabled={screenLocked}
-                              className={`rounded-lg p-0.5 transition ${isDark ? "bg-red-500/10 text-red-400 hover:bg-red-500/20" : "bg-red-50 text-red-500 hover:bg-red-100"} disabled:opacity-40`}>
-                              <X size={10} />
-                            </button>
-                          </td>
-                        </tr>
-                      );
-                    })
-                  )}
-                </tbody>
-              </table>
-            </div>
+            {/* ✅ Commission Summary Panel — only when SP ON + items + agents */}
+            {showCommissionPanel && (
+              <div className="px-3 pb-2 shrink-0">
+                <CommissionSummaryPanel
+                  summary={buildCommissionSummary(items, finalTotal, subtotal)}
+                  paidRatio={subtotal > 0 ? Math.min(1, finalTotal / subtotal) : 1}
+                  isDark={isDark}
+                />
+              </div>
+            )}
 
             {/* Bill discount */}
             {items.length > 0 && allowBillDiscount && (
@@ -2636,11 +2532,16 @@ const Dashboard = () => {
                       ...(totalDiscount + billDiscountValue > 0
                         ? [["Saved", `−${(totalDiscount + billDiscountValue).toLocaleString()}`]]
                         : []),
+                      ...(salespersonEnabled && hasAgents && salespersonCommission > 0
+                        ? [["Commission", `+${salespersonCommission.toLocaleString()}`]]
+                        : []),
                     ].map(([label, val]) => (
                       <div key={label}>
                         <span className={`text-[9px] uppercase ${isDark ? "text-gray-500" : "text-gray-400"}`}>{label}</span>
-                        <p className={`font-bold leading-tight ${label === "Saved" ? "text-red-400" : isDark ? "text-white" : "text-gray-900"}`}
-                          style={{ fontSize: `${Math.max(billerFontSize - 2, 13)}px` }}>{val}</p>
+                        <p className={`font-bold leading-tight ${label === "Saved" ? "text-red-400"
+                          : label === "Commission" ? "text-emerald-400"
+                            : isDark ? "text-white" : "text-gray-900"
+                          }`} style={{ fontSize: `${Math.max(billerFontSize - 2, 13)}px` }}>{val}</p>
                       </div>
                     ))}
                   </div>
@@ -2761,8 +2662,9 @@ const Dashboard = () => {
             totalDiscount={totalDiscount} subtotal={subtotal}
             billDiscount={billDiscount} billDiscountType={billDiscountType}
             grandTotal={finalTotal} billSerial={nextPreviewSerial} customer={customer}
-            salespersonEnabled={salespersonEnabled && !salespersonMultiple} salespersonAgents={salespersonAgents}
-            showSalespersonColumn={showSalespersonColumn}
+            salespersonEnabled={salespersonEnabled && !salespersonMultiple && hasAgents}
+            salespersonAgents={salespersonAgents}
+            showSalespersonColumn={showSPColumnInTable}
             groupBySalesperson={groupBySalesperson}
             selectedSalespersonId={salespersonId} salespersonCommission={salespersonCommission}
             onSalespersonChange={(id) => updateTab({ salespersonId: id })}

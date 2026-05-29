@@ -86,7 +86,7 @@ EditCell.displayName = "EditCell";
 // ══════════════════════════════════════════════════════════════
 // BILL TABLE
 // ══════════════════════════════════════════════════════════════
-const BillTableComponent = ({
+const BillTable = memo(({
   items = [],
   selectedRowIndex = -1,
   lastItemId = null,
@@ -638,94 +638,9 @@ const BillTableComponent = ({
         </table>
       </div>
 
-      {/* ── FOOTER ───────────────────────────────────────────── */}
-      <div className={cn(
-        "shrink-0 px-2 py-1.5 border-t",
-        "flex items-center gap-3 text-xs flex-wrap",
-        isDark
-          ? "bg-[#0f0a04] border-yellow-500/10 text-gray-500"
-          : "bg-yellow-50/50 border-yellow-100 text-gray-400",
-      )}>
-        {/* Items count */}
-        <span>
-          Items:{" "}
-          <span className={cn(
-            "font-bold text-[13px]",
-            isDark ? "text-yellow-400" : "text-yellow-700",
-          )}>
-            {items.length}
-          </span>
-        </span>
-
-        {/* Qty total — ✅ FIXED: uses item.qty */}
-        <span>
-          Qty:{" "}
-          <span className={cn(
-            "font-bold text-[13px]",
-            isDark ? "text-yellow-400" : "text-yellow-700",
-          )}>
-            {items.reduce((s, i) => s + (Number(i.qty) || 0), 0)}
-          </span>
-        </span>
-
-        {/* Savings */}
-        {totalSavings > 0 && (
-          <span>
-            Saved:{" "}
-            <span className={cn(
-              "font-bold text-[13px]",
-              isDark ? "text-green-400" : "text-green-600",
-            )}>
-              Rs.{totalSavings.toLocaleString()}
-            </span>
-          </span>
-        )}
-
-        {/* Hint */}
-        <span className={cn(
-          "ml-auto text-[10px] shrink-0 font-mono",
-          isDark ? "text-gray-700" : "text-gray-400",
-        )}>
-          ↑↓ · DblClick · Del
-        </span>
-      </div>
     </>
   );
-};
+});
 
-const areEqual = (prev, next) => {
-  if (prev.selectedRowIndex !== next.selectedRowIndex ||
-      prev.lastItemId !== next.lastItemId ||
-      prev.showProductName !== next.showProductName ||
-      prev.showDiscountField !== next.showDiscountField ||
-      prev.billerFontSize !== next.billerFontSize ||
-      prev.screenLocked !== next.screenLocked ||
-      prev.isDark !== next.isDark ||
-      prev.onSelectRow !== next.onSelectRow ||
-      prev.onChangeQty !== next.onChangeQty ||
-      prev.onChangePrice !== next.onChangePrice ||
-      prev.onChangeDiscount !== next.onChangeDiscount ||
-      prev.onChangeDiscountType !== next.onChangeDiscountType ||
-      prev.onDeleteRow !== next.onDeleteRow ||
-      prev.onFocusPriceInput !== next.onFocusPriceInput ||
-      prev.tableContainerRef !== next.tableContainerRef) {
-    return false;
-  }
-
-  if (prev.items.length !== next.items.length) return false;
-  for (let i = 0; i < prev.items.length; i += 1) {
-    const a = prev.items[i];
-    const b = next.items[i];
-    if (a?.id !== b?.id || a?.price !== b?.price || a?.qty !== b?.qty ||
-        a?.discount !== b?.discount || a?.discountType !== b?.discountType ||
-        a?.productName !== b?.productName) {
-      return false;
-    }
-  }
-
-  return true;
-};
-
-const BillTable = memo(BillTableComponent, areEqual);
 BillTable.displayName = "BillTable";
 export default BillTable;

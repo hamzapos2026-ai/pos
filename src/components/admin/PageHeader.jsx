@@ -21,7 +21,7 @@ const PageHeader = ({ title, description, icon: Icon, actions, badge }) => {
               <h2 className={cn('text-xl sm:text-2xl font-bold', isDark ? 'text-white' : 'text-gray-900')}>{title}</h2>
               {badge}
             </div>
-            {description && <p className={cn('text-sm', isDark ? 'text-gray-400' : 'text-gray-600')}>{description}</p>}
+            {description && <div className={cn('text-sm', isDark ? 'text-gray-400' : 'text-gray-600')}>{description}</div>}
           </div>
         </div>
         {actions && <div className="flex flex-wrap gap-2">{actions}</div>}

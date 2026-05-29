@@ -309,3 +309,20 @@ input[type="number"]::-webkit-outer-spin-button {
   h2 { font-size: 1.375rem; }
   h3 { font-size: 1.125rem; }
 }
+
+/* ============================================
+   RESPONSIVE TABLES & COMPONENT FIXES
+   ============================================ */
+
+/* Force horizontal scroll containers to allow their tables to scroll instead of squishing columns */
+.overflow-x-auto > table,
+.overflow-auto > table {
+  min-width: 100% !important;
+  width: 100% !important;
+  table-layout: auto !important;
+}
+
+/* Fix flex wrapping issues for headers, stats, and action bars on mobile/tablet viewports */
+.flex-wrap {
+  flex-wrap: wrap !important;
+}

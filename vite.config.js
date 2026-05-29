@@ -16,10 +16,8 @@ export default defineConfig({
       registerType: "autoUpdate",
       injectRegister: false,  // We manually call registerSW in main.jsx
       strategies: 'injectManifest',
-      injectManifest: {
-        swSrc: 'src/sw-custom.js',
-        swDest: 'sw.js',
-      },
+      srcDir: 'src',
+      filename: 'sw-custom.js',
 
       // ── Files to include in service worker pre-cache ───────
       includeAssets: [

@@ -166,6 +166,8 @@ export const saveOrder = async (orderData, isOnline) => {
       status: orderData.status || "pending",
       syncStatus: isOnline ? "syncing" : "pending",
       isDeleted: false,  // ✅ Critical: ensures Top 5 listener picks it up
+      isActiveOrder: true, // Active order for PWA dashboard views
+      isArchived: false,   // Not archived yet
       syncedAt: null,
     };
 

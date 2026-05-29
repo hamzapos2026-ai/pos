@@ -9,7 +9,7 @@ import {
   DollarSign, Plus, Wallet, ArrowDownCircle, ArrowUpCircle,
   RefreshCcw, CheckCircle, X, Loader2, TrendingUp, TrendingDown,
   Receipt, RefreshCw, Building2, User, Calendar,
-  AlertCircle, BarChart3, Filter, Search,
+  AlertCircle, BarChart3, Filter, Search, Wifi, Database,
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import managerService from '../../services/managerService';
@@ -67,53 +67,53 @@ const SmartStatCard = ({ label, value, icon: Icon, color, subtitle, trend }) => 
 
   return (
     <motion.div
-      initial={{ opacity: 0, y: 8 }}
+      initial={{ opacity: 0, y: 6 }}
       animate={{ opacity: 1, y: 0 }}
       whileHover={{ y: -2 }}
       className={`
-        relative overflow-hidden rounded-xl border ${c.border}
-        bg-gradient-to-br from-[#1a1208] to-[#12100a]
-        p-3 sm:p-4 transition-all hover:shadow-lg hover:shadow-amber-500/5
+        relative overflow-hidden rounded-xl border border-[#2a1f0d]
+        bg-gradient-to-br from-[#1a1208]/90 to-[#0f0a05]/95 backdrop-blur-md
+        p-2.5 sm:p-3 transition-all hover:shadow-lg hover:shadow-amber-500/5 hover:border-amber-500/30
       `}
     >
       {/* Background glow */}
-      <div className={`absolute -top-8 -right-8 h-24 w-24 rounded-full ${c.bg} blur-2xl opacity-40`} />
+      <div className={`absolute -top-8 -right-8 h-20 w-20 rounded-full ${c.bg} blur-2xl opacity-20`} />
 
       <div className="relative">
         {/* Header */}
-        <div className="flex items-start justify-between gap-2 mb-2">
+        <div className="flex items-start justify-between gap-2 mb-1.5">
           <div className="min-w-0 flex-1">
-            <p className="text-[9px] sm:text-[10px] font-bold uppercase tracking-wider text-gray-500 truncate">
+            <p className="text-[9px] sm:text-[10px] font-bold uppercase tracking-wider text-slate-500 truncate">
               {label}
             </p>
           </div>
-          <div className={`h-7 w-7 sm:h-8 sm:w-8 rounded-lg ${c.icon} flex items-center justify-center shrink-0`}>
-            <Icon className={`w-3.5 h-3.5 sm:w-4 sm:h-4 ${c.text}`} />
+          <div className={`h-6 w-6 sm:h-7 sm:w-7 rounded-lg ${c.icon} flex items-center justify-center shrink-0`}>
+            <Icon className={`w-3 h-3 sm:w-3.5 sm:h-3.5 ${c.text}`} />
           </div>
         </div>
 
         {/* Value — responsive font size */}
         <div className="space-y-0.5">
           <p className={`font-bold text-gray-100 leading-tight ${
-            numValue >= 10000000 ? 'text-base sm:text-lg' :
-            numValue >= 1000000  ? 'text-lg sm:text-xl'  :
-            numValue >= 100000   ? 'text-xl sm:text-2xl' :
-                                   'text-xl sm:text-2xl'
+            numValue >= 10000000 ? 'text-sm sm:text-base' :
+            numValue >= 1000000  ? 'text-base sm:text-lg'  :
+            numValue >= 100000   ? 'text-lg sm:text-xl' :
+                                   'text-lg sm:text-xl'
           }`}>
-            <span className="text-[10px] sm:text-xs text-gray-500 mr-0.5">Rs</span>
+            <span className="text-[9px] sm:text-xs text-slate-500 mr-0.5">Rs</span>
             {fmtShort(numValue)}
           </p>
 
           {/* Subtitle */}
           {subtitle && (
-            <p className="text-[9px] sm:text-[10px] text-gray-500 truncate">
+            <p className="text-[9px] text-slate-500 truncate mt-0.5">
               {subtitle}
             </p>
           )}
 
           {/* Trend */}
           {trend && (
-            <div className="flex items-center gap-1 mt-1">
+            <div className="flex items-center gap-1 mt-0.5">
               <TrendingUp className={`w-2.5 h-2.5 ${trend > 0 ? 'text-green-400' : 'text-red-400 rotate-180'}`} />
               <span className={`text-[9px] font-semibold ${trend > 0 ? 'text-green-400' : 'text-red-400'}`}>
                 {Math.abs(trend)}%
@@ -467,19 +467,20 @@ const CashFlow = () => {
     {
       label: 'Type',
       field: 'type',
+      width: '120px',
       render: (r) => {
         const s = getTypeStyle(r.type);
         const Icon = s.icon;
         const isBill = r.isFromBill || r.billId;
         return (
-          <div className="flex items-center gap-1.5 flex-wrap">
-            <div className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-lg text-[10px] font-bold uppercase ${s.bg} ${s.text}`}>
-              <Icon className="w-3 h-3" />
+          <div className="flex flex-col gap-1 items-start">
+            <div className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold uppercase ${s.bg} ${s.text}`}>
+              <Icon className="w-2.5 h-2.5" />
               {r.type}
             </div>
             {isBill && (
-              <span className="text-[9px] px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-400 font-semibold">
-                <Receipt className="w-2.5 h-2.5 inline mr-0.5" />
+              <span className="text-[9px] px-1 py-0.2 rounded bg-blue-500/10 text-blue-400 font-bold border border-blue-500/10">
+                <Receipt className="w-2 h-2 inline mr-0.5" />
                 BILL
               </span>
             )}
@@ -491,6 +492,7 @@ const CashFlow = () => {
       label: 'Amount',
       field: 'amount',
       align: 'right',
+      width: '110px',
       render: (r) => {
         const s = getTypeStyle(r.type);
         return (
@@ -504,68 +506,67 @@ const CashFlow = () => {
       label: 'Reason',
       field: 'reason',
       render: (r) => (
-        <span className="text-xs text-gray-400 line-clamp-2">{r.reason || '—'}</span>
+        <span className="text-xs text-slate-300 line-clamp-2 max-w-[200px] sm:max-w-none">{r.reason || '—'}</span>
       ),
     },
     {
-      label: 'Operator',
+      label: 'Operator / Branch',
       field: 'userName',
+      width: '140px',
       render: (r) => (
-        <div className="flex items-center gap-1.5">
-          <div className="h-6 w-6 rounded-full bg-amber-500/15 flex items-center justify-center shrink-0">
-            <User className="w-3 h-3 text-amber-400" />
+        <div className="min-w-0">
+          <div className="flex items-center gap-1">
+            <User className="w-2.5 h-2.5 text-amber-500 shrink-0" />
+            <span className="text-xs text-slate-200 font-semibold truncate max-w-[90px]">
+              {r.userName || r.userId || '—'}
+            </span>
           </div>
-          <span className="text-xs text-gray-400 truncate max-w-[100px]">
-            {r.userName || r.userId || '—'}
-          </span>
+          <div className="flex items-center gap-1 mt-0.5">
+            <Building2 className="w-2.5 h-2.5 text-slate-500 shrink-0" />
+            <span className="text-[11px] text-slate-400 font-mono truncate max-w-[90px]">
+              {r.storeId || '—'}
+            </span>
+          </div>
         </div>
       ),
     },
     {
-      label: 'Branch',
-      field: 'storeId',
-      render: (r) => (
-        <div className="flex items-center gap-1">
-          <Building2 className="w-3 h-3 text-gray-500" />
-          <span className="text-[10px] text-gray-500 font-mono">
-            {(r.storeId || '—').slice(0, 10)}
-          </span>
-        </div>
-      ),
-    },
-    {
-      label: 'Time',
+      label: 'Time / Status',
       field: 'createdAt',
-      render: (r) => (
-        <span className="text-[10px] text-gray-500 whitespace-nowrap">
-          {getRelativeTime(r.createdAt || r.timestamp)}
-        </span>
-      ),
-    },
-    {
-      label: 'Status',
-      sortable: false,
-      align: 'center',
+      width: '130px',
+      align: 'right',
       render: (r) => {
         const isBill = r.isFromBill || r.billId;
-        if (isBill) {
-          return (
-            <span className="inline-flex items-center gap-1 text-[10px] text-blue-400 font-semibold">
-              <CheckCircle className="w-3 h-3" /> Auto
-            </span>
-          );
-        }
-        return r.reconciled ? (
-          <span className="inline-flex items-center gap-1 text-[10px] text-green-400 font-semibold">
-            <CheckCircle className="w-3 h-3" /> Done
-          </span>
-        ) : (
-          <button
-            onClick={(e) => { e.stopPropagation(); setConfirmReconcile(r); }}
-            className="text-[10px] px-2 py-1 rounded-lg bg-amber-500/15 text-amber-400 hover:bg-amber-500/25 font-semibold transition-colors"
-          >
-            Reconcile
-          </button>
+        const isSynced = r.synced !== false;
+        return (
+          <div className="flex flex-col items-end gap-1 text-right">
+            <div className="flex items-center gap-1 text-[11px] text-slate-400">
+              <span>{getRelativeTime(r.createdAt || r.timestamp)}</span>
+              {isSynced ? (
+                <Wifi className="w-2.5 h-2.5 text-emerald-500" title="Synced" />
+              ) : (
+                <Database className="w-2.5 h-2.5 text-amber-500 animate-pulse" title="Pending" />
+              )}
+            </div>
+            <div>
+              {isBill ? (
+                <span className="inline-flex items-center gap-0.5 text-[9px] text-blue-400 font-semibold bg-blue-500/10 px-1 py-0.2 rounded border border-blue-500/10">
+                  <CheckCircle className="w-2.5 h-2.5" /> Auto
+                </span>
+              ) : r.reconciled ? (
+                <span className="inline-flex items-center gap-0.5 text-[9px] text-green-400 font-semibold bg-green-500/10 px-1 py-0.2 rounded border border-green-500/10">
+                  <CheckCircle className="w-2.5 h-2.5" /> Done
+                </span>
+              ) : (
+                <button
+                  onClick={(e) => { e.stopPropagation(); setConfirmReconcile(r); }}
+                  className="text-[9px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-400 hover:bg-amber-500/25 border border-amber-500/30 hover:border-amber-500/40 font-semibold transition-all"
+                >
+                  Reconcile
+                </button>
+              )}
+            </div>
+          </div>
         );
       },
     },
@@ -660,7 +661,7 @@ const CashFlow = () => {
   // RENDER
   // ══════════════════════════════════════════════════════════
   return (
-    <div className="space-y-4 sm:space-y-5">
+    <div className="p-3 sm:p-4 lg:p-6 max-w-[1600px] mx-auto space-y-3.5">
 
       {/* ═══════ HEADER ═══════ */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">

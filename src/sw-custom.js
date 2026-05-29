@@ -4,7 +4,7 @@
 import { precacheAndRoute } from 'workbox-precaching';
 
 // Precache manifest will be injected by vite-plugin-pwa
-precacheAndRoute(self.__WB_MANIFEST || []);
+precacheAndRoute(self.__WB_MANIFEST);
 
 // Listen for background sync events (SyncManager)
 self.addEventListener('sync', (event) => {

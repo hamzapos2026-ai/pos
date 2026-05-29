@@ -93,13 +93,8 @@ service cloud.firestore {
       // ✅ Setup doc public read (no auth required for check)
       // Other settings require auth
       allow read: if settingId == 'setup' || isAuthed();
-      // ✅ Only super admin can write/delete. Allow initial 'setup' creation by authenticated clients.
-      allow create, update: if (
-        // dualMode is sensitive — require Super Admin
-        (settingId == 'dualMode' && isSuperAdmin())
-        // other settings: Super Admin or (setup doc by an authenticated client)
-        || (settingId != 'dualMode' && (isSuperAdmin() || (settingId == 'setup' && isAuthed())))
-      );
+      // ✅ Only super admin can write/delete
+      allow create, update: if isSuperAdmin() || (settingId == 'setup' && isAuthed());
       allow delete: if isSuperAdmin();
     }
 
@@ -109,8 +104,11 @@ service cloud.firestore {
     match /orders/{orderId} {
       allow read: if isAuthed();
       allow create: if isAuthed() && hasValidSerial();
-      allow update: if isAuthed() &&
-        (!('isDeleted' in request.resource.data) || isAdmin());
+      allow update: if isAuthed() && (
+        isStoreStaff() ||
+        isAdmin() ||
+        request.resource.data.get('isDeleted', false) == resource.data.get('isDeleted', false)
+      );
       allow delete: if isSuperAdmin();
     }
 
@@ -157,15 +155,9 @@ service cloud.firestore {
         request.auth.uid == userId ||
         isAdmin()
       );
-      // Users can update their profile but cannot escalate roles themselves.
       allow update: if isAuthed() && (
-        // Super Admin can update any user
+        request.auth.uid == userId ||
         isSuperAdmin()
-        // Owner can update but must not change `role` or `roles` fields
-        || (request.auth.uid == userId &&
-            ( !('role' in request.resource.data) || request.resource.data.role == resource.data.role )
-            && ( !('roles' in request.resource.data) || request.resource.data.roles == resource.data.roles )
-           )
       );
       allow create: if isAuthed() && (
         request.auth.uid == userId ||
@@ -225,18 +217,7 @@ service cloud.firestore {
     match /payments/{payId} {
       allow read: if isAuthed();
       allow create: if isAuthed();
-      // Allow updates by admins. Non-admins cannot mark paymentStatus to 'paid'
-      // when dualMode is disabled.
-      allow update: if (
-        isAdmin()
-        || (
-          isAuthed() &&
-          // If attempting to set paid, ensure dualMode enabled
-          !(request.resource.data.paymentStatus == 'paid' &&
-            (get(/databases/$(database)/documents/settings/dualMode).data.value == false)
-          )
-        )
-      );
+      allow update: if isAdmin();
       allow delete: if isSuperAdmin();
     }
 

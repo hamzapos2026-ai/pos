@@ -182,7 +182,7 @@ const DataTable = ({
                     className="overflow-auto"
                     style={{ maxHeight }}
                 >
-                    <table className="w-full">
+                    <table className="w-full min-w-full">
                         <thead className={cn(stickyHeader && 'sticky top-0 z-10')}>
                             <tr className="bg-[#0f0a04] border-b border-[#2a1f0d]">
                                 {columns.map(col => (
@@ -260,7 +260,7 @@ const DataTable = ({
                 </div>
             ) : (
                 <div className="overflow-x-auto">
-                    <table className="w-full">
+                    <table className="w-full min-w-full">
                         <thead className={cn(stickyHeader && 'sticky top-0 z-10')}>
                             <tr className="bg-[#0f0a04] border-b border-[#2a1f0d]">
                                 {columns.map(col => (
@@ -317,6 +317,7 @@ const DataTable = ({
                                                     col.align === 'center' && 'text-center',
                                                     col.cellClass,
                                                 )}
+                                                style={{ width: col.width }}
                                             >
                                                 {col.render ? col.render(row) : row[col.field]}
                                             </td>

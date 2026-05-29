@@ -77,32 +77,39 @@ const CancelModal = ({ order, isDark, userData, onClose }) => {
 
     try {
       await Promise.all([
-        // 1. Update order status (with isDeleted flag)
+        // 1. Update order status to pending_cancel and hide from active dashboard
         updateDoc(doc(db, "orders", order.id), {
-          status: "cancelled",
-          isDeleted: true, // ✨ NEW: For soft delete
+          status: "pending_cancel",
+          isDeleted: false, // Remains false until final Super Admin clearance
+          isActiveOrder: false, // Immediately clears from Cashier's dashboard view
+          cashierCancelReason: finalReason,
+          cashierCancelledBy: cashierName,
+          cashierCancelledUserId: userData?.uid || "",
+          cashierCancelledAt: serverTimestamp(),
           cancelReason: finalReason,
           cancelledBy: cashierName,
-          cancelledUserId: userData?.uid || "",
           cancelledAt: serverTimestamp(),
         }),
 
-        // 2. ✨ NEW: Save full copy to deletedBills (reversible)
-        addDoc(collection(db, "deletedBills"), {
-          originalOrderId: order.id,
-          billSerial: order.billSerial || order.serialNo || "—",
-          serialNo: order.serialNo || order.billSerial || "—",
+        // 2. Create approval request for manager
+        addDoc(collection(db, "approvalRequests"), {
+          type: "cancellation",
+          billId: order.id,
+          localBillId: order.localId || order.id,
+          status: "pending",
+          requestedBy: userData?.uid || "",
+          requestedByName: cashierName,
+          requestedByRole: "cashier",
           storeId,
-          orderSnapshot: { ...order }, // Full copy
-          cancelledBy: cashierName,
-          cancelledUserId: userData?.uid || "",
-          reason: finalReason,
-          cancelledAt: serverTimestamp(),
+          cashierCancelReason: finalReason,
+          reason: finalReason, // compat
+          billSnapshot: { ...order },
+          createdAt: serverTimestamp(),
         }),
 
         // 3. Save to cashierActions
         addDoc(collection(db, "cashierActions"), {
-          actionType: "CANCELLED",
+          actionType: "CANCELLED_REQUEST",
           orderId: order.id,
           billSerial: order.billSerial || order.serialNo || "—",
           serialNo: order.serialNo || order.billSerial || "—",
@@ -123,22 +130,22 @@ const CancelModal = ({ order, isDark, userData, onClose }) => {
           timestamp: serverTimestamp(),
         }),
 
-// 4. Immutable audit log
-         logCancellation(
-           { uid: userData?.uid || "", displayName: cashierName },
-           storeId,
-           { id: order.id, serialNo: order.serialNo || order.billSerial, totalAmount: order.totalAmount || 0 },
-           finalReason,
-         ),
+        // 4. Immutable audit log
+        logCancellation(
+          { uid: userData?.uid || "", displayName: cashierName },
+          storeId,
+          { id: order.id, serialNo: order.serialNo || order.billSerial, totalAmount: order.totalAmount || 0 },
+          finalReason,
+        ),
       ]);
 
-      toast.success(`Bill #${order.billSerial || order.serialNo} cancelled`, {
-        icon: <XCircle className="w-4 h-4 text-red-500" />,
+      toast.success(`Cancellation request sent for Bill #${order.billSerial || order.serialNo}`, {
+        icon: <Clock className="w-4 h-4 text-amber-500" />,
       });
       onClose();
     } catch (err) {
       console.error(err);
-      toast.error("Cancel failed!");
+      toast.error("Request failed!");
     } finally {
       setLoading(false);
     }

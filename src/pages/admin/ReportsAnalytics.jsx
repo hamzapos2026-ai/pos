@@ -224,19 +224,6 @@ const ReportsAnalytics = () => {
     document.body.removeChild(link);
   };
 
-  // ── Th helper ─────────────────────────────────────────────
-  const Th = ({ label, k, end }) => (
-    <th
-      onClick={() => handleSort(k)}
-      className={cn(
-        'px-4 py-3 font-semibold cursor-pointer select-none whitespace-nowrap',
-        end ? 'text-end' : 'text-start',
-      )}
-    >
-      {label}<SortIcon k={k} />
-    </th>
-  );
-
   return (
     <div className="p-4 sm:p-6 max-w-[1600px] mx-auto space-y-6">
 
@@ -409,13 +396,48 @@ const ReportsAnalytics = () => {
               isDark ? 'bg-[#1a1208] text-gray-400' : 'bg-amber-50 text-gray-600',
             )}>
               <tr>
-                <Th label="Date"     k="date"     />
-                <Th label="Bill #"   k="billSerial"/>
-                <Th label="Biller"   k="billerName"/>
-                <Th label="Customer" k="customer"  />
-                <Th label="Payment"  k="payment"   />
-                <Th label="Status"   k="status"    />
-                <Th label="Amount"   k="amount" end />
+                <th
+                  onClick={() => handleSort('date')}
+                  className="px-4 py-3 font-semibold cursor-pointer select-none whitespace-nowrap text-start"
+                >
+                  Date <SortIcon k="date" />
+                </th>
+                <th
+                  onClick={() => handleSort('billSerial')}
+                  className="px-4 py-3 font-semibold cursor-pointer select-none whitespace-nowrap text-start"
+                >
+                  Bill # <SortIcon k="billSerial" />
+                </th>
+                <th
+                  onClick={() => handleSort('billerName')}
+                  className="px-4 py-3 font-semibold cursor-pointer select-none whitespace-nowrap text-start"
+                >
+                  Biller <SortIcon k="billerName" />
+                </th>
+                <th
+                  onClick={() => handleSort('customer')}
+                  className="px-4 py-3 font-semibold cursor-pointer select-none whitespace-nowrap text-start"
+                >
+                  Customer <SortIcon k="customer" />
+                </th>
+                <th
+                  onClick={() => handleSort('payment')}
+                  className="px-4 py-3 font-semibold cursor-pointer select-none whitespace-nowrap text-start"
+                >
+                  Payment <SortIcon k="payment" />
+                </th>
+                <th
+                  onClick={() => handleSort('status')}
+                  className="px-4 py-3 font-semibold cursor-pointer select-none whitespace-nowrap text-start"
+                >
+                  Status <SortIcon k="status" />
+                </th>
+                <th
+                  onClick={() => handleSort('amount')}
+                  className="px-4 py-3 font-semibold cursor-pointer select-none whitespace-nowrap text-end"
+                >
+                  Amount <SortIcon k="amount" />
+                </th>
               </tr>
             </thead>
             <tbody>
@@ -441,28 +463,28 @@ const ReportsAnalytics = () => {
                     ? 'border-[#2a1f0d] hover:bg-[#1a1208]/60'
                     : 'border-amber-100 hover:bg-amber-50/50',
                 )}>
-                  <td className={cn('px-4 py-3 text-xs',
-                    isDark ? 'text-gray-400' : 'text-gray-500')}>
+                  <td className={cn('px-4 py-3 text-xs font-medium',
+                    isDark ? 'text-slate-400' : 'text-gray-500')}>
                     {toDate(b.createdAt).toLocaleDateString('en-PK')}
                   </td>
-                  <td className={cn('px-4 py-3 font-mono font-semibold text-xs',
-                    isDark ? 'text-white' : 'text-gray-900')}>
+                  <td className={cn('px-4 py-3 font-mono font-bold text-xs',
+                    isDark ? 'text-gray-100' : 'text-gray-900')}>
                     {b.billSerial || b.billNumber || b.id.slice(0, 8)}
                   </td>
-                  <td className={cn('px-4 py-3 text-xs',
-                    isDark ? 'text-gray-300' : 'text-gray-700')}>
+                  <td className={cn('px-4 py-3 text-xs font-medium',
+                    isDark ? 'text-slate-300' : 'text-gray-700')}>
                     {b.billerName || b.cashierName || 'System'}
                   </td>
-                  <td className={cn('px-4 py-3 text-xs',
-                    isDark ? 'text-gray-300' : 'text-gray-700')}>
+                  <td className={cn('px-4 py-3 text-xs font-semibold',
+                    isDark ? 'text-slate-200' : 'text-gray-700')}>
                     {b.customer?.name || b.customerName || 'Walk-in'}
                   </td>
                   <td className="px-4 py-3">
                     <span className={cn(
-                      'inline-flex px-2 py-0.5 rounded text-[10px] font-bold uppercase',
+                      'inline-flex px-1.5 py-0.2 rounded text-[10px] font-bold uppercase border',
                       (b.paymentMethod || b.paymentType || '').toLowerCase() === 'cash'
-                        ? 'bg-emerald-500/10 text-emerald-500'
-                        : 'bg-blue-500/10 text-blue-500',
+                        ? 'bg-emerald-500/10 text-emerald-500 border-emerald-500/20'
+                        : 'bg-blue-500/10 text-blue-500 border-blue-500/20',
                     )}>
                       {b.paymentMethod || b.paymentType || 'N/A'}
                     </span>
@@ -474,8 +496,8 @@ const ReportsAnalytics = () => {
                       {b.paymentStatus || 'unpaid'}
                     </Badge>
                   </td>
-                  <td className={cn('px-4 py-3 text-end font-bold',
-                    isDark ? 'text-white' : 'text-gray-900')}>
+                  <td className={cn('px-4 py-3 text-end font-bold text-sm font-mono',
+                    isDark ? 'text-gray-100' : 'text-gray-900')}>
                     {fmt(b.totalAmount || b.grandTotal || b.total || 0)}
                   </td>
                 </tr>

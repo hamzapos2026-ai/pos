@@ -90,22 +90,27 @@ const _hashPassword = async (password, email) => {
     const input = password + salt;
 
     // Try bcryptjs first (statically imported as `bcryptLib`)
-    try {
-      const bcrypt = await getBcrypt();
-      if (bcrypt && typeof bcrypt.hash === 'function') {
-        let hashed;
-        if (bcrypt.hash.length >= 3) {
-          hashed = await new Promise((res, rej) => bcrypt.hash(input, 10, (err, h) => err ? rej(err) : res(h)));
-        } else {
-          const maybe = bcrypt.hash(input, 10);
-          if (maybe && typeof maybe.then === 'function') hashed = await maybe;
-          else if (typeof bcrypt.hashSync === 'function') hashed = bcrypt.hashSync(input, 10);
-          else hashed = maybe;
+    // CRITICAL: Skip bcrypt in browser to prevent unhandled setTimeout/crypto.randomBytes crashes
+    const canUseBcrypt = typeof window === 'undefined' && typeof crypto !== 'undefined' && typeof crypto.randomBytes === 'function';
+
+    if (canUseBcrypt) {
+      try {
+        const bcrypt = await getBcrypt();
+        if (bcrypt && typeof bcrypt.hash === 'function') {
+          let hashed;
+          if (bcrypt.hash.length >= 3) {
+            hashed = await new Promise((res, rej) => bcrypt.hash(input, 10, (err, h) => err ? rej(err) : res(h)));
+          } else {
+            const maybe = bcrypt.hash(input, 10);
+            if (maybe && typeof maybe.then === 'function') hashed = await maybe;
+            else if (typeof bcrypt.hashSync === 'function') hashed = bcrypt.hashSync(input, 10);
+            else hashed = maybe;
+          }
+          return `bcrypt$${hashed}`;
         }
-        return `bcrypt$${hashed}`;
+      } catch (e) {
+        // ignore and fallback to sha256
       }
-    } catch (e) {
-      // ignore and fallback to sha256
     }
 
     // Fallback: SHA-256 hex
@@ -125,19 +130,22 @@ const _verifyPassword = async (password, email, storedHash) => {
 
     if (storedHash.startsWith('bcrypt$')) {
       const hashPart = storedHash.slice('bcrypt$'.length);
-      try {
-        const bcrypt = await getBcrypt();
-        if (bcrypt && typeof bcrypt.compare === 'function') {
-          if (bcrypt.compare.length >= 3) {
-            return await new Promise((res, rej) => bcrypt.compare(input, hashPart, (err, ok) => err ? rej(err) : res(!!ok)));
+      const canUseBcrypt = typeof window === 'undefined' && typeof crypto !== 'undefined' && typeof crypto.randomBytes === 'function';
+      if (canUseBcrypt) {
+        try {
+          const bcrypt = await getBcrypt();
+          if (bcrypt && typeof bcrypt.compare === 'function') {
+            if (bcrypt.compare.length >= 3) {
+              return await new Promise((res, rej) => bcrypt.compare(input, hashPart, (err, ok) => err ? rej(err) : res(!!ok)));
+            }
+            const maybe = bcrypt.compare(input, hashPart);
+            if (maybe && typeof maybe.then === 'function') return await maybe;
+            if (typeof bcrypt.compareSync === 'function') return bcrypt.compareSync(input, hashPart);
+            return !!maybe;
           }
-          const maybe = bcrypt.compare(input, hashPart);
-          if (maybe && typeof maybe.then === 'function') return await maybe;
-          if (typeof bcrypt.compareSync === 'function') return bcrypt.compareSync(input, hashPart);
-          return !!maybe;
+        } catch (e) {
+          // If bcrypt unavailable, fall through to sha compare (will fail)
         }
-      } catch (e) {
-        // If bcrypt unavailable, fall through to sha compare (will fail)
       }
       return false;
     }
