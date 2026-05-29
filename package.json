@@ -21,7 +21,7 @@
     "clsx": "^2.1.1",
     "date-fns": "^3.6.0",
     "dexie": "^4.0.8",
-    "firebase": "^11.0.0",
+    "firebase": "^12.14.0",
     "framer-motion": "^11.0.0",
     "howler": "^2.2.4",
     "js-sha256": "^0.9.0",
