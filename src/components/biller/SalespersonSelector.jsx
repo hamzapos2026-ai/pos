@@ -177,12 +177,6 @@ export const CurrentSPBar = ({
                   </span>
                   <div className="flex-1 min-w-0">
                     <div className="truncate font-medium">{a.name}</div>
-                    <div className="text-[9px] text-gray-500">
-                      Rate:{' '}
-                      {a.commissionType === 'fixed'
-                        ? `Rs. ${a.commissionRate}`
-                        : `${a.commissionRate}%`}
-                    </div>
                   </div>
                   {currentSPId === a.id && (
                     <Check className="w-3.5 h-3.5 text-amber-500 shrink-0" />
@@ -261,76 +255,27 @@ export const CommissionSummaryPanel = ({ summary, paidRatio, isDark }) => {
   const totalComm = summary.reduce((s, a) => s + a.earnedCommission, 0);
 
   return (
-    <div
-      className={cn(
-        'mt-3 rounded-xl border overflow-hidden',
-        isDark ? 'border-[#2a1f0d]' : 'border-amber-100'
-      )}
-    >
-      <div
-        className={cn(
-          'px-3 py-2 text-[10px] font-semibold uppercase tracking-wider flex items-center justify-between',
-          isDark ? 'bg-[#1a1208] text-gray-400' : 'bg-amber-50 text-gray-600'
-        )}
-      >
-        <span className="flex items-center gap-1.5">
-          <Users className="w-3 h-3" /> Salesperson Commissions
-        </span>
-        {paidRatio < 1 && (
-          <span className="text-amber-500 normal-case font-normal">
-            {Math.round(paidRatio * 100)}% payment received
-          </span>
-        )}
+    <div className={cn('mt-3 rounded-xl border overflow-hidden', isDark ? 'border-[#2a1f0d]' : 'border-amber-100')}>
+      <div className={cn('px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider flex items-center justify-between', isDark ? 'bg-[#1a1208] text-gray-400' : 'bg-amber-50 text-gray-600')}>
+        <span className="flex items-center gap-1.5"><Users className="w-3 h-3" /> Salesperson Commissions</span>
+        {paidRatio < 1 && <span className="text-amber-500 normal-case font-normal">{Math.round(paidRatio * 100)}% payment received</span>}
       </div>
 
-      <div
-        className={cn(
-          'divide-y',
-          isDark ? 'divide-[#2a1f0d]' : 'divide-amber-50'
-        )}
-      >
+      <div className={cn(isDark ? 'divide-y divide-[#2a1f0d]' : 'divide-amber-50')}> 
         {summary.map((a) => (
-          <div
-            key={a.salespersonId}
-            className={cn(
-              'flex items-center justify-between px-3 py-2 text-xs',
-              isDark ? 'text-gray-300' : 'text-gray-700'
-            )}
-          >
-            <div>
+          <div key={a.salespersonId} className={cn('flex items-center justify-between px-3 py-1.5 text-xs', isDark ? 'text-gray-300' : 'text-gray-700')}>
+            <div className="truncate">
               <span className="font-semibold">{a.salespersonName}</span>
-              <span
-                className={cn(
-                  'ml-2 text-[10px]',
-                  isDark ? 'text-gray-500' : 'text-gray-400'
-                )}
-              >
-                {a.itemCount} item{a.itemCount !== 1 ? 's' : ''} •{' '}
-                {fmt(a.totalNet)} sales
-              </span>
+              <span className={cn('ml-2 text-[10px]', isDark ? 'text-gray-500' : 'text-gray-400')}>· {a.itemCount} item{a.itemCount !== 1 ? 's' : ''} • {fmt(a.totalNet)} sales</span>
             </div>
-            <div className="text-right">
-              <span className="font-bold text-emerald-500">
-                {fmt(a.earnedCommission)}
-              </span>
-              {paidRatio < 1 && (
-                <div className="text-[9px] text-gray-500">
-                  of {fmt(a.rawCommission)} total
-                </div>
-              )}
+            <div className="text-right ml-4">
+              <span className="font-bold text-emerald-500">{fmt(a.earnedCommission)}</span>
             </div>
           </div>
         ))}
       </div>
 
-      <div
-        className={cn(
-          'flex justify-between items-center px-3 py-2 text-xs font-bold border-t',
-          isDark
-            ? 'border-[#2a1f0d] text-white bg-[#1a1208]'
-            : 'border-amber-100 text-gray-900 bg-amber-50'
-        )}
-      >
+      <div className={cn('flex justify-between items-center px-3 py-1.5 text-xs font-bold border-t', isDark ? 'border-[#2a1f0d] text-white bg-[#1a1208]' : 'border-amber-100 text-gray-900 bg-amber-50')}>
         <span>Total Commission</span>
         <span className="text-emerald-500">{fmt(totalComm)}</span>
       </div>

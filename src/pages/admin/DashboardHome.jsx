@@ -6,17 +6,20 @@ import {
   AlertCircle, Clock, Sparkles, Plus, UserPlus, Wallet,
   RefreshCw, BarChart3, ArrowRight, TrendingUp,
 } from 'lucide-react';
-import { collection, getDocs, query, orderBy, limit } from '../../services/firebase';
-import { db, isFirebaseReady } from '../../services/firebase';
+import { fetchDashboardStats, fetchRecentCashierActions } from '../../services/dashboardStatsService';
 import { cn } from '../../utils/cn';
 import { useAuth } from '../../context/AuthContext';
 import { useTheme } from '../../context/ThemeContext';
+import { useLanguage } from '../../hooks/useLanguage';
 import Button from '../../components/ui/Button';
+import { watchBillerStallAlerts } from '../../services/billerStallService';
 import StatCard from '../../components/admin/StatCard';
+import CashierDeletedFlagsPanel from '../../components/admin/CashierDeletedFlagsPanel';
 
 const DashboardHome = () => {
   const { isDark } = useTheme();
   const { user } = useAuth();
+  const { t } = useLanguage();
   const navigate = useNavigate();
   const [now, setNow] = useState(new Date());
   const [stats, setStats] = useState({
@@ -24,6 +27,7 @@ const DashboardHome = () => {
     pendingReceivables: 0, cashInHand: 0, expenses: 0, returns: 0,
   });
   const [activities, setActivities] = useState([]);
+  const [stallAlerts, setStallAlerts] = useState([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -32,65 +36,42 @@ const DashboardHome = () => {
   }, []);
 
   const load = useCallback(async () => {
-    if (!isFirebaseReady() || !db) return;
     setLoading(true);
     try {
-      let u = { size: 0 }, s = { size: 0 };
-      let b = { docs: [], size: 0 };
-      let aSnap = { docs: [] };
+      const stats = await fetchDashboardStats();
+      const activities = await fetchRecentCashierActions(5);
 
-      try { u = await getDocs(collection(db, 'users')); } catch {}
-      try { s = await getDocs(collection(db, 'stores')); } catch {}
-      try { b = await getDocs(collection(db, 'orders')); } catch {}
-      try {
-        aSnap = await getDocs(
-          query(collection(db, 'cashierActions'),
-            orderBy('timestamp', 'desc'), limit(5))
-        );
-      } catch {}
-
-      setActivities(aSnap.docs.map(d => ({ id: d.id, ...d.data() })));
-
-      const today = new Date(); today.setHours(0, 0, 0, 0);
-      let todaySales = 0, pendingReceivables = 0, cashInHand = 0;
-      let expenses = 0, returns = 0, totalBills = 0;
-
-      b.docs.forEach(doc => {
-        const bill = doc.data();
-        if (bill.deleted) return;
-        totalBills++;
-        const billDate = bill.createdAt?.toDate
-          ? bill.createdAt.toDate()
-          : new Date(bill.createdAt?.seconds
-            ? bill.createdAt.seconds * 1000
-            : bill.createdAt || 0);
-        const total = Number(bill.totalAmount || bill.grandTotal || bill.total || 0);
-        if (billDate >= today) todaySales += total;
-        if (bill.status === 'pending' || bill.paymentStatus === 'unpaid')
-          pendingReceivables += Number(bill.balanceDue || total || 0);
-        if ((bill.paymentMethod || bill.paymentType || '').toLowerCase() === 'cash')
-          cashInHand += total;
-        expenses += Number(bill.expense || 0);
-        if (bill.returnAmount) returns += Number(bill.returnAmount);
-        else if (bill.status === 'returned' || bill.paymentStatus === 'refund')
-          returns += total;
-      });
-
-      setStats({ users: u.size, stores: s.size, totalBills, todaySales,
-        pendingReceivables, cashInHand, expenses, returns });
+      if (stats) {
+        setStats({
+          users: stats.users,
+          stores: stats.stores,
+          todaySales: stats.todaySales,
+          totalBills: stats.totalBills,
+          pendingReceivables: stats.pendingReceivables,
+          cashInHand: stats.cashInHand,
+          expenses: stats.expenses,
+          returns: stats.returns,
+        });
+      }
+      setActivities(activities);
     } catch (e) { console.error(e); }
     finally { setLoading(false); }
   }, []);
 
   useEffect(() => { load(); }, [load]);
 
+  useEffect(() => {
+    const unsub = watchBillerStallAlerts((rows) => setStallAlerts(rows.slice(0, 5)), 8);
+    return unsub;
+  }, []);
+
   const quickActions = [
-    { label: 'Add User',     icon: UserPlus,  path: '/admin/users',        color: 'amber'  },
-    { label: 'Add Branch',   icon: Plus,       path: '/admin/branches',     color: 'green'  },
-    { label: 'View Reports', icon: BarChart3,  path: '/admin/reports',      color: 'blue'   },
-    { label: 'Cash Flow',    icon: Wallet,     path: '/admin/cashflow',     color: 'purple' },
-    { label: 'Audit Logs',   icon: Activity,   path: '/admin/audit-logs',   color: 'rose'   },
-    { label: 'Sync Monitor', icon: RefreshCw,  path: '/admin/sync-monitor', color: 'cyan'   },
+    { label: t('admin.quickAddUser', 'Add User'),       icon: UserPlus,  path: '/admin/users',        color: 'amber'  },
+    { label: t('admin.quickAddBranch', 'Add Branch'),   icon: Plus,       path: '/admin/branches',     color: 'green'  },
+    { label: t('manager.viewReports', 'View Reports'),  icon: BarChart3,  path: '/admin/reports',      color: 'blue'   },
+    { label: t('admin.nav.cashflow', 'Cash Flow'),       icon: Wallet,     path: '/admin/cashflow',     color: 'purple' },
+    { label: t('admin.nav.auditLogs', 'Audit Logs'),    icon: Activity,   path: '/admin/audit-logs',   color: 'rose'   },
+    { label: t('admin.nav.syncMonitor', 'Sync Monitor'),icon: RefreshCw,  path: '/admin/sync-monitor', color: 'cyan'   },
   ];
 
   const COLOR_MAP = {
@@ -120,19 +101,19 @@ const DashboardHome = () => {
             <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full
                             bg-amber-500/10 text-amber-500 text-xs font-semibold
                             uppercase tracking-wider mb-3">
-              <Sparkles className="w-3.5 h-3.5" /> Super Admin Panel
+              <Sparkles className="w-3.5 h-3.5" /> {t('admin.panel', 'Super Admin Panel')}
             </div>
             <h1 className={cn(
               'text-2xl sm:text-3xl lg:text-4xl font-bold mb-2',
               isDark ? 'text-white' : 'text-gray-900',
             )}>
-              Welcome back, {user?.displayName || 'Admin'} 👋
+              {t('admin.welcomeBack', 'Welcome back')}, {user?.displayName || t('roles.admin', 'Admin')} 👋
             </h1>
             <p className={cn(
               'text-sm sm:text-base max-w-xl',
               isDark ? 'text-gray-400' : 'text-gray-600',
             )}>
-              Command center for users, branches, finance, reports &amp; system control.
+              {t('admin.commandCenter', 'Command center for users, branches, finance, reports & system control.')}
             </p>
           </div>
 
@@ -145,7 +126,7 @@ const DashboardHome = () => {
           )}>
             <p className="text-[10px] font-bold uppercase tracking-[0.2em]
                           text-amber-500 mb-2">
-              <Clock className="w-3 h-3 inline mr-1" /> Live Time
+              <Clock className="w-3 h-3 inline me-1" /> {t('admin.liveTime', 'Live Time')}
             </p>
             <p className={cn(
               'text-2xl font-bold font-mono',
@@ -174,31 +155,31 @@ const DashboardHome = () => {
           'text-lg font-bold mb-4',
           isDark ? 'text-white' : 'text-gray-900',
         )}>
-          📊 Key Metrics
+          📊 {t('admin.keyMetrics', 'Key Metrics')}
         </h2>
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
-          <StatCard label="Today Sales"
+          <StatCard label={t('admin.todaySales', 'Today Sales')}
             value={`Rs ${stats.todaySales.toLocaleString()}`}
             icon={DollarSign} color="green" trend="up" trendValue="+12%" />
-          <StatCard label="Pending Receivables"
+          <StatCard label={t('admin.pendingReceivables', 'Pending Receivables')}
             value={`Rs ${stats.pendingReceivables.toLocaleString()}`}
             icon={AlertCircle} color="rose" />
-          <StatCard label="Cash in Hand"
+          <StatCard label={t('stats.cashInHand', 'Cash in Hand')}
             value={`Rs ${stats.cashInHand.toLocaleString()}`}
             icon={Wallet} color="amber" />
-          <StatCard label="Total Bills"
+          <StatCard label={t('bills.totalBills', 'Total Bills')}
             value={stats.totalBills} icon={ShoppingBag}
-            color="blue" subtitle="All time" />
-          <StatCard label="Total Users"
+            color="blue" subtitle={t('dates.allTime', 'All time')} />
+          <StatCard label={t('admin.totalUsers', 'Total Users')}
             value={stats.users} icon={Users} color="purple"
             onClick={() => navigate('/admin/users')} />
-          <StatCard label="Branches"
+          <StatCard label={t('admin.nav.branches', 'Branches')}
             value={stats.stores} icon={Store} color="cyan"
             onClick={() => navigate('/admin/branches')} />
-          <StatCard label="Expenses"
+          <StatCard label={t('stats.expenses', 'Expenses')}
             value={`Rs ${stats.expenses.toLocaleString()}`}
             icon={TrendingUp} color="rose" />
-          <StatCard label="Returns"
+          <StatCard label={t('stats.returns', 'Returns')}
             value={`Rs ${stats.returns.toLocaleString()}`}
             icon={RefreshCw} color="amber" />
         </div>
@@ -210,7 +191,7 @@ const DashboardHome = () => {
           'text-lg font-bold mb-4',
           isDark ? 'text-white' : 'text-gray-900',
         )}>
-          ⚡ Quick Actions
+          ⚡ {t('manager.quickActions', 'Quick Actions')}
         </h2>
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
           {quickActions.map(({ label, icon: Icon, path, color }) => (
@@ -257,11 +238,11 @@ const DashboardHome = () => {
               'font-bold',
               isDark ? 'text-white' : 'text-gray-900',
             )}>
-              Recent Activity
+              {t('admin.recentActivity', 'Recent Activity')}
             </h3>
             <Button variant="ghost" size="sm"
               onClick={() => navigate('/admin/audit-logs')}>
-              View all
+              {t('common.viewAll', 'View all')}
             </Button>
           </div>
           <div className="space-y-3">
@@ -298,6 +279,65 @@ const DashboardHome = () => {
                           ? act.timestamp.seconds * 1000
                           : act.timestamp || 0,
                       ).toLocaleTimeString()}
+                  </p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Cashier cancelled bill flags */}
+        <CashierDeletedFlagsPanel
+          title={t('admin.cashierCancelFlags', 'Cashier Cancelled Bill Flags')}
+          description="Cashier ne cancelled bill flag ki — cancel reason aur flag reason yahan review karo."
+          className="mb-6"
+        />
+
+        {/* Biller stall alerts */}
+        <div className={cn(
+          'rounded-2xl border p-5',
+          isDark ? 'bg-[#0f0a05] border-[#2a1f0d]' : 'bg-white border-amber-200',
+        )}>
+          <div className="flex items-center justify-between mb-4">
+            <h3 className={cn(
+              'font-bold flex items-center gap-2',
+              isDark ? 'text-white' : 'text-gray-900',
+            )}>
+              <AlertCircle className="w-4 h-4 text-rose-500" />
+              {t('admin.billerStallAlerts', 'Biller Stall Alerts')}
+            </h3>
+            <Button variant="ghost" size="sm"
+              onClick={() => navigate('/admin/settings/biller')}>
+              {t('admin.roleSettings.billerStallTitle', 'Settings')}
+            </Button>
+          </div>
+          <div className="space-y-2">
+            {stallAlerts.length === 0 ? (
+              <p className={cn(
+                'text-sm text-center py-4',
+                isDark ? 'text-gray-500' : 'text-gray-400',
+              )}>
+                {t('admin.roleSettings.noStallAlerts', 'No stall alerts yet')}
+              </p>
+            ) : stallAlerts.map((row) => (
+              <div key={row.id} className={cn(
+                'flex items-center justify-between gap-3 p-3 rounded-xl border',
+                isDark ? 'bg-rose-500/5 border-rose-500/20' : 'bg-rose-50/60 border-rose-100',
+              )}>
+                <div className="min-w-0">
+                  <p className={cn('text-sm font-bold truncate', isDark ? 'text-white' : 'text-gray-900')}>
+                    {row.billerName || row.billerId}
+                  </p>
+                  <p className="text-xs text-gray-500 truncate">
+                    {row.billSerial || '----'} · {row.stallLabel || row.stallType}
+                  </p>
+                </div>
+                <div className="text-right shrink-0">
+                  <p className="text-sm font-black text-amber-500 tabular-nums">
+                    {row.durationLabel || `${row.durationMinutes || '?'} min`}
+                  </p>
+                  <p className="text-[10px] text-gray-500">
+                    {row.localDate || ''} {row.localTime || ''}
                   </p>
                 </div>
               </div>

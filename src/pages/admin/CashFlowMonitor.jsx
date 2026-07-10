@@ -8,22 +8,26 @@ import {
   DollarSign, Users, Building2, Calendar, FileText, FileSpreadsheet,
   FileType, ChevronDown, BarChart3, Activity,
   Banknote, Smartphone, CreditCard, Landmark, RotateCcw,
-  User,  // ✅ FIX: missing import
+  User,
 } from 'lucide-react';
-import {
-  collection, onSnapshot, query, orderBy, limit,
-} from '../../services/firebase';
-import { db, isFirebaseReady } from '../../services/firebase';
+import { isFirebaseReady } from '../../services/firebase';
 import { db as localDB } from '../../db/index';
 import { cn } from '../../utils/cn';
 import { useTheme } from '../../context/ThemeContext';
 import { useNetwork } from '../../context/NetworkContext';
+import { useAuth } from '../../context/AuthContext';
 import { downloadCSV, downloadExcel, downloadPDF } from '../../utils/exportUtils';
 import PageHeader from '../../components/admin/PageHeader';
 import StatCard from '../../components/admin/StatCard';
 import EmptyState from '../../components/admin/EmptyState';
 import Badge from '../../components/ui/Badge';
 import Button from '../../components/ui/Button';
+import { useLanguage } from '../../hooks/useLanguage';
+import useStoresMap, { resolveStoreName } from '../../hooks/useStoresMap';
+import { resolveAdminDataScope } from '../../utils/branchAccess';
+import { resolveDatePresetRange } from '../../utils/datePresetUtils';
+import DatePresetBar from '../../components/shared/DatePresetBar';
+import { fetchCashFlowSnapshot, CASH_FLOW_POLL_MS } from '../../utils/ordersQueryUtils';
 
 // ── HELPERS ──────────────────────────────────────────────────
 const toDate = (v) => {
@@ -73,21 +77,6 @@ const getTotal = (bill) =>
 const PAYMENT_ICONS = {
   cash: Banknote, easypaisa: Smartphone, jazzcash: Smartphone,
   bank: Landmark, card: CreditCard, mobile: Smartphone,
-};
-
-const getDatePresets = () => {
-  const now = new Date();
-  const today = new Date(now); today.setHours(0, 0, 0, 0);
-  const yesterday = new Date(today); yesterday.setDate(yesterday.getDate() - 1);
-  const weekAgo = new Date(today); weekAgo.setDate(weekAgo.getDate() - 7);
-  const monthAgo = new Date(today); monthAgo.setMonth(monthAgo.getMonth() - 1);
-  return {
-    today: { label: 'Today', from: today },
-    yesterday: { label: 'Yesterday', from: yesterday, to: today },
-    week: { label: '7 Days', from: weekAgo },
-    month: { label: '30 Days', from: monthAgo },
-    all: { label: 'All Time', from: new Date(0) },
-  };
 };
 
 // ════════════════════════════════════════════════════════════
@@ -184,15 +173,28 @@ const ExportMenu = ({ data, filename, isDark }) => {
 // ════════════════════════════════════════════════════════════
 // MAIN COMPONENT
 // ════════════════════════════════════════════════════════════
-const CashFlowMonitor = () => {
+const CashFlowMonitor = ({ scopeOverride = null, managerMode = false } = {}) => {
   const { isDark } = useTheme();
   const { isOnline } = useNetwork();
+  const { t, isRTL } = useLanguage();
+  const { userData } = useAuth();
+  const storesMap = useStoresMap();
+  const branchLabel = useCallback((id) => resolveStoreName(id, storesMap), [storesMap]);
+  const mountedRef = useRef(true);
+
+  const cashScope = useMemo(
+    () => scopeOverride || resolveAdminDataScope(userData, storesMap),
+    [scopeOverride, userData, storesMap],
+  );
+  const lockedBranchId = managerMode
+    ? (cashScope.storeId || cashScope.storeIds?.[0] || null)
+    : null;
 
   const [bills, setBills] = useState([]);
   const [transfers, setTransfers] = useState([]);
   const [registers, setRegisters] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [lastUpdated, setLastUpdated] = useState(null);
+  const [lastRefreshed, setLastRefreshed] = useState(null);
 
   const [datePreset, setDatePreset] = useState('today');
   const [customFrom, setCustomFrom] = useState('');
@@ -200,7 +202,7 @@ const CashFlowMonitor = () => {
   const [paymentFilter, setPaymentFilter] = useState('all');
   const [registerFilter, setRegisterFilter] = useState('all');
   const [typeFilter, setTypeFilter] = useState('all');
-  const [branchFilter, setBranchFilter] = useState('all');
+  const [branchFilter, setBranchFilter] = useState(() => lockedBranchId || 'all');
   const [search, setSearch] = useState('');
   const [showSug, setShowSug] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -209,60 +211,73 @@ const CashFlowMonitor = () => {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(100);
 
-  // ── Firestore listeners ────────────────────────────────────
-  useEffect(() => {
-    if (!isFirebaseReady() || !db) {
-      (async () => {
-        try {
-          const idbOrders = await localDB.orders.toArray();
-          setBills(idbOrders);
-          setLastUpdated(new Date());
-        } catch { }
-        setLoading(false);
-      })();
-      return;
-    }
-
+  const fetchCashFlow = useCallback(async () => {
+    if (!mountedRef.current) return;
     setLoading(true);
-    const u1 = onSnapshot(
-      query(collection(db, 'orders'), orderBy('createdAt', 'desc'), limit(10000)),
-      async (snap) => {
-        const data = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-        setBills(data);
-        setLastUpdated(new Date());
-        setLoading(false);
-        try {
-          await localDB.orders.bulkPut(data.map(b => ({
-            ...b, localId: b.localId || b.id, syncStatus: 'synced', synced: 1,
-          })));
-        } catch { }
-      },
-      err => { console.error('[CashFlow] Orders error:', err); setLoading(false); }
-    );
+    try {
+      if (!isFirebaseReady()) {
+        const idbOrders = await localDB.orders.toArray();
+        if (!mountedRef.current) return;
+        setBills(idbOrders);
+        setTransfers([]);
+        setRegisters([]);
+        setLastRefreshed(new Date());
+        return;
+      }
 
-    const u2 = onSnapshot(collection(db, 'registers'),
-      snap => setRegisters(snap.docs.map(d => ({ id: d.id, ...d.data() }))),
-      () => { });
+      const snapshot = await fetchCashFlowSnapshot(cashScope);
+      if (!mountedRef.current) return;
 
-    const u3 = onSnapshot(
-      query(collection(db, 'cashTransactions'), orderBy('timestamp', 'desc'), limit(500)),
-      snap => setTransfers(snap.docs.map(d => ({ id: d.id, ...d.data() }))),
-      () => { });
+      let orders = snapshot.orders || [];
+      try {
+        const localRows = await localDB.orders.toArray();
+        const map = new Map();
+        [...orders, ...localRows].forEach((o) => {
+          const key = o.id || o.localId;
+          if (key) map.set(key, o);
+        });
+        orders = Array.from(map.values());
+      } catch { /* ignore */ }
 
-    return () => { u1(); u2(); u3(); };
-  }, []);
+      setBills(orders);
+      setRegisters(snapshot.registers || []);
+      setTransfers(snapshot.transactions || []);
+      setLastRefreshed(new Date());
+
+      try {
+        await localDB.orders.bulkPut((snapshot.orders || []).map((b) => ({
+          ...b,
+          localId: b.localId || b.id,
+          syncStatus: 'synced',
+          synced: 1,
+        })));
+      } catch { /* offline cache optional */ }
+    } catch (err) {
+      console.error('[CashFlow] fetch error:', err);
+    } finally {
+      if (mountedRef.current) setLoading(false);
+    }
+  }, [cashScope]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    fetchCashFlow();
+    const interval = setInterval(fetchCashFlow, CASH_FLOW_POLL_MS);
+    return () => {
+      mountedRef.current = false;
+      clearInterval(interval);
+    };
+  }, [fetchCashFlow]);
+
+  useEffect(() => {
+    if (lockedBranchId) setBranchFilter(lockedBranchId);
+  }, [lockedBranchId]);
 
   // ── Date range ─────────────────────────────────────────────
-  const dateRange = useMemo(() => {
-    if (datePreset === 'custom' && customFrom) {
-      return {
-        from: new Date(customFrom),
-        to: customTo ? new Date(new Date(customTo).getTime() + 86400000 - 1) : new Date(),
-      };
-    }
-    const presets = getDatePresets();
-    return { from: presets[datePreset]?.from || new Date(0), to: new Date() };
-  }, [datePreset, customFrom, customTo]);
+  const dateRange = useMemo(
+    () => resolveDatePresetRange(datePreset, customFrom, customTo),
+    [datePreset, customFrom, customTo],
+  );
 
   const allBranches = useMemo(() => {
     const set = new Set();
@@ -468,13 +483,13 @@ const CashFlowMonitor = () => {
   }, [allTx, page, pageSize]);
 
   return (
-    <div className="p-2 sm:p-3 lg:p-4 max-w-[1600px] mx-auto space-y-3">
+    <div dir={isRTL ? 'rtl' : 'ltr'} className={cn(managerMode ? 'p-0' : 'p-2 sm:p-3 lg:p-4', 'max-w-[1600px] mx-auto space-y-3')}>
 
       {/* ── HEADER ─────────────────────────────────────────── */}
       <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-2">
         <PageHeader
           icon={Wallet}
-          title="Cash Flow Control Center"
+          title={t('admin.cashflowPage.title', 'Cash Flow Monitor')}
           description={
             <div className="flex items-center gap-2 flex-wrap text-[10px] sm:text-xs mt-1">
               <span>{stats.totalBills.toLocaleString()} bills</span>
@@ -483,69 +498,38 @@ const CashFlowMonitor = () => {
               <span className="text-gray-500">•</span>
               <span className="flex items-center gap-1">
                 <span className={cn('h-2 w-2 rounded-full',
-                  isOnline ? 'bg-green-400 animate-pulse' : 'bg-gray-500')} />
-                {isOnline ? 'Live' : 'Offline'}
+                  isOnline ? 'bg-green-400' : 'bg-gray-500')} />
+                {isOnline ? t('admin.billsPage.polledData', 'Polled') : t('admin.billsPage.localData', 'Local')}
               </span>
-              {lastUpdated && <>
-                <span className="text-gray-500">•</span>
-                <span>{fmtDt(lastUpdated)}</span>
-              </>}
+              <span className="text-gray-500">•</span>
+              <span>
+                {t('admin.cashflowPage.lastUpdated', 'Last updated')}:{' '}
+                {lastRefreshed ? fmtDt(lastRefreshed) : t('common.never', 'Never')}
+              </span>
             </div>
           }
         />
         <div className="flex items-center gap-2 flex-wrap">
           <ExportMenu data={allTx} filename="cashflow" isDark={isDark} />
-          <Button variant="ghost" onClick={() => setLastUpdated(new Date())}>
-            <RefreshCw className="w-4 h-4" />
+          <Button variant="ghost" onClick={fetchCashFlow} disabled={loading}>
+            <RefreshCw className={cn('w-4 h-4', loading && 'animate-spin')} />
+            <span className="ml-1.5 hidden sm:inline">
+              {loading ? t('common.refreshing', 'Refreshing...') : t('common.refreshNow', '↻ Refresh Now')}
+            </span>
           </Button>
         </div>
       </div>
 
       {/* ── DATE PRESETS ────────────────────────────────────── */}
-      <div className="flex items-center gap-1.5 flex-wrap">
-        {Object.entries(getDatePresets()).map(([key, p]) => (
-          <button
-            key={key}
-            onClick={() => setDatePreset(key)}
-            className={cn(
-              'px-2.5 py-1 rounded-lg text-[10px] font-semibold transition-all border',
-              datePreset === key
-                ? 'bg-amber-500/15 text-amber-400 border-amber-500/40'
-                : isDark
-                  ? 'bg-[#0f0a05] text-gray-500 border-[#2a1f0d] hover:text-gray-300'
-                  : 'bg-white text-gray-500 border-amber-100 hover:text-gray-700',
-            )}
-          >
-            {p.label}
-          </button>
-        ))}
-        <button
-          onClick={() => setDatePreset('custom')}
-          className={cn(
-            'px-2.5 py-1 rounded-lg text-[10px] font-semibold transition-all border flex items-center gap-1',
-            datePreset === 'custom'
-              ? 'bg-amber-500/15 text-amber-400 border-amber-500/40'
-              : isDark
-                ? 'bg-[#0f0a05] text-gray-500 border-[#2a1f0d] hover:text-gray-300'
-                : 'bg-white text-gray-500 border-amber-100',
-          )}
-        >
-          <Calendar className="w-3 h-3" /> Custom
-        </button>
-
-        {datePreset === 'custom' && (
-          <motion.div initial={{ opacity: 0, x: -8 }} animate={{ opacity: 1, x: 0 }}
-            className="flex items-center gap-2">
-            <input type="date" value={customFrom} onChange={e => setCustomFrom(e.target.value)}
-              className={cn('rounded-lg border px-2 py-1 text-[10px]',
-                isDark ? 'bg-[#0f0a05] border-[#2a1f0d] text-gray-300' : 'bg-white border-amber-100')} />
-            <span className="text-xs text-gray-500">→</span>
-            <input type="date" value={customTo} onChange={e => setCustomTo(e.target.value)}
-              className={cn('rounded-lg border px-2 py-1 text-[10px]',
-                isDark ? 'bg-[#0f0a05] border-[#2a1f0d] text-gray-300' : 'bg-white border-amber-100')} />
-          </motion.div>
-        )}
-      </div>
+      <DatePresetBar
+        datePreset={datePreset}
+        onPresetChange={setDatePreset}
+        customFrom={customFrom}
+        customTo={customTo}
+        onCustomFromChange={setCustomFrom}
+        onCustomToChange={setCustomTo}
+        isDark={isDark}
+      />
 
       {/* ── STATS GRID ──────────────────────────────────────── */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
@@ -704,15 +688,17 @@ const CashFlowMonitor = () => {
                     <option value="card">Card</option>
                   </select>
                 </div>
+                {!managerMode && (
                 <div>
                   <label className="text-[9px] font-semibold uppercase text-gray-500 block mb-1">Branch</label>
                   <select value={branchFilter} onChange={e => setBranchFilter(e.target.value)}
                     className={cn('w-full rounded-lg border px-2 py-1 text-xs',
                       isDark ? 'bg-[#070503] border-[#2a1f0d] text-gray-200' : 'bg-white border-amber-100')}>
                     <option value="all">All Branches</option>
-                    {allBranches.map(b => <option key={b} value={b}>{b}</option>)}
+                    {allBranches.map(b => <option key={b} value={b}>{branchLabel(b)}</option>)}
                   </select>
                 </div>
+                )}
                 <div>
                   <label className="text-[9px] font-semibold uppercase text-gray-500 block mb-1">Register</label>
                   <select value={registerFilter} onChange={e => setRegisterFilter(e.target.value)}
@@ -773,7 +759,7 @@ const CashFlowMonitor = () => {
                     <p className={cn('font-semibold text-xs truncate',
                       isDark ? 'text-gray-100' : 'text-gray-900')}>{reg.name}</p>
                     <p className="text-[9px] text-gray-500 truncate">
-                      <Building2 className="w-2.5 h-2.5 inline mr-1" />{reg.branch}
+                      <Building2 className="w-2.5 h-2.5 inline mr-1" />{branchLabel(reg.branch)}
                     </p>
                   </div>
                   <Badge variant={reg.status === 'open' ? 'success' : 'secondary'}>
@@ -883,7 +869,7 @@ const CashFlowMonitor = () => {
                                 <div className="flex items-center gap-1 mt-0.5">
                                   <Building2 className="w-2.5 h-2.5 text-slate-500 shrink-0" />
                                   <span className="text-[11px] text-slate-400 font-mono truncate">
-                                    {tx.branch}
+                                    {branchLabel(tx.branch)}
                                   </span>
                                 </div>
                               </div>
@@ -958,7 +944,7 @@ const CashFlowMonitor = () => {
                     </div>
                     <p className="text-[11px] text-gray-300 truncate mb-1">{tx.description}</p>
                     <div className="flex items-center justify-between text-[10px] text-slate-500">
-                      <span className="truncate">{tx.initiator} • {tx.branch}</span>
+                      <span className="truncate">{tx.initiator} • {branchLabel(tx.branch)}</span>
                       <span>{fmtDt(tx.timestamp)}</span>
                     </div>
                     <div className="flex items-center gap-1 mt-1">
@@ -1029,7 +1015,7 @@ const CashFlowMonitor = () => {
                 <div className="grid grid-cols-2 gap-2">
                   {[
                     { label: 'Cashier', value: selectedRegister.name },
-                    { label: 'Branch', value: selectedRegister.branch },
+                    { label: 'Branch', value: branchLabel(selectedRegister.branch) },
                     { label: 'Total Bills', value: selectedRegister.totalBills || 0 },
                     { label: 'Status', value: (selectedRegister.status || 'open').toUpperCase() },
                   ].map(f => (

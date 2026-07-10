@@ -20,7 +20,7 @@ import {
   validateSetupForm,
   validateBusinessInfoForm,
 } from '../../utils/validators';
-import toast from 'react-hot-toast';
+import { toast } from 'react-hot-toast';
 
 const SetupPage = () => {
   const [step,           setStep]          = useState(1);

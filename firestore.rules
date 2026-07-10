@@ -1,10 +1,9 @@
 // ╔══════════════════════════════════════════════════════════════════╗
-// ║  firestore.rules — PRODUCTION v2.0                              ║
-// ║  ✅ Setup doc PUBLIC read (login se pehle check ke liye)        ║
-// ║  ✅ Permission errors fix                                       ║
+// ║  firestore.rules — PRODUCTION v2.1                              ║
+// ║  ✅ commissions collection added                                ║
+// ║  ✅ Setup doc PUBLIC read                                       ║
 // ║  ✅ Dual role support (string + array)                          ║
 // ║  ✅ Serial counter atomic transactions                          ║
-// ║  ✅ All collections covered                                     ║
 // ╚══════════════════════════════════════════════════════════════════╝
 
 rules_version = '2';
@@ -79,6 +78,16 @@ service cloud.firestore {
       return isBiller() || isCashier() || isManager() || isAdmin();
     }
 
+    function defaultTenantId() {
+      return 'aone';
+    }
+
+    function tenantAllowed(data) {
+      return !('tenantId' in data)
+        || data.tenantId == defaultTenantId()
+        || isSuperAdmin();
+    }
+
     function hasValidSerial() {
       return request.resource.data.serialNo is string
              && request.resource.data.serialNo.size() > 0
@@ -86,15 +95,58 @@ service cloud.firestore {
     }
 
     // ═══════════════════════════════════════════════════════
-    // ✅ FIX: SETTINGS — Setup doc PUBLIC READ
-    // Setup check login se PEHLE hota hai → public read needed
+    // SETTINGS — Setup doc PUBLIC READ
     // ═══════════════════════════════════════════════════════
     match /settings/{settingId} {
-      // ✅ Setup doc public read (no auth required for check)
-      // Other settings require auth
       allow read: if settingId == 'setup' || isAuthed();
-      // ✅ Only super admin can write/delete
-      allow create, update: if isSuperAdmin() || (settingId == 'setup' && isAuthed());
+      allow create, update: if isSuperAdmin()
+        || (settingId == 'appConfig' && isAdmin())
+        || (settingId == 'dualMode' && isAdmin())
+        || (settingId == 'setup' && isAuthed())
+        || (settingId == 'backupSchedule' && isAdmin());
+      allow delete: if isSuperAdmin();
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // BACKUPS — Admin-only metadata + encrypted payloads
+    // backups/{id}           → audit log / metadata
+    // systemBackups/{id}     → full JSON or chunk manifest
+    // systemBackups/{id}/chunks/{n} → large backup chunks
+    // ═══════════════════════════════════════════════════════
+    match /backups/{backupId} {
+      allow read: if isAdmin();
+      allow create, update: if isAdmin();
+      allow delete: if isSuperAdmin();
+    }
+
+    match /systemBackups/{backupId} {
+      allow read: if isAdmin();
+      allow create, update: if isAdmin();
+      allow delete: if isSuperAdmin();
+
+      match /chunks/{chunkId} {
+        allow read: if isAdmin();
+        allow create, update: if isAdmin();
+        allow delete: if isSuperAdmin();
+      }
+    }
+
+    match /archiveBatches/{batchId} {
+      allow read: if isManager();
+      allow create, update: if isManager();
+      allow delete: if isSuperAdmin();
+    }
+
+    match /archive_records/{recordId} {
+      allow read: if isManager();
+      allow create, update: if isManager();
+      allow delete: if isSuperAdmin();
+    }
+
+    match /backup_notifications/{notificationId} {
+      allow read: if isManager();
+      allow create: if isManager();
+      allow update: if isManager();
       allow delete: if isSuperAdmin();
     }
 
@@ -109,7 +161,14 @@ service cloud.firestore {
         isAdmin() ||
         request.resource.data.get('isDeleted', false) == resource.data.get('isDeleted', false)
       );
+      // Permanent delete from Bills Control — Super Admin only
       allow delete: if isSuperAdmin();
+    }
+
+    // Pre-aggregated daily sales — written by Cloud Function only
+    match /dailySummaries/{summaryId} {
+      allow read: if isAuthed();
+      allow write: if false;
     }
 
     match /bills/{billId} {
@@ -120,7 +179,7 @@ service cloud.firestore {
     }
 
     // ═══════════════════════════════════════════════════════
-    // STORES — Counter forward-only
+    // STORES
     // ═══════════════════════════════════════════════════════
     match /stores/{storeId} {
       allow read: if isAuthed();
@@ -130,10 +189,16 @@ service cloud.firestore {
         request.resource.data.lastSerialNumber >= resource.data.lastSerialNumber
       );
       allow delete: if isSuperAdmin();
+
+      // Cross-device paid-keys sync (cashier queue dedup)
+      match /meta/{metaId} {
+        allow read: if isAuthed();
+        allow write: if isAuthed();
+      }
     }
 
     // ═══════════════════════════════════════════════════════
-    // ✅ SERIAL COUNTERS — Atomic transactions
+    // SERIAL COUNTERS — Atomic transactions
     // ═══════════════════════════════════════════════════════
     match /serialCounters/{counterId} {
       allow read: if isAuthed();
@@ -153,7 +218,9 @@ service cloud.firestore {
     match /users/{userId} {
       allow read: if isAuthed() && (
         request.auth.uid == userId ||
-        isAdmin()
+        isAdmin() ||
+        (resource.data.email is string &&
+          resource.data.email == request.auth.token.email)
       );
       allow update: if isAuthed() && (
         request.auth.uid == userId ||
@@ -166,13 +233,48 @@ service cloud.firestore {
       allow delete: if isSuperAdmin();
     }
 
+    // Email verification links — Admin/Super Admin send; user completes via public link
+    match /email_verify_tokens/{tokenId} {
+      allow create: if isAdmin();
+      allow read: if true;
+      allow update: if
+        resource.data.verified == false &&
+        request.resource.data.verified == true &&
+        request.resource.data.email == resource.data.email &&
+        request.time.toMillis() < resource.data.expiresAt;
+      allow delete: if isAdmin();
+    }
+
+    // Legacy OTP collection (deprecated)
+    match /user_email_otps/{otpId} {
+      allow read, write: if isAdmin();
+    }
+
+    // Deleted user tombstones — reclaim email when Firebase Auth orphan remains
+    match /user_tombstones/{tombId} {
+      allow read, write, delete: if isSuperAdmin();
+    }
+
+    // Firebase Trigger Email extension queue
+    match /mail/{mailId} {
+      allow create: if isAdmin();
+      allow read, update, delete: if false;
+    }
+
+    match /sync_ops/{opId} {
+      allow read: if isAuthed();
+      allow create: if isAuthed();
+      allow update: if isAuthed();
+      allow delete: if isSuperAdmin();
+    }
+
     // ═══════════════════════════════════════════════════════
     // CUSTOMERS
     // ═══════════════════════════════════════════════════════
     match /customers/{custId} {
       allow read: if isAuthed();
-      allow create: if isAuthed();
-      allow update: if isAuthed();
+      allow create: if isAuthed() && tenantAllowed(request.resource.data);
+      allow update: if isAuthed() && tenantAllowed(request.resource.data);
       allow delete: if isAdmin();
     }
 
@@ -180,8 +282,15 @@ service cloud.firestore {
     // ACTIVITY LOGS — Immutable
     // ═══════════════════════════════════════════════════════
     match /activityLogs/{logId} {
-      allow read: if isAdmin();
+      allow read: if isManager();
       allow create: if isAuthed();
+      allow update: if false;
+      allow delete: if isSuperAdmin();
+    }
+
+    match /billerStallAlerts/{alertId} {
+      allow read: if isAdmin();
+      allow create: if isBiller() || isAdmin();
       allow update: if false;
       allow delete: if false;
     }
@@ -190,14 +299,38 @@ service cloud.firestore {
       allow read: if isAuthed();
       allow create: if isAuthed();
       allow update: if false;
-      allow delete: if false;
+      allow delete: if isSuperAdmin();
+    }
+
+    match /auditLogs/{lid} {
+      allow read: if isManager();
+      allow create: if isAuthed();
+      allow update: if false;
+      allow delete: if isSuperAdmin();
+    }
+
+    match /superAdminActivityLogs/{logId} {
+      allow read: if isSuperAdmin();
+      allow create: if isSuperAdmin();
+      allow update: if false;
+      allow delete: if isSuperAdmin();
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // NOTIFICATIONS — Cashier flags, alerts
+    // ═══════════════════════════════════════════════════════
+    match /notifications/{notifId} {
+      allow read: if isAuthed();
+      allow create: if isAuthed();
+      allow update: if isAuthed();
+      allow delete: if isSuperAdmin();
     }
 
     // ═══════════════════════════════════════════════════════
     // DELETED BILLS
     // ═══════════════════════════════════════════════════════
     match /deletedBills/{billId} {
-      allow read: if isAdmin();
+      allow read: if isManager();
       allow create: if isAuthed();
       allow update: if isAuthed();
       allow delete: if isSuperAdmin();
@@ -217,7 +350,7 @@ service cloud.firestore {
     match /payments/{payId} {
       allow read: if isAuthed();
       allow create: if isAuthed();
-      allow update: if isAdmin();
+      allow update: if isManager();
       allow delete: if isSuperAdmin();
     }
 
@@ -237,7 +370,7 @@ service cloud.firestore {
     match /returns/{retId} {
       allow read: if isAuthed();
       allow create: if isAuthed();
-      allow update: if isAdmin();
+      allow update: if isManager();
       allow delete: if isSuperAdmin();
     }
 
@@ -252,17 +385,10 @@ service cloud.firestore {
     }
 
     // ═══════════════════════════════════════════════════════
-    // AUDIT / LEGACY LOGS
+    // AUDIT / LEGACY LOGS (auditLogs rules above — superAdmin purge)
     // ═══════════════════════════════════════════════════════
-    match /auditLogs/{lid} {
-      allow read: if isAdmin();
-      allow create: if isAuthed();
-      allow update: if false;
-      allow delete: if false;
-    }
-
     match /clearedData/{did} {
-      allow read: if isAdmin();
+      allow read: if isManager();
       allow create: if isAuthed();
       allow update: if false;
       allow delete: if false;
@@ -276,6 +402,22 @@ service cloud.firestore {
       allow create: if isAuthed();
       allow update: if isAdmin();
       allow delete: if false;
+    }
+
+    // Payment ↔ Bill reconciliation (independent matching records)
+    match /payment_matches/{matchId} {
+      allow read: if isManager();
+      allow create: if isAuthed();
+      allow update: if isManager();
+      allow delete: if isSuperAdmin();
+    }
+
+    // Fraud review queue — payment/bill mismatches & suspicious activity
+    match /fraud_reviews/{reviewId} {
+      allow read: if isManager();
+      allow create: if isAuthed();
+      allow update: if isManager();
+      allow delete: if isSuperAdmin();
     }
 
     match /shifts/{shid} {
@@ -295,22 +437,84 @@ service cloud.firestore {
     match /approvalRequests/{rid} {
       allow read: if isAuthed();
       allow create: if isAuthed();
+      allow update: if isManager();
+      allow delete: if false;
+    }
+
+    match /superApprovalRequests/{rid} {
+      allow read: if isManager();
+      allow create: if isManager();
       allow update: if isAdmin();
       allow delete: if false;
     }
 
+    match /managerApprovedOrders/{oid} {
+      allow read: if isManager();
+      allow create: if isManager();
+      allow update: if isManager();
+      allow delete: if false;
+    }
+
+    match /managerCancelledOrders/{oid} {
+      allow read: if isManager();
+      allow create: if isManager();
+      allow update: if isManager();
+      allow delete: if false;
+    }
+
     // ═══════════════════════════════════════════════════════
-    // ✅ GLOBAL COUNTERS — Shared serial counter (all users)
-    // Required for global bill serial generation
-    // Read: any authenticated user (to get current counter)
-    // Write: any authenticated user (atomic transaction)
+    // GLOBAL COUNTERS
     // ═══════════════════════════════════════════════════════
     match /globalCounters/{document=**} {
       allow read, write: if request.auth != null;
     }
 
     // ═══════════════════════════════════════════════════════
-    // DEFAULT DENY
+    // ✅ NEW: COMMISSIONS — Salesperson commission tracking
+    // commissions/{agentId}                → summary doc
+    // commissions/{agentId}/snapshots/{id} → history log
+    // ═══════════════════════════════════════════════════════
+    match /commissions/{agentId} {
+      // Managers, admins, superadmin can read
+      allow read: if isManager();
+
+      // SuperAdmin creates agent commission docs
+      allow create: if isSuperAdmin();
+
+      // SuperAdmin updates (rate change, toggle, soft-delete)
+      allow update: if isSuperAdmin();
+
+      // Hard delete only superadmin
+      allow delete: if isSuperAdmin();
+
+      // ── Snapshots sub-collection (immutable history) ──
+      match /snapshots/{snapshotId} {
+        // Managers and above can read history
+        allow read: if isManager();
+
+        // SuperAdmin writes snapshot entries
+        allow create: if isSuperAdmin();
+
+        // Snapshots never change once written
+        allow update: if false;
+        allow delete: if false;
+      }
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // DEVICES — Terminal/PWA checkout session management
+    // ═══════════════════════════════════════════════════════
+    match /devices/{deviceId} {
+      allow read: if isAuthed();
+      allow create, update: if isAdmin() || (
+        isAuthed() &&
+        request.resource.data.userId == request.auth.uid
+      );
+      allow delete: if isSuperAdmin();
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // DEFAULT DENY — Must be last
     // ═══════════════════════════════════════════════════════
     match /{document=**} {
       allow read, write: if false;

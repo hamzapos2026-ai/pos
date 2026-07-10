@@ -2,6 +2,32 @@
 // Purpose: Helper functions specific to Manager module
 
 import { PAYMENT_STATUS, BILL_STATUS } from './constants';
+import {
+  isCashierCollected,
+  isCashierPaidPendingManager,
+  isManagerSettled,
+  getEffectivePaidAmount,
+} from './cashierOrderUtils';
+import {
+  isInvoiceDualModeBill,
+  isDualModePaidAtBiller,
+  isDualModePendingManager,
+} from './billChannelUtils';
+
+const isSuperAdminRole = (role) => {
+  const r = String(role || '').toLowerCase();
+  return r === 'superadmin' || r === 'super_admin' || r === 'admin';
+};
+
+export const getBillSettledByLabel = (bill) => {
+  if (!bill) return '';
+  const role = bill.settledByRole || bill.paidByRole || bill.confirmedByRole || '';
+  const name = bill.settledByName || bill.managerConfirmedByName || bill.paidByName || bill.confirmedByName || '';
+  if (isSuperAdminRole(role)) return name ? `Super Admin · ${name}` : 'Super Admin';
+  if (role === 'manager') return name ? `Manager · ${name}` : 'Manager';
+  if (role === 'cashier' || bill.paidBy) return name ? `Cashier · ${name}` : 'Cashier';
+  return name || '';
+};
 
 // Format currency
 export const formatPKR = (amount) => {
@@ -46,19 +72,70 @@ export const getRelativeTime = (timestamp) => {
 // Get payment status of bill
 export const getBillPaymentStatus = (bill) => {
     if (!bill) return { status: 'empty', label: 'Empty', color: 'gray' };
-    const isCancelled = bill.status === 'cancelled' || bill.deleted || bill.isDeleted;
+    const status = String(bill.status || '').toLowerCase();
+    const paymentStatus = String(bill.paymentStatus || '').toLowerCase();
+    const isCancelled = status === 'cancelled' || bill.deleted || bill.isDeleted;
     if (isCancelled) return { status: 'cancelled', label: 'Cancelled', color: 'red' };
 
-    const total = Number(bill.totalAmount || bill.total || 0);
-    const paid = Number(bill.paidAmount || 0);
-    const outstanding = total - paid;
-
+    const total = Number(bill.totalAmount || bill.total || bill.grandTotal || 0);
     if (total === 0) return { status: 'empty', label: 'Empty', color: 'gray' };
-    if (outstanding <= 0) {
-        const isApproved = bill.status === 'completed' || bill.status === 'approved' || bill.status === 'manager_approved';
-        return { status: PAYMENT_STATUS.paid, label: isApproved ? 'Manager Paid' : 'Cashier Paid', color: 'green' };
+
+    // Cashier collected — manager not confirmed yet
+    if (isCashierPaidPendingManager(bill)) {
+        return {
+            status: 'cashier_paid',
+            label: 'Cashier Paid · Mgr Pending',
+            color: 'blue',
+        };
     }
-    if (paid > 0) return { status: PAYMENT_STATUS.partial, label: 'Partial', color: 'orange' };
+
+    if (isManagerSettled(bill)) {
+        const role = bill.settledByRole || bill.paidByRole || bill.confirmedByRole || '';
+        const label = isSuperAdminRole(role)
+            ? 'Super Admin Paid'
+            : (role === 'cashier' && bill.managerConfirmed ? 'Manager Confirmed' : 'Manager Confirmed');
+        return {
+            status: PAYMENT_STATUS.paid,
+            label,
+            color: 'green',
+        };
+    }
+
+    if (isInvoiceDualModeBill(bill)) {
+        if (isDualModePaidAtBiller(bill)) {
+            if (!isManagerSettled(bill)) {
+                return {
+                    status: 'dual_paid_biller',
+                    label: 'Dual · Paid · Mgr Pending',
+                    color: 'purple',
+                };
+            }
+            return {
+                status: 'dual_paid_biller',
+                label: 'Dual · Paid at Biller',
+                color: 'purple',
+            };
+        }
+        if (isDualModePendingManager(bill)) {
+            return {
+                status: 'dual_mgr',
+                label: 'Dual · Mgr Approval',
+                color: 'purple',
+            };
+        }
+    }
+
+    if (paymentStatus === 'pending_approval') {
+        return { status: PAYMENT_STATUS.unpaid, label: 'Pending Manager', color: 'orange' };
+    }
+    if (paymentStatus === 'pending_payment') {
+        return { status: PAYMENT_STATUS.unpaid, label: 'Pending Cashier', color: 'orange' };
+    }
+
+    const paid = getEffectivePaidAmount(bill);
+    if (paid > 0 && paid < total) {
+        return { status: PAYMENT_STATUS.partial, label: 'Partial', color: 'orange' };
+    }
     return { status: PAYMENT_STATUS.unpaid, label: 'Unpaid', color: 'red' };
 };
 
@@ -66,17 +143,39 @@ export const getBillPaymentStatus = (bill) => {
 export const getBillStatusInfo = (status) => {
     const map = {
         [BILL_STATUS.draft]: { label: 'Draft', color: 'gray', bg: 'bg-gray-500/15', text: 'text-gray-400' },
-        [BILL_STATUS.completed]: { label: 'Approved', color: 'green', bg: 'bg-green-500/15', text: 'text-green-400' },
-        'approved': { label: 'Approved', color: 'green', bg: 'bg-green-500/15', text: 'text-green-400' },
-        'manager_approved': { label: 'Approved', color: 'green', bg: 'bg-green-500/15', text: 'text-green-400' },
+        [BILL_STATUS.completed]: { label: 'Completed', color: 'green', bg: 'bg-green-500/15', text: 'text-green-400' },
+        'approved': { label: 'Pending Cashier', color: 'blue', bg: 'bg-blue-500/15', text: 'text-blue-400' },
+        cashier_paid: { label: 'Cashier Paid', color: 'sky', bg: 'bg-sky-500/15', text: 'text-sky-400' },
+        'paid': { label: 'Paid', color: 'green', bg: 'bg-green-500/15', text: 'text-green-400' },
+        'manager_approved': { label: 'Manager Approved', color: 'green', bg: 'bg-green-500/15', text: 'text-green-400' },
         [BILL_STATUS.synced]: { label: 'Synced', color: 'blue', bg: 'bg-blue-500/15', text: 'text-blue-400' },
         [BILL_STATUS.pending]: { label: 'Pending Manager', color: 'orange', bg: 'bg-orange-500/15', text: 'text-orange-400' },
         [BILL_STATUS.pending_superadmin]: { label: 'Pending Super Admin', color: 'yellow', bg: 'bg-yellow-500/15', text: 'text-yellow-400' },
         [BILL_STATUS.cancelled]: { label: 'Cancelled', color: 'red', bg: 'bg-red-500/15', text: 'text-red-400' },
         [BILL_STATUS.returned]: { label: 'Returned', color: 'blue', bg: 'bg-blue-500/15', text: 'text-blue-400' },
         [BILL_STATUS.deleted]: { label: 'Deleted', color: 'red', bg: 'bg-red-500/15', text: 'text-red-400' },
+        'manager_cancelled': { label: 'Mgr Cancelled', color: 'red', bg: 'bg-red-500/15', text: 'text-red-400' },
     };
     return map[status] || { label: status || 'Unknown', color: 'gray', bg: 'bg-gray-500/15', text: 'text-gray-400' };
+};
+
+/** Secondary workflow badge — skip when payment column already covers dual mode. */
+export const getBillWorkflowStatusBadge = (bill) => {
+    if (!bill) return null;
+    if (isInvoiceDualModeBill(bill)) return null;
+    const status = String(bill.status || '').toLowerCase();
+    const paymentStatus = String(bill.paymentStatus || '').toLowerCase();
+    if (paymentStatus === 'pending_approval') return getBillStatusInfo('pending');
+    if (paymentStatus === 'pending_payment' && status === 'approved') {
+        return getBillStatusInfo('approved');
+    }
+    if (isCashierPaidPendingManager(bill)) {
+        return { label: 'Awaiting Mgr Confirm', color: 'blue', bg: 'bg-blue-500/15', text: 'text-blue-400' };
+    }
+    if (['paid', 'manager_approved', 'cashier_paid', 'cancelled', 'manager_cancelled'].includes(status)) {
+        return getBillStatusInfo(status);
+    }
+    return null;
 };
 
 // Calculate commission for a bill
@@ -136,6 +235,7 @@ export default {
     getRelativeTime,
     getBillPaymentStatus,
     getBillStatusInfo,
+    getBillWorkflowStatusBadge,
     calculateCommission,
     groupByDate,
     getDatePresets,

@@ -2,6 +2,8 @@
 
 This file contains step-by-step deployment notes for the A One Jewelry POS web app, PWA, and service worker.
 
+> **Shop floor (offline biller + cashier, multi-PC, multi-branch):** see [OFFLINE_SHOP_DEPLOYMENT_GUIDE.md](./OFFLINE_SHOP_DEPLOYMENT_GUIDE.md)
+
 Prerequisites
 - Node >= 18, npm
 - HTTPS hosting (service workers require secure context)

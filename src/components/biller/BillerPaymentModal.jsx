@@ -21,7 +21,7 @@
 // ✅ Responsive (mobile + desktop)
 // ═══════════════════════════════════════════════════════════════
 
-import { memo, useRef, useEffect } from "react";
+import { memo, useRef, useEffect, useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   CreditCard, X, Send, Loader2,
@@ -29,15 +29,16 @@ import {
 } from "lucide-react";
 import { cn } from "../../utils/cn";
 import { useTheme } from "../../context/ThemeContext";
+import { useSettings } from "../../context/SettingsContext";
+import { getEnabledPaymentMethods } from "../../utils/paymentMethodsUtils";
 
-// ─── Payment methods ──────────────────────────────────────────
-const PAYMENT_METHODS = [
-  { key: "cash",      label: "Cash",      icon: Banknote,    color: "green"  },
-  { key: "card",      label: "Card",      icon: CreditCard,  color: "blue"   },
-  { key: "easypaisa", label: "EasyPaisa", icon: Smartphone,  color: "green"  },
-  { key: "jazzcash",  label: "JazzCash",  icon: Smartphone,  color: "red"    },
-  { key: "bank",      label: "Bank",      icon: Building2,   color: "purple" },
-];
+const METHOD_UI = {
+  cash: { icon: Banknote, color: "green" },
+  easypaisa: { icon: Smartphone, color: "green" },
+  jazzcash: { icon: Smartphone, color: "red" },
+  bankTransfer: { icon: Building2, color: "purple" },
+  creditCard: { icon: CreditCard, color: "blue" },
+};
 
 // ─── Animation variants ──────────────────────────────────────
 const overlayVariants = {
@@ -77,6 +78,16 @@ const BillerPaymentModal = memo(({
   onClose,
 }) => {
   const { isDark } = useTheme();
+  const { settings } = useSettings();
+  const paymentMethods = useMemo(() => getEnabledPaymentMethods(settings).map((m) => {
+    const ui = METHOD_UI[m.key] || METHOD_UI.cash;
+    return {
+      key: m.key === 'creditCard' ? 'card' : m.key === 'bankTransfer' ? 'bank' : m.key,
+      label: m.label,
+      icon: ui.icon,
+      color: ui.color,
+    };
+  }), [settings?.paymentMethods]);
   const amountRef  = useRef(null);
 
   // ── Auto-focus amount input when opening ──────────────────
@@ -188,7 +199,7 @@ const BillerPaymentModal = memo(({
                 Payment Method
               </label>
               <div className="grid grid-cols-3 gap-2">
-                {PAYMENT_METHODS.slice(0, 3).map((method) => {
+                {paymentMethods.slice(0, 3).map((method) => {
                   const Icon      = method.icon;
                   const isActive  = paymentType === method.key;
 
@@ -216,7 +227,7 @@ const BillerPaymentModal = memo(({
               </div>
               {/* More methods row */}
               <div className="grid grid-cols-2 gap-2 mt-2">
-                {PAYMENT_METHODS.slice(3).map((method) => {
+                {paymentMethods.slice(3).map((method) => {
                   const Icon     = method.icon;
                   const isActive = paymentType === method.key;
 

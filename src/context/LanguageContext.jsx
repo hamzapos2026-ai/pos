@@ -27,7 +27,8 @@ export const LanguageProvider = ({ children }) => {
   const [loadedTranslations, setLoadedTranslations] = useState(DEFAULT_TRANSLATIONS);
   const [language, setLanguageState] = useState(() => {
     try {
-      const saved = localStorage.getItem('aone-language');
+      const saved = localStorage.getItem('aone-language')
+        || localStorage.getItem('aone_language');
       return saved && LANGUAGES[saved] ? saved : 'en';
     } catch {
       return 'en';
@@ -51,7 +52,10 @@ export const LanguageProvider = ({ children }) => {
   const setLanguage = useCallback((lang) => {
     if (!LANGUAGES[lang]) return;
     setLanguageState(lang);
-    try { localStorage.setItem('aone-language', lang); } catch {}
+    try {
+      localStorage.setItem('aone-language', lang);
+      localStorage.setItem('aone_language', lang);
+    } catch {}
     applyLanguage(lang);
   }, [applyLanguage]);
 
@@ -59,8 +63,8 @@ export const LanguageProvider = ({ children }) => {
     setLanguage(language === 'en' ? 'ur' : 'en');
   }, [language, setLanguage]);
 
-  // Translation function with dot-notation key support
-  const t = useCallback((key, fallback = '') => {
+  // Translation function with dot-notation key support + {{var}} interpolation
+  const t = useCallback((key, fallback = '', vars = null) => {
     try {
       const keys  = key.split('.');
       let   value = translations;
@@ -68,10 +72,17 @@ export const LanguageProvider = ({ children }) => {
         if (value && typeof value === 'object' && k in value) {
           value = value[k];
         } else {
-          return fallback || key;
+          value = null;
+          break;
         }
       }
-      return typeof value === 'string' ? value : (fallback || key);
+      let result = typeof value === 'string' ? value : (fallback || key);
+      if (vars && typeof vars === 'object') {
+        Object.entries(vars).forEach(([k, v]) => {
+          result = String(result).replace(new RegExp(`\\{\\{${k}\\}\\}`, 'g'), String(v ?? ''));
+        });
+      }
+      return typeof result === 'string' ? result : String(fallback || key);
     } catch {
       return fallback || key;
     }

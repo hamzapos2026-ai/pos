@@ -38,6 +38,8 @@ import {
   arrayRemove as _arrayRemove,
   getCountFromServer as _getCountFromServer,
 } from 'firebase/firestore';
+import { getHasInternet, subscribeInternet } from '../utils/networkReachability';
+import { recordFirebaseOp } from '../utils/firebaseUsageTelemetry';
 
 // Firebase config (Vite env)
 const firebaseConfig = {
@@ -95,7 +97,7 @@ export const isFirebaseReady = () =>
   isFirebaseConfigured() && !!app && !!auth && !!db;
 
 // ── Offline helpers & wrappers ─────────────────────────────────
-const _isOnline = () => (typeof navigator !== 'undefined' ? navigator.onLine : true);
+const _isOnline = () => getHasInternet();
 
 class OfflineError extends Error {
   constructor(message = 'Offline') {
@@ -107,11 +109,50 @@ class OfflineError extends Error {
 // Listener registry to pause/resume realtime listeners while offline
 const _listenerRegistry = new Map();
 
+const _parseSnapshotArgs = (arg2, arg3, arg4) => {
+  if (typeof arg2 === 'function') {
+    return {
+      snapshotOptions: null,
+      onNext: arg2,
+      onError: arg3,
+      onComplete: arg4,
+    };
+  }
+  if (arg2 && typeof arg2 === 'object' && typeof arg3 === 'function') {
+    const includeMetadataChanges = arg2.includeMetadataChanges === true;
+    return {
+      snapshotOptions: includeMetadataChanges ? { includeMetadataChanges: true } : null,
+      onNext: arg3,
+      onError: arg4,
+      onComplete: undefined,
+    };
+  }
+  return {
+    snapshotOptions: null,
+    onNext: arg2,
+    onError: arg3,
+    onComplete: arg4,
+  };
+};
+
+const _callOnSnapshot = (ref, snapshotOptions, onNext, onError, onComplete) => {
+  if (snapshotOptions) {
+    return _onSnapshot(ref, snapshotOptions, onNext, onError, onComplete);
+  }
+  return _onSnapshot(ref, onNext, onError, onComplete);
+};
+
 const _attachPendingListeners = () => {
   for (const [id, entry] of _listenerRegistry.entries()) {
     if (entry.attached) continue;
     try {
-      const unsub = _onSnapshot(entry.ref, entry.onNext, entry.onError, entry.onComplete);
+      const unsub = _callOnSnapshot(
+        entry.ref,
+        entry.snapshotOptions,
+        entry.onNext,
+        entry.onError,
+        entry.onComplete,
+      );
       entry.unsub = unsub;
       entry.attached = true;
       _listenerRegistry.set(id, entry);
@@ -134,13 +175,14 @@ const _detachActiveListeners = () => {
 };
 
 if (typeof window !== 'undefined') {
-  window.addEventListener('online', () => {
-    console.log('[firebase] Online — reattaching realtime listeners');
-    _attachPendingListeners();
-  });
-  window.addEventListener('offline', () => {
-    console.log('[firebase] Offline — detaching realtime listeners');
-    _detachActiveListeners();
+  subscribeInternet((online) => {
+    if (online) {
+      console.log('[firebase] Internet up — reattaching realtime listeners');
+      _attachPendingListeners();
+    } else {
+      console.log('[firebase] No internet — detaching realtime listeners');
+      _detachActiveListeners();
+    }
   });
 }
 
@@ -155,33 +197,46 @@ export const getDoc = async (ref, options) => {
       throw new OfflineError('Offline and no cached document');
     }
   }
-  return await _getDoc(ref, options);
+  const snap = await _getDoc(ref, options);
+  recordFirebaseOp('read', 1);
+  return snap;
 };
 export const getDocs = async (queryRef, options) => {
   if (!_isOnline()) {
     try {
-      return await _getDocs(queryRef, { source: 'cache' });
+      const snap = await _getDocs(queryRef, { source: 'cache' });
+      return snap;
     } catch (e) {
       throw new OfflineError('Offline and no cached query results');
     }
   }
-  return await _getDocs(queryRef, options);
+  const snap = await _getDocs(queryRef, options);
+  recordFirebaseOp('read', snap.size || 1);
+  return snap;
 };
 export const setDoc = async (ref, data, options) => {
   if (!_isOnline()) throw new OfflineError();
-  return await _setDoc(ref, data, options);
+  const r = await _setDoc(ref, data, options);
+  recordFirebaseOp('write', 1);
+  return r;
 };
 export const updateDoc = async (ref, data) => {
   if (!_isOnline()) throw new OfflineError();
-  return await _updateDoc(ref, data);
+  const r = await _updateDoc(ref, data);
+  recordFirebaseOp('write', 1);
+  return r;
 };
 export const addDoc = async (colRef, data) => {
   if (!_isOnline()) throw new OfflineError();
-  return await _addDoc(colRef, data);
+  const r = await _addDoc(colRef, data);
+  recordFirebaseOp('write', 1);
+  return r;
 };
 export const deleteDoc = async (ref) => {
   if (!_isOnline()) throw new OfflineError();
-  return await _deleteDoc(ref);
+  const r = await _deleteDoc(ref);
+  recordFirebaseOp('delete', 1);
+  return r;
 };
 export const runTransaction = async (firestore, updater, options) => {
   if (!_isOnline()) throw new OfflineError();
@@ -212,28 +267,48 @@ export const getCountFromServer = async (queryRef) => {
       throw new OfflineError('Offline and no cached count available');
     }
   }
-  return await _getCountFromServer(queryRef);
+  const result = await _getCountFromServer(queryRef);
+  recordFirebaseOp('read', 1);
+  return result;
 };
 
-export const onSnapshot = (refOrQuery, onNext, onError, onComplete) => {
+export const onSnapshot = (refOrQuery, arg2, arg3, arg4) => {
+  const { snapshotOptions, onNext, onError, onComplete } = _parseSnapshotArgs(arg2, arg3, arg4);
   const id = Symbol();
-  const entry = { ref: refOrQuery, onNext, onError, onComplete, unsub: null, attached: false };
+  const safeOnError = (err) => {
+    if (!_isOnline()) return;
+    const code = err?.code || '';
+    const msg = String(err?.message || '');
+    if (
+      code === 'unavailable'
+      || code === 'failed-precondition'
+      || /offline|network|internet|disconnected/i.test(msg)
+    ) return;
+    try { onError?.(err); } catch { /* ignore */ }
+  };
+
+  const entry = {
+    ref: refOrQuery,
+    snapshotOptions,
+    onNext,
+    onError: safeOnError,
+    onComplete,
+    unsub: null,
+    attached: false,
+  };
   _listenerRegistry.set(id, entry);
 
   if (_isOnline()) {
     try {
-      const unsub = _onSnapshot(refOrQuery, onNext, onError, onComplete);
+      const unsub = _callOnSnapshot(refOrQuery, snapshotOptions, onNext, safeOnError, onComplete);
       entry.unsub = unsub;
       entry.attached = true;
       _listenerRegistry.set(id, entry);
     } catch (e) {
       console.warn('[firebase] onSnapshot attach failed:', e?.message || e);
     }
-  } else {
-    // Offline — keep registered for later
   }
 
-  // return unsubscribe
   return () => {
     const e = _listenerRegistry.get(id);
     if (!e) return;

@@ -21,6 +21,7 @@ import { db, auth, isFirebaseReady } from './firebase';
 import { ROLES } from '../utils/constants';
 import { userHasPermission } from '../utils/rolePermissions';
 import { userCanAccessBranch as _userCanAccessBranch } from '../utils/branchAccess';
+import { getDeviceId } from '../utils/billIdGenerator';
 // Lazy loader for bcryptjs — avoids failing Vite analysis when dependency missing
 let _bcrypt = null;
 let _bcryptTried = false;
@@ -164,12 +165,7 @@ const _verifyPassword = async (password, email, storedHash) => {
 // ══════════════════════════════════════════════════════════════
 const _getDeviceId = () => {
   try {
-    let id = localStorage.getItem(DEVICE_ID_KEY);
-    if (!id) {
-      id = `dev_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
-      localStorage.setItem(DEVICE_ID_KEY, id);
-    }
-    return id;
+    return getDeviceId() || 'unknown_device';
   } catch {
     return 'unknown_device';
   }
@@ -269,15 +265,24 @@ const _cacheUserForOffline = async (firebaseUser, userData, password) => {
 /**
  * Get cached user by email
  */
-const _getCachedUser = async (email) => {
-  const normalizedEmail = email.toLowerCase().trim();
-  
+const _getCachedUser = async (identifier) => {
+  const normalized = _normalizeLoginIdentifier(identifier);
+  if (!normalized) return null;
+  const normalizedEmail = normalized.toLowerCase();
+  const searchByEmail = _isEmailIdentifier(normalized);
+
   // Try IndexedDB first
   const idb = await _getIDB();
   if (idb) {
     try {
       const allUsers = await idb.dbGetAll(idb.STORES.USERS);
-      const user = allUsers.find(u => u.email === normalizedEmail);
+      const user = allUsers.find(u => {
+        if (!u) return false;
+        const emailMatch = u.email === normalizedEmail;
+        const codeMatch = typeof u.userCode === 'string' &&
+          u.userCode.trim().toLowerCase() === normalizedEmail;
+        return emailMatch || codeMatch;
+      });
       if (user) return user;
     } catch (err) {
       console.warn('[auth] IDB read failed:', err.message);
@@ -286,9 +291,26 @@ const _getCachedUser = async (email) => {
   
   // Fallback to localStorage
   try {
-    const raw = localStorage.getItem(USER_CACHE_KEY_PREFIX + normalizedEmail);
-    if (raw) return JSON.parse(raw);
-  } catch {}
+    if (searchByEmail) {
+      const raw = localStorage.getItem(USER_CACHE_KEY_PREFIX + normalizedEmail);
+      if (raw) return JSON.parse(raw);
+    }
+
+    const keys = Object.keys(localStorage).filter(k => k.startsWith(USER_CACHE_KEY_PREFIX));
+    for (const key of keys) {
+      const raw = localStorage.getItem(key);
+      if (!raw) continue;
+      const data = JSON.parse(raw);
+      if (data?.userCode && String(data.userCode).trim().toLowerCase() === normalizedEmail) {
+        return data;
+      }
+      if (!searchByEmail && typeof data?.email === 'string' && data.email.toLowerCase() === normalizedEmail) {
+        return data;
+      }
+    }
+  } catch (err) {
+    console.warn('[auth] localStorage read failed:', err.message);
+  }
   
   return null;
 };
@@ -358,73 +380,297 @@ export const clearUserCache = async (email = null) => {
 };
 
 // ══════════════════════════════════════════════════════════════
+// RESOLVE USER DOC (uid path + legacy email / wrong doc id)
+// ══════════════════════════════════════════════════════════════
+const _normalizeAuthEmail = (email) => String(email || '').trim().toLowerCase();
+const _normalizeLoginIdentifier = (identifier) => String(identifier || '').trim();
+const _isEmailIdentifier = (identifier) => {
+  const value = String(identifier || '').trim();
+  return /\S+@\S+\.\S+/.test(value);
+};
+
+const _findUserDocByUsername = async (identifier) => {
+  if (!db || !identifier) return null;
+  const normalized = String(identifier || '').trim();
+  const tries = [normalized, normalized.toUpperCase(), normalized.toLowerCase()];
+  const seen = new Set();
+
+  for (const value of tries) {
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    for (const field of ['userCode', 'username']) {
+      try {
+        const snap = await getDocs(
+          query(collection(db, 'users'), where(field, '==', value), limit(1)),
+        );
+        if (!snap.empty) return snap.docs[0];
+      } catch (err) {
+        console.warn(`[auth] ${field} query failed:`, err.message);
+      }
+    }
+  }
+
+  return null;
+};
+
+const _resolveIdentifierToEmail = async (identifier) => {
+  const normalized = _normalizeLoginIdentifier(identifier);
+  if (!normalized) return null;
+  if (_isEmailIdentifier(normalized)) {
+    return normalized.toLowerCase();
+  }
+
+  // Try cached user lookup first (offline-first / auth-free)
+  const cachedUser = await _getCachedUser(normalized);
+  if (cachedUser?.email) {
+    return _normalizeAuthEmail(cachedUser.email);
+  }
+
+  const userDoc = await _findUserDocByUsername(normalized);
+  if (userDoc) {
+    const data = userDoc.data?.() || userDoc.data();
+    return _normalizeAuthEmail(data?.email || '');
+  }
+
+  return null;
+};
+
+/**
+ * Copy legacy Firestore user doc → users/{authUid}
+ */
+const _writeRepairedUserProfile = async (uidRef, uid, email, legacyData, legacyDocId = '') => {
+  const repaired = {
+    ...legacyData,
+    uid,
+    email,
+    isActive: legacyData.isActive !== false,
+    isDeleted: legacyData.isDeleted === true,
+    _legacyDocId: legacyDocId || legacyData._legacyDocId || null,
+  };
+
+  await setDoc(uidRef, {
+    ...repaired,
+    updatedAt: serverTimestamp(),
+    _repairedAt: serverTimestamp(),
+  }, { merge: true });
+
+  const fresh = await getDoc(uidRef);
+  if (fresh.exists()) {
+    return { ref: uidRef, data: fresh.data(), source: 'repaired' };
+  }
+  return { ref: uidRef, data: repaired, source: 'repaired' };
+};
+
+const _tryRepairFromLegacyDoc = async (firebaseUser, legacyDoc) => {
+  if (!legacyDoc?.exists?.() && !legacyDoc?.data) return null;
+  const uid = firebaseUser.uid;
+  const uidRef = doc(db, 'users', uid);
+  const email = _normalizeAuthEmail(firebaseUser.email);
+  const legacyData = legacyDoc.data?.() || legacyDoc.data || {};
+  if (legacyDoc.id === uid) {
+    return { ref: uidRef, data: legacyData, source: 'email' };
+  }
+  console.info('[auth] Repairing user profile at users/%s (was %s)', uid, legacyDoc.id);
+  return _writeRepairedUserProfile(uidRef, uid, email, legacyData, legacyDoc.id);
+};
+
+/** Push cached offline user profile to users/{authUid} when Firestore doc missing. */
+const _repairUserProfileFromLocalCache = async (firebaseUser) => {
+  const uid = firebaseUser.uid;
+  const email = _normalizeAuthEmail(firebaseUser.email);
+  if (!uid || !email) return null;
+
+  const cached = await _getCachedUser(email);
+  if (!cached) return null;
+
+  const uidRef = doc(db, 'users', uid);
+  const profile = {
+    name: cached.name || cached.displayName || firebaseUser.displayName || '',
+    email,
+    uid,
+    roles: cached.roles || [cached.role || 'biller'],
+    role: cached.primaryRole || cached.role || 'biller',
+    primaryRole: cached.primaryRole || cached.role || 'biller',
+    userCode: cached.userCode || '',
+    storeIds: cached.storeIds || [],
+    storeId: cached.storeId || cached.primaryStore || '',
+    primaryStore: cached.primaryStore || cached.storeId || '',
+    permissions: cached.permissions || {},
+    isActive: cached.isActive !== false,
+    isDeleted: false,
+  };
+
+  return _writeRepairedUserProfile(uidRef, uid, email, profile, cached._legacyDocId || '');
+};
+
+/**
+ * Load users/{authUid}, or find legacy doc by email and copy to canonical path.
+ * Fixes: Auth account exists but Firestore doc is under old/wrong document id.
+ */
+export const fetchUserDocByAuth = async (firebaseUser) => {
+  if (!firebaseUser?.uid || !db) return null;
+
+  const uid = firebaseUser.uid;
+  const uidRef = doc(db, 'users', uid);
+
+  try {
+    const uidSnap = await getDoc(uidRef);
+    if (uidSnap.exists()) {
+      const data = uidSnap.data();
+      return { ref: uidRef, data, source: 'uid' };
+    }
+  } catch (err) {
+    console.warn('[auth] uid doc read failed:', err?.message);
+  }
+
+  const email = _normalizeAuthEmail(firebaseUser.email);
+  if (!email) return null;
+
+  try {
+    const snap = await getDocs(
+      query(collection(db, 'users'), where('email', '==', email), limit(1)),
+    );
+    if (!snap.empty) {
+      const legacyDoc = snap.docs[0];
+      return _tryRepairFromLegacyDoc(firebaseUser, legacyDoc);
+    }
+  } catch (err) {
+    console.warn('[auth] email lookup / repair failed:', err?.message);
+  }
+
+  // userCode / username doc (BIL3110 etc.)
+  try {
+    const cached = await _getCachedUser(email);
+    const codeCandidates = [
+      cached?.userCode,
+      firebaseUser.displayName,
+    ].map((v) => String(v || '').trim()).filter(Boolean);
+    for (const code of codeCandidates) {
+      const legacyDoc = await _findUserDocByUsername(code);
+      if (legacyDoc) {
+        const hit = await _tryRepairFromLegacyDoc(firebaseUser, legacyDoc);
+        if (hit) return hit;
+      }
+    }
+  } catch (err) {
+    console.warn('[auth] userCode repair failed:', err?.message);
+  }
+
+  try {
+    const fromCache = await _repairUserProfileFromLocalCache(firebaseUser);
+    if (fromCache) return fromCache;
+  } catch (err) {
+    console.warn('[auth] local cache repair failed:', err?.message);
+  }
+
+  // Server-side repair (optional — only when Cloud Functions deployed)
+  try {
+    const { ensureUserProfileCloud, isProfileRepairUnavailable } = await import('./firebaseUserService');
+    if (!isProfileRepairUnavailable()) {
+      const cloud = await ensureUserProfileCloud();
+      if (cloud.success) {
+        const fresh = await getDoc(uidRef);
+        if (fresh.exists()) {
+          return { ref: uidRef, data: fresh.data(), source: cloud.source || 'cloud' };
+        }
+      }
+    }
+  } catch (cloudErr) {
+    console.warn('[auth] ensureUserProfile cloud:', cloudErr?.message);
+  }
+
+  return null;
+};
+
+// ══════════════════════════════════════════════════════════════
 // ONLINE LOGIN
 // ══════════════════════════════════════════════════════════════
-const _onlineLogin = async (email, password) => {
+const _onlineLogin = async (identifier, password) => {
   if (!isFirebaseReady() || !auth || !db) {
     throw new Error('Firebase not initialized');
   }
-  
+
   console.log('[auth] 🌐 Attempting ONLINE login...');
-  
-  // 1. Firebase Auth
-  const cred = await signInWithEmailAndPassword(auth, email, password);
-  const firebaseUser = cred.user;
-  
-  // 2. Fetch user data from Firestore
-  const userDocRef = doc(db, 'users', firebaseUser.uid);
-  const userDoc = await getDoc(userDocRef);
-  
-  if (!userDoc.exists()) {
-    await firebaseSignOut(auth);
-    throw new Error('User record not found in database');
+
+  const normalizedIdentifier = _normalizeLoginIdentifier(identifier);
+  const directEmail = _isEmailIdentifier(normalizedIdentifier)
+    ? normalizedIdentifier.toLowerCase()
+    : null;
+
+  let firebaseUser = null;
+  let lastError = null;
+
+  if (directEmail) {
+    try {
+      const cred = await signInWithEmailAndPassword(auth, directEmail, password);
+      firebaseUser = cred.user;
+    } catch (err) {
+      lastError = err;
+      if (err?.code !== 'auth/user-not-found') {
+        throw err;
+      }
+    }
   }
-  
-  const userData = userDoc.data();
-  
-  // 3. Check account status
+
+  if (!firebaseUser) {
+    const loginEmail = await _resolveIdentifierToEmail(normalizedIdentifier);
+    if (!loginEmail) {
+      throw new Error('No account found with this email or username');
+    }
+
+    const cred = await signInWithEmailAndPassword(auth, loginEmail, password);
+    firebaseUser = cred.user;
+  }
+
+  return await _finishOnlineLogin(firebaseUser, password);
+};
+
+const _finishOnlineLogin = async (firebaseUser, password) => {
+  const resolved = await fetchUserDocByAuth(firebaseUser);
+
+  if (!resolved?.data) {
+    await firebaseSignOut(auth);
+    throw new Error(
+      'Profile sync failed. Check internet and try again, or contact Super Admin.',
+    );
+  }
+
+  const userData = resolved.data;
+  const userDocRef = resolved.ref;
+
   if (userData.isDeleted === true) {
     await firebaseSignOut(auth);
     throw new Error('This account has been deleted');
   }
-  
+
   if (userData.isActive === false) {
     await firebaseSignOut(auth);
     throw new Error('This account is inactive. Contact admin.');
   }
-  
-  // 4. Cache for offline login (background, don't wait)
-  _cacheUserForOffline(firebaseUser, userData, password).catch(err => 
+
+  _cacheUserForOffline(firebaseUser, userData, password).catch(err =>
     console.warn('[auth] Cache failed (non-blocking):', err.message)
   );
 
-  // 4b. Cache ID token locally to avoid refresh attempts when offline
   try {
     const idToken = await firebaseUser.getIdToken();
     try { localStorage.setItem('aone_id_token', idToken); } catch {}
 
-    // Also monkey-patch getIdToken to return cached token when offline
-    try {
-      if (auth && auth.currentUser && typeof auth.currentUser.getIdToken === 'function') {
-        const origGet = auth.currentUser.getIdToken.bind(auth.currentUser);
-        auth.currentUser.getIdToken = async (forceRefresh) => {
-          if (!navigator.onLine) {
-            const cached = localStorage.getItem('aone_id_token');
-            if (cached) return cached;
-            // fallback: return a rejected promise to avoid SDK trying to refresh
-            return Promise.reject(new Error('Offline - no cached token'));
-          }
-          return origGet(forceRefresh);
-        };
-      }
-    } catch (e) {
-      console.warn('[auth] token monkey-patch failed:', e?.message || e);
+    if (auth && auth.currentUser && typeof auth.currentUser.getIdToken === 'function') {
+      const origGet = auth.currentUser.getIdToken.bind(auth.currentUser);
+      auth.currentUser.getIdToken = async (forceRefresh) => {
+        if (!navigator.onLine) {
+          const cached = localStorage.getItem('aone_id_token');
+          if (cached) return cached;
+          return Promise.reject(new Error('Offline - no cached token'));
+        }
+        return origGet(forceRefresh);
+      };
     }
   } catch (e) {
-    // non-fatal
+    console.warn('[auth] token cache failed:', e?.message || e);
   }
-  
-  // 5. Update last login (background)
+
   updateDoc(userDocRef, {
     lastLogin: serverTimestamp(),
     lastLoginAt: serverTimestamp(),
@@ -432,12 +678,12 @@ const _onlineLogin = async (email, password) => {
     lastDeviceId: _getDeviceId(),
     updatedAt: serverTimestamp(),
   }).catch(err => console.warn('[auth] Login meta update failed:', err.message));
-  
-  console.log('[auth] ✅ ONLINE login successful:', email);
-  
+
+  console.log('[auth] ✅ ONLINE login successful:', firebaseUser.email);
+
   return {
     user: firebaseUser,
-    userData: userData,
+    userData,
     mode: 'online',
   };
 };
@@ -478,7 +724,7 @@ const _offlineLogin = async (email, password) => {
     throw new Error('OFFLINE_NO_PASSWORD');
   }
   
-  const isValid = await _verifyPassword(password, email, cachedUser.hashedPassword);
+  const isValid = await _verifyPassword(password, cachedUser.email, cachedUser.hashedPassword);
   
   if (!isValid) {
     throw new Error('Invalid password');
@@ -511,11 +757,11 @@ export const smartLogin = async (email, password) => {
   if (!email || !password) {
     return {
       success: false,
-      error: { code: 'invalid-input', message: 'Email and password required' },
+      error: { code: 'invalid-input', message: 'Email or username and password required' },
     };
   }
   
-  const normalizedEmail = email.toLowerCase().trim();
+  const normalizedEmail = String(email || '').trim();
   const isOnline = navigator.onLine;
   
   // STRATEGY 1: ONLINE LOGIN (if internet available)
@@ -596,6 +842,8 @@ const _formatError = (err) => {
     'OFFLINE_NO_CACHE': 'You must login online first to enable offline access',
     'OFFLINE_EXPIRED': `Offline login expired (${OFFLINE_VALIDITY_DAYS} days). Please login online to refresh`,
     'OFFLINE_NO_PASSWORD': 'Password not cached. Please login online first',
+    'Profile not synced yet. Super Admin: open User Management once (auto-fix), or deploy Cloud Functions. Then try login again.':
+      'Profile not synced — Super Admin: open User Management once (auto-fixes all users)',
   };
   
   const friendlyMessage = errorMap[code] || errorMap[message] || message;
@@ -611,24 +859,26 @@ const _formatError = (err) => {
 // SYNC USER DATA (when internet returns)
 // ══════════════════════════════════════════════════════════════
 export const syncUserDataOnReconnect = async (uid) => {
-  if (!navigator.onLine || !isFirebaseReady() || !db) return;
-  
+  if (!navigator.onLine || !isFirebaseReady() || !db) return null;
+
   try {
-    const userDoc = await getDoc(doc(db, 'users', uid));
-    if (!userDoc.exists()) return;
-    
-    const userData = userDoc.data();
-    
+    const resolved = await fetchUserDocByAuth({ uid, email: auth?.currentUser?.email });
+    if (!resolved?.data) return null;
+
+    const userData = resolved.data;
+
     // Update cache
     await _updateCachedUser(uid, {
       ...userData,
       lastSynced: Date.now(),
       validUntil: Date.now() + (OFFLINE_VALIDITY_DAYS * 24 * 60 * 60 * 1000),
     });
-    
+
     console.log('[auth] ✅ User data synced from cloud');
+    return userData;
   } catch (err) {
     console.warn('[auth] Sync failed:', err.message);
+    return null;
   }
 };
 
@@ -668,8 +918,8 @@ export const getCurrentUserData = async () => {
       return cached;
     }
     
-    const userDoc = await getDoc(doc(db, 'users', auth.currentUser.uid));
-    return userDoc.exists() ? userDoc.data() : null;
+    const resolved = await fetchUserDocByAuth(auth.currentUser);
+    return resolved?.data || null;
   } catch (err) {
     console.error('[auth] getCurrentUserData error:', err);
     // Fallback to cache
@@ -794,6 +1044,7 @@ if (typeof window !== 'undefined') {
 // ══════════════════════════════════════════════════════════════
 export default {
   smartLogin,
+  fetchUserDocByAuth,
   getCurrentUserData,
   updateUserProfile,
   createUser,

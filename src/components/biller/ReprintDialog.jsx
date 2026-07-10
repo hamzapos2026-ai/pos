@@ -8,7 +8,7 @@ import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { X, Search, Receipt } from "lucide-react";
 import { getRecentOrders } from "../../services/localBillService";
-import toast from "react-hot-toast";
+import { toast } from "react-hot-toast";
 import { cn } from "../../utils/cn";
 
 export const ReprintDialog = ({

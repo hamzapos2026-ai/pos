@@ -1,7 +1,7 @@
 // src/pages/admin/CustomersControl.jsx
 // ✅ PRODUCTION READY — Firebase Live Sync + Offline/Online Support
 
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef, startTransition } from 'react';
 import {
   UserCheck, Search, Phone, MapPin, Download,
   ShoppingBag, Edit, Trash2, X, Filter,
@@ -10,29 +10,78 @@ import {
   Wifi, WifiOff, Loader2, AlertTriangle,
   ChevronLeft, ChevronRight, MoreHorizontal,
 } from 'lucide-react';
+import { toast } from 'react-hot-toast';
 import {
-  collection, getDocs, deleteDoc, doc,
-  updateDoc, query, where, orderBy,
-  limit, startAfter, onSnapshot,
-  getCountFromServer, writeBatch,
-  enableNetwork, disableNetwork,
-  getDocsFromCache, getDocsFromServer,
-} from 'firebase/firestore';
-import toast from 'react-hot-toast';
-import { db } from '../../services/firebase';
+  searchCustomers,
+  browseCustomers,
+  loadCustomerOrders,
+  loadOrdersForCustomerMetrics,
+  backfillCustomerPersonaBatch,
+  CUSTOMER_SEARCH_PAGE_SIZE,
+  deleteCustomerById,
+  updateCustomerFields,
+} from '../../services/customerAdminService';
 import { cn } from '../../utils/cn';
 import { useTheme } from '../../context/ThemeContext';
+import { useAuth } from '../../context/AuthContext';
 import Input from '../../components/ui/Input';
 import Button from '../../components/ui/Button';
 import PageHeader from '../../components/admin/PageHeader';
 import EmptyState from '../../components/admin/EmptyState';
 import StatCard from '../../components/admin/StatCard';
 import Badge from '../../components/ui/Badge';
+import { useLanguage } from '../../hooks/useLanguage';
+import { isWalkIn, phoneDigitsKey, isAutoNumberName, getCustomerDisplayName } from '../../utils/customerHelpers';
+import { mapCustomerRowPersona, applyCustomerFilters, countCustomerFilters } from '../../utils/customerFilterUtils';
+import CustomerGlassFilterPanel from '../../components/shared/CustomerGlassFilterPanel';
+import CustomerPersonaDetailPanel from '../../components/shared/CustomerPersonaDetailPanel';
+import {
+  customersTableShell, customersTableHead, customersTableRow, customersTh, customersTd,
+  glassActionBtn,
+} from '../../components/shared/customerTableTheme';
+import PaginationBar from '../../components/ui/PaginationBar';
+import { glassIcon } from '../../components/shared/glassUiTheme';
+import useStoresMap, {
+  buildStoreIdAliases,
+  orderMatchesStore,
+  resolveStoreName,
+  getStoreDisplayName,
+  resolveEffectiveStoreId,
+} from '../../hooks/useStoresMap';
 
 // ═══════════════════════════════════════════════════════════════
 // HELPERS
 // ═══════════════════════════════════════════════════════════════
 const fmt = (v) => `Rs ${Number(v || 0).toLocaleString()}`;
+
+const isWalkinCustomerRecord = (cust) => {
+  if (cust?.isWalking === true) return true;
+  const name = (cust?.name || '').trim();
+  const phone = (cust?.phone || cust?.phoneNormalized || '').trim();
+  return isWalkIn({ name, phone });
+};
+
+const getCustomerType = (cust) => {
+  if (cust?.isWalkin || cust?.customerType === 'walkin') return 'walkin';
+  const name = (cust?.name || '').trim();
+  if (isAutoNumberName(name) || cust?.isAutoNamed) return 'auto';
+  if (isWalkIn({ name, phone: cust?.phone || '' })) return 'walkin';
+  return 'registered';
+};
+
+const TYPE_BADGE = {
+  walkin: { label: 'Walk-in', cls: 'bg-blue-500/15 text-blue-500' },
+  auto: { label: 'Phone-only', cls: 'bg-violet-500/15 text-violet-400' },
+  registered: { label: 'Named', cls: 'bg-emerald-500/15 text-emerald-500' },
+};
+
+const PERSONA_BADGE = {
+  vip: { label: 'VIP', cls: 'bg-amber-500/20 text-amber-400' },
+  repeat: { label: 'Repeat', cls: 'bg-sky-500/15 text-sky-400' },
+  credit: { label: 'Credit', cls: 'bg-orange-500/15 text-orange-400' },
+  inactive: { label: 'Inactive', cls: 'bg-gray-500/15 text-gray-400' },
+  recovery: { label: 'Recovery', cls: 'bg-rose-500/15 text-rose-400' },
+};
 
 const fmtDate = (v) => {
   if (!v) return '—';
@@ -61,6 +110,63 @@ const getTimestamp = (v) => {
 
 const normalizePhone = (p) => (p || '').replace(/[\s\-\(\)]/g, '').trim();
 
+const getCustomerStoreId = (cust) => String(cust?.storeId || 'default').trim() || 'default';
+
+const getOrderStoreId = (order) =>
+  String(order?.storeId || order?.branchId || 'default').trim() || 'default';
+
+const recordMatchesBranch = (recordStoreId, aliases) => {
+  if (!aliases) return true;
+  const sid = String(recordStoreId || 'default').trim() || 'default';
+  const set = aliases instanceof Set ? aliases : new Set([...(aliases || [])].filter(Boolean));
+  if (!set.size) return true;
+  if (set.has(sid)) return true;
+  const lower = sid.toLowerCase();
+  for (const a of set) {
+    if (String(a).toLowerCase() === lower) return true;
+  }
+  return false;
+};
+
+/** When duplicate Customer N labels exist in one branch, renumber for display. */
+const reconcileBranchAutoNames = (rows) => {
+  const walkin = rows.filter((r) => r.isWalkin);
+  const rest = rows.filter((r) => !r.isWalkin);
+  const byStore = new Map();
+
+  rest.forEach((r) => {
+    const sid = r.storeId || 'default';
+    if (!byStore.has(sid)) byStore.set(sid, []);
+    byStore.get(sid).push(r);
+  });
+
+  const out = [...walkin];
+  byStore.forEach((storeRows) => {
+    const autoRows = storeRows.filter((r) => {
+      const pk = phoneDigitsKey(r.phone);
+      return pk.length >= 10 && (isAutoNumberName(r.name) || r.isAutoNamed);
+    });
+    const counts = {};
+    autoRows.forEach((r) => {
+      const n = (r.name || '').trim().toLowerCase();
+      counts[n] = (counts[n] || 0) + 1;
+    });
+    const hasDup = Object.values(counts).some((n) => n > 1);
+    if (hasDup) {
+      autoRows.sort(
+        (a, b) =>
+          getTimestamp(a.createdAt || a.lastOrderDate) -
+          getTimestamp(b.createdAt || b.lastOrderDate)
+      );
+      autoRows.forEach((r, i) => {
+        r.name = `Customer ${i + 1}`;
+      });
+    }
+    out.push(...storeRows);
+  });
+  return out;
+};
+
 const getOrderCustomerInfo = (order) => ({
   id: order.customerId || order.customer?.id || order.customer?.customerId || '',
   phone: normalizePhone(
@@ -78,15 +184,10 @@ const getOrderCustomerInfo = (order) => ({
 });
 
 const isWalkinOrder = (info) => {
-  return (
-    !info.phone &&
-    (!info.name ||
-      info.name === 'walk-in' ||
-      info.name === 'walk-in customer' ||
-      info.name.includes('walk-in') ||
-      info.name === 'walking' ||
-      info.name === 'walkin')
-  );
+  if (info.phone && info.phone.length >= 7) return false;
+  const name = (info.name || '').replace(/\s+/g, ' ').trim();
+  if (!name) return true;
+  return isWalkIn({ name, phone: '' });
 };
 
 const SORT_OPTIONS = [
@@ -97,7 +198,7 @@ const SORT_OPTIONS = [
   { key: 'lastOrderDate', label: 'Last Purchase', dir: 'desc' },
 ];
 
-const PAGE_SIZE = 50;
+const DEFAULT_PAGE_SIZE = 50;
 
 // ═══════════════════════════════════════════════════════════════
 // ONLINE STATUS HOOK
@@ -137,22 +238,34 @@ const useOnlineStatus = () => {
 // ═══════════════════════════════════════════════════════════════
 const CustomersControl = () => {
   const { isDark } = useTheme();
+  const { user } = useAuth();
   const isOnline = useOnlineStatus();
+  const { t, isRTL } = useLanguage();
+  const storesMap = useStoresMap();
 
   // ── Data state ─────────────────────────────────────────────
   const [customers, setCustomers] = useState([]);
-  const [allOrders, setAllOrders] = useState([]);
+  const [rawCustomerDocs, setRawCustomerDocs] = useState([]);
+  const [orderSnapshot, setOrderSnapshot] = useState([]);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchLastDoc, setSearchLastDoc] = useState(null);
+  const [searchHasMore, setSearchHasMore] = useState(false);
   const [lastSyncTime, setLastSyncTime] = useState(null);
-  const [dataSource, setDataSource] = useState('loading'); // 'cache' | 'server' | 'live'
+  const [dataSource, setDataSource] = useState('idle');
 
   // ── Filter / sort state ────────────────────────────────────
   const [search, setSearch] = useState('');
+  const [branchFilter, setBranchFilter] = useState('all');
   const [cityFilter, setCityFilter] = useState('');
+  const [typeFilter, setTypeFilter] = useState('all');
+  const [visitFilter, setVisitFilter] = useState('all');
+  const [personaFilter, setPersonaFilter] = useState('all');
   const [sortKey, setSortKey] = useState('totalSpent');
   const [sortDir, setSortDir] = useState('desc');
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
 
   // ── UI state ───────────────────────────────────────────────
   const [editingCustomer, setEditingCustomer] = useState(null);
@@ -164,18 +277,44 @@ const CustomersControl = () => {
   const [deletingId, setDeletingId] = useState(null);
 
   // ── Refs ───────────────────────────────────────────────────
-  const unsubCustomersRef = useRef(null);
-  const unsubOrdersRef = useRef(null);
-  const ordersLoadedRef = useRef(false);
+  const searchTimerRef = useRef(null);
   const customersLoadedRef = useRef(false);
+  const customerDocsRef = useRef([]);
+  const backfillRanRef = useRef(false);
+
+  const branchAliases = useMemo(() => {
+    if (branchFilter === 'all') return null;
+    return buildStoreIdAliases(branchFilter, storesMap);
+  }, [branchFilter, storesMap]);
+
+  const branches = useMemo(
+    () =>
+      Object.values(storesMap || {}).sort((a, b) =>
+        getStoreDisplayName(a).localeCompare(getStoreDisplayName(b))
+      ),
+    [storesMap]
+  );
 
   // ═══════════════════════════════════════════════════════════
   // PROCESS ORDERS → BUILD CUSTOMER METRICS
   // ═══════════════════════════════════════════════════════════
   const processOrdersIntoMetrics = useCallback((orders) => {
+    const emptyMetric = () => ({ count: 0, spent: 0, lastDate: null, firstDate: null });
+    const bumpOrderMetric = (bucket, orderDate, total) => {
+      bucket.count += 1;
+      bucket.spent += total;
+      const ts = getTimestamp(orderDate);
+      if (!bucket.firstDate || ts < getTimestamp(bucket.firstDate)) {
+        bucket.firstDate = orderDate;
+      }
+      if (ts > getTimestamp(bucket.lastDate)) {
+        bucket.lastDate = orderDate;
+      }
+    };
+
     const metricsById = {};
     const metricsByPhone = {};
-    const walkinMetrics = { count: 0, spent: 0, lastDate: null };
+    const walkinMetrics = emptyMetric();
 
     orders.forEach((order) => {
       if (order.isDeleted || order.deleted) return;
@@ -187,39 +326,19 @@ const CustomersControl = () => {
       const orderDate = order.createdAt || order.savedAt || null;
 
       if (isWalkinOrder(info)) {
-        walkinMetrics.count++;
-        walkinMetrics.spent += total;
-        const ts = getTimestamp(orderDate);
-        if (ts > getTimestamp(walkinMetrics.lastDate)) {
-          walkinMetrics.lastDate = orderDate;
-        }
+        bumpOrderMetric(walkinMetrics, orderDate, total);
         return;
       }
 
-      // By customer ID
       if (info.id) {
-        if (!metricsById[info.id]) {
-          metricsById[info.id] = { count: 0, spent: 0, lastDate: null };
-        }
-        metricsById[info.id].count++;
-        metricsById[info.id].spent += total;
-        const ts = getTimestamp(orderDate);
-        if (ts > getTimestamp(metricsById[info.id].lastDate)) {
-          metricsById[info.id].lastDate = orderDate;
-        }
+        if (!metricsById[info.id]) metricsById[info.id] = emptyMetric();
+        bumpOrderMetric(metricsById[info.id], orderDate, total);
       }
 
-      // By phone
-      if (info.phone && info.phone.length >= 7) {
-        if (!metricsByPhone[info.phone]) {
-          metricsByPhone[info.phone] = { count: 0, spent: 0, lastDate: null };
-        }
-        metricsByPhone[info.phone].count++;
-        metricsByPhone[info.phone].spent += total;
-        const ts = getTimestamp(orderDate);
-        if (ts > getTimestamp(metricsByPhone[info.phone].lastDate)) {
-          metricsByPhone[info.phone].lastDate = orderDate;
-        }
+      const phoneKey = info.phone ? phoneDigitsKey(info.phone) : '';
+      if (phoneKey && phoneKey.length >= 10) {
+        if (!metricsByPhone[phoneKey]) metricsByPhone[phoneKey] = emptyMetric();
+        bumpOrderMetric(metricsByPhone[phoneKey], orderDate, total);
       }
     });
 
@@ -230,268 +349,278 @@ const CustomersControl = () => {
   // BUILD FINAL CUSTOMER LIST
   // ═══════════════════════════════════════════════════════════
   const buildCustomerList = useCallback(
-    (customerDocs, orders) => {
+    (customerDocs, orders, { branchAliases: aliases, storesMap: sm, branchFilter: bf } = {}) => {
+      const scopedOrders = aliases
+        ? orders.filter((o) => orderMatchesStore(o, aliases))
+        : orders;
+      const scopedDocs = aliases
+        ? customerDocs.filter((c) => recordMatchesBranch(getCustomerStoreId(c), aliases))
+        : customerDocs;
+
       const { metricsById, metricsByPhone, walkinMetrics } =
-        processOrdersIntoMetrics(orders);
+        processOrdersIntoMetrics(scopedOrders);
 
       const normalCustomers = [];
+      const docPhones = new Set();
+      const docIds = new Set();
 
-      customerDocs.forEach((cust) => {
+      const branchSid = (rawSid) =>
+        resolveEffectiveStoreId(rawSid, sm || {}) || rawSid || 'default';
+
+      const dedupeCustomerDocs = (docs) => {
+        const byKey = new Map();
+        const noPhone = [];
+        docs.forEach((cust) => {
+          if (isWalkinCustomerRecord(cust)) return;
+          const sid = branchSid(getCustomerStoreId(cust));
+          const key = phoneDigitsKey(cust.phone || cust.phoneNormalized);
+          const dedupeKey = key.length >= 10 ? `${sid}:${key}` : `id:${cust.id}`;
+          if (key.length < 10) {
+            noPhone.push(cust);
+            return;
+          }
+          if (!byKey.has(dedupeKey)) {
+            byKey.set(dedupeKey, cust);
+            return;
+          }
+          const prev = byKey.get(dedupeKey);
+          const pick = getTimestamp(prev.createdAt) <= getTimestamp(cust.createdAt) ? prev : cust;
+          byKey.set(dedupeKey, pick);
+        });
+        return [...byKey.values(), ...noPhone];
+      };
+
+      dedupeCustomerDocs(scopedDocs).forEach((cust) => {
+        if (isWalkinCustomerRecord(cust)) return;
+
         const name = cust.name || 'Unknown';
         const phone = normalizePhone(cust.phone || cust.phoneNormalized || '');
-        const isWalkin =
-          name.toLowerCase().includes('walk-in') ||
-          name.toLowerCase().includes('walkin') ||
-          cust.isWalking;
-
-        if (isWalkin) return;
+        const sid = branchSid(getCustomerStoreId(cust));
+        const phoneKey = phone.length >= 7 ? phoneDigitsKey(phone) : '';
+        if (phoneKey) docPhones.add(`${sid}:${phoneKey}`);
+        if (cust.id) docIds.add(cust.id);
 
         const m =
           metricsById[cust.id] ||
-          (phone && phone.length >= 7 ? metricsByPhone[phone] : null) ||
-          { count: 0, spent: 0, lastDate: null };
+          (phoneKey ? metricsByPhone[phoneKey] : null) ||
+          { count: 0, spent: 0, lastDate: null, firstDate: null };
 
-        normalCustomers.push({
+        const row = mapCustomerRowPersona({
           id: cust.id,
-          name: cust.name || 'Unknown',
+          name,
           phone: cust.phone || cust.phoneNormalized || '',
           city: cust.city || '',
           market: cust.market || '',
           email: cust.email || '',
-          isAutoNamed: cust.isAutoNamed || false,
+          storeId: sid,
+          branchName: resolveStoreName(sid, sm || {}, sid),
+          isAutoNamed: cust.isAutoNamed || isAutoNumberName(name),
           createdAt: cust.createdAt || null,
-          purchaseCount: m.count,
-          totalSpent: m.spent,
-          lastOrderDate: m.lastDate,
           isWalkin: false,
-        });
+          fromOrdersOnly: false,
+          ...cust,
+        }, m);
+        row.customerType = getCustomerType(row);
+        normalCustomers.push(row);
       });
+
+      // Orders-only profiles (Customer 1,2,3… or named — not yet in customers collection)
+      const orderOnlyMap = new Map();
+
+      scopedOrders.forEach((order) => {
+        if (order.isDeleted || order.deleted) return;
+
+        const info = getOrderCustomerInfo(order);
+        if (isWalkinOrder(info)) return;
+
+        const rawName = (
+          order.customer?.name ||
+          order.customerName ||
+          ''
+        ).trim();
+        const phone = normalizePhone(
+          order.customer?.phone ||
+          order.customerPhone ||
+          order.customer?.phoneNormalized ||
+          ''
+        );
+        const orderStoreId = branchSid(getOrderStoreId(order));
+        const phoneKey = phone.length >= 7 ? phoneDigitsKey(phone) : '';
+        const docKey = phoneKey ? `${orderStoreId}:${phoneKey}` : '';
+
+        if (!rawName && !phone) return;
+        if (info.id && docIds.has(info.id)) return;
+        if (docKey && docPhones.has(docKey)) return;
+
+        const key = phoneKey
+          ? `p:${orderStoreId}:${phoneKey}`
+          : `n:${orderStoreId}:${rawName.toLowerCase()}`;
+        const total = Number(
+          order.grandTotal || order.totalAmount || order.total || 0
+        );
+        const orderDate = order.createdAt || order.savedAt || null;
+
+        if (orderOnlyMap.has(key)) {
+          const ex = orderOnlyMap.get(key);
+          ex.purchaseCount += 1;
+          ex.totalSpent += total;
+          const ts = getTimestamp(orderDate);
+          if (ts > getTimestamp(ex.lastOrderDate)) ex.lastOrderDate = orderDate;
+          return;
+        }
+
+        const row = mapCustomerRowPersona({
+          id: `order-only-${key.replace(/[^a-z0-9]/gi, '_')}`,
+          name: rawName || (phone ? `Customer (${phone})` : 'Unknown'),
+          phone: order.customer?.phone || order.customerPhone || phone,
+          city: order.customer?.city || '',
+          market: order.customer?.market || '',
+          email: '',
+          storeId: orderStoreId,
+          branchName: resolveStoreName(orderStoreId, sm || {}, orderStoreId),
+          isAutoNamed: isAutoNumberName(rawName),
+          createdAt: null,
+          isWalkin: false,
+          fromOrdersOnly: true,
+        }, { count: 1, spent: total, lastDate: orderDate });
+        row.customerType = getCustomerType(row);
+        orderOnlyMap.set(key, row);
+      });
+
+      normalCustomers.push(...orderOnlyMap.values());
+
+      const branchLabel = aliases
+        ? resolveStoreName(bf, sm || {}, 'Branch')
+        : 'All Branches';
 
       const masterWalkin = {
         id: 'virtual-walkin',
         name: 'Walk-in Customer',
         phone: '',
-        city: 'All Branches',
+        city: branchLabel,
         market: '',
         email: '',
+        storeId: aliases ? (resolveEffectiveStoreId(bf, sm || {}) || bf) : '',
+        branchName: branchLabel,
         isWalkin: true,
+        customerType: 'walkin',
         isAutoNamed: false,
+        fromOrdersOnly: false,
         createdAt: null,
         purchaseCount: walkinMetrics.count,
         totalSpent: walkinMetrics.spent,
         lastOrderDate: walkinMetrics.lastDate,
       };
 
-      return [masterWalkin, ...normalCustomers];
+      return reconcileBranchAutoNames([masterWalkin, ...normalCustomers]);
     },
     [processOrdersIntoMetrics]
   );
 
-  // ═══════════════════════════════════════════════════════════
-  // LIVE FIREBASE LISTENERS (Real-time sync)
-  // ═══════════════════════════════════════════════════════════
-  const startLiveSync = useCallback(() => {
-    // ── Customers listener ────────────────────────────────
-    if (unsubCustomersRef.current) unsubCustomersRef.current();
+  const branchScopeId = useMemo(() => {
+    if (branchFilter === 'all') return null;
+    return resolveEffectiveStoreId(branchFilter, storesMap) || branchFilter;
+  }, [branchFilter, storesMap]);
 
-    unsubCustomersRef.current = onSnapshot(
-      collection(db, 'customers'),
-      { includeMetadataChanges: true },
-      (snapshot) => {
-        const source = snapshot.metadata.fromCache ? 'cache' : 'server';
-        const hasPending = snapshot.metadata.hasPendingWrites;
+  const runCustomerSearch = useCallback(async (term, cursor = null) => {
+    const q = String(term || '').trim();
 
-        const customerDocs = snapshot.docs.map((d) => ({
-          id: d.id,
-          ...d.data(),
-        }));
-
-        // Update customers with current orders
-        setAllOrders((currentOrders) => {
-          const builtList = buildCustomerList(customerDocs, currentOrders);
-          setCustomers(builtList);
-          return currentOrders;
+    setSearchLoading(true);
+    setSyncing(true);
+    try {
+      const scopeId = branchScopeId;
+      const useSearch = q.length >= 3;
+      const { customers: rows, lastDoc, hasMore } = useSearch
+        ? await searchCustomers({
+          term: q,
+          storeId: scopeId,
+          branchId: scopeId,
+          cursor,
+          pageSize: CUSTOMER_SEARCH_PAGE_SIZE,
+        })
+        : await browseCustomers({
+          storeId: scopeId,
+          branchId: scopeId,
+          cursor,
         });
 
-        if (!customersLoadedRef.current) {
-          customersLoadedRef.current = true;
-        }
-
-        setDataSource(hasPending ? 'pending' : source === 'cache' ? 'cache' : 'live');
-        setSyncing(false);
-
-        console.log(
-          `[Customers] ${customerDocs.length} loaded from ${source}` +
-          (hasPending ? ' (pending writes)' : '')
-        );
-      },
-      (error) => {
-        console.error('[Customers Listener Error]', error);
-        toast.error('Customer sync error: ' + error.message);
-      }
-    );
-
-    // ── Orders listener (batched) ─────────────────────────
-    if (unsubOrdersRef.current) unsubOrdersRef.current();
-
-    // For large collections, we load orders initially then listen for changes
-    const loadAllOrders = async () => {
-      const allOrd = [];
-      let lastDoc = null;
-      let hasMore = true;
-      let batchNum = 0;
-
-      while (hasMore) {
-        const constraints = [
-          collection(db, 'orders'),
-          orderBy('createdAt', 'desc'),
-          limit(500),
-        ];
-
-        if (lastDoc) {
-          constraints.splice(2, 0, startAfter(lastDoc));
-        }
-
-        const q = query(...constraints);
-
-        try {
-          const snap = await getDocs(q);
-          snap.docs.forEach((d) =>
-            allOrd.push({ id: d.id, ...d.data() })
-          );
-
-          batchNum++;
-          if (batchNum % 2 === 0) {
-            // Update UI every 2 batches
-            setAllOrders([...allOrd]);
-          }
-
-          if (snap.docs.length < 500) {
-            hasMore = false;
-          } else {
-            lastDoc = snap.docs[snap.docs.length - 1];
-          }
-        } catch (err) {
-          console.error(`[Orders Batch ${batchNum}]`, err);
-          hasMore = false;
-        }
-      }
-
-      return allOrd;
-    };
-
-    // Initial load
-    loadAllOrders().then((allOrd) => {
-      setAllOrders(allOrd);
-      ordersLoadedRef.current = true;
-      setLoading(false);
+      customerDocsRef.current = cursor
+        ? [...(customerDocsRef.current || []), ...rows]
+        : rows;
+      setRawCustomerDocs(customerDocsRef.current);
+      customersLoadedRef.current = true;
+      setSearchLastDoc(lastDoc);
+      setSearchHasMore(hasMore);
+      setDataSource('server');
       setLastSyncTime(new Date());
-
-      console.log(`[Orders] ${allOrd.length} total orders loaded`);
-
-      // Now listen for NEW orders (real-time)
-      const recentQuery = query(
-        collection(db, 'orders'),
-        orderBy('createdAt', 'desc'),
-        limit(50)
-      );
-
-      unsubOrdersRef.current = onSnapshot(
-        recentQuery,
-        { includeMetadataChanges: true },
-        (snapshot) => {
-          if (!snapshot.metadata.fromCache) {
-            const changes = snapshot.docChanges();
-            let hasNewData = false;
-
-            changes.forEach((change) => {
-              if (change.type === 'added' || change.type === 'modified') {
-                hasNewData = true;
-              }
-            });
-
-            if (hasNewData && ordersLoadedRef.current) {
-              // Merge new/updated orders
-              setAllOrders((prev) => {
-                const ordersMap = new Map(prev.map((o) => [o.id, o]));
-
-                snapshot.docs.forEach((d) => {
-                  ordersMap.set(d.id, { id: d.id, ...d.data() });
-                });
-
-                const updated = [...ordersMap.values()];
-                setLastSyncTime(new Date());
-                setDataSource('live');
-                return updated;
-              });
-            }
-          }
-        },
-        (error) => {
-          console.error('[Orders Listener Error]', error);
-        }
-      );
-    });
-  }, [buildCustomerList]);
-
-  // ═══════════════════════════════════════════════════════════
-  // REBUILD CUSTOMERS WHEN ORDERS CHANGE
-  // ═══════════════════════════════════════════════════════════
-  useEffect(() => {
-    if (!ordersLoadedRef.current || !customersLoadedRef.current) return;
-
-    // Get current customer docs from snapshot
-    const customerDocs = customers
-      .filter((c) => !c.isWalkin)
-      .map((c) => ({
-        id: c.id,
-        name: c.name,
-        phone: c.phone,
-        city: c.city,
-        market: c.market,
-        email: c.email,
-        isAutoNamed: c.isAutoNamed,
-        createdAt: c.createdAt,
-        phoneNormalized: c.phone,
-      }));
-
-    if (customerDocs.length > 0) {
-      const builtList = buildCustomerList(customerDocs, allOrders);
-      setCustomers(builtList);
+    } catch (err) {
+      console.error('[Customers] search error:', err);
+      toast.error('Failed to load customers');
+    } finally {
+      setSearchLoading(false);
+      setSyncing(false);
+      setLoading(false);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [allOrders]);
+  }, [branchScopeId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const orders = await loadOrdersForCustomerMetrics({
+        storeId: branchScopeId,
+      });
+      if (!cancelled) setOrderSnapshot(orders);
+    })();
+    return () => { cancelled = true; };
+  }, [branchScopeId, branchFilter]);
+
+  useEffect(() => {
+    if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+    searchTimerRef.current = setTimeout(() => {
+      customerDocsRef.current = [];
+      void runCustomerSearch(search, null);
+    }, 300);
+    return () => {
+      if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+    };
+  }, [search, branchScopeId, branchFilter, runCustomerSearch]);
 
   // ═══════════════════════════════════════════════════════════
-  // START SYNC ON MOUNT
+  // REBUILD CUSTOMERS WHEN DATA OR BRANCH CHANGES
   // ═══════════════════════════════════════════════════════════
   useEffect(() => {
-    startLiveSync();
+    if (!customersLoadedRef.current && rawCustomerDocs.length === 0) return;
+    const builtList = buildCustomerList(rawCustomerDocs, orderSnapshot, {
+      branchAliases,
+      storesMap,
+      branchFilter,
+    });
+    setCustomers(builtList);
+    if (customersLoadedRef.current) {
+      setLoading(false);
+    }
+  }, [rawCustomerDocs, orderSnapshot, branchAliases, storesMap, branchFilter, buildCustomerList]);
 
-    return () => {
-      if (unsubCustomersRef.current) unsubCustomersRef.current();
-      if (unsubOrdersRef.current) unsubOrdersRef.current();
-    };
-  }, [startLiveSync]);
+  useEffect(() => {
+    if (backfillRanRef.current || !customers.length || !navigator.onLine) return;
+    if (!orderSnapshot.length && !rawCustomerDocs.length) return;
+    backfillRanRef.current = true;
+    backfillCustomerPersonaBatch(customers).catch((err) => {
+      console.warn('[Customers] persona backfill:', err?.message);
+      backfillRanRef.current = false;
+    });
+  }, [customers, orderSnapshot.length, rawCustomerDocs.length]);
 
   // ═══════════════════════════════════════════════════════════
   // FORCE REFRESH
   // ═══════════════════════════════════════════════════════════
   const forceRefresh = useCallback(async () => {
-    setSyncing(true);
-    ordersLoadedRef.current = false;
-    customersLoadedRef.current = false;
-
-    // Cleanup old listeners
-    if (unsubCustomersRef.current) unsubCustomersRef.current();
-    if (unsubOrdersRef.current) unsubOrdersRef.current();
-
-    setLoading(true);
-
-    // Restart
-    startLiveSync();
-    toast.success('Refreshing all data...');
-  }, [startLiveSync]);
+    customerDocsRef.current = [];
+    toast.success('Refreshing customers...');
+    const orders = await loadOrdersForCustomerMetrics({ storeId: branchScopeId });
+    setOrderSnapshot(orders);
+    await runCustomerSearch(search, null);
+  }, [runCustomerSearch, search, branchScopeId]);
 
   // ═══════════════════════════════════════════════════════════
   // UNIQUE CITIES
@@ -507,63 +636,51 @@ const CustomersControl = () => {
   // ═══════════════════════════════════════════════════════════
   // FILTER + SORT + PAGINATE
   // ═══════════════════════════════════════════════════════════
+  const filterCounts = useMemo(
+    () => countCustomerFilters(customers, {}, { getCustomerType }),
+    [customers],
+  );
+
   const filtered = useMemo(() => {
-    let list = [...customers];
+    const list = applyCustomerFilters(customers, {
+      typeFilter,
+      visitFilter,
+      personaFilter,
+      cityFilter,
+      search,
+      getCustomerType,
+      normalizePhone,
+    });
 
-    if (search.trim().length >= 1) {
-      const s = search.toLowerCase().trim();
-      const ph = search.replace(/\D/g, '');
-      list = list.filter(
-        (c) =>
-          c.name?.toLowerCase().includes(s) ||
-          (ph.length >= 3 && normalizePhone(c.phone).includes(ph)) ||
-          c.city?.toLowerCase().includes(s) ||
-          c.market?.toLowerCase().includes(s) ||
-          c.email?.toLowerCase().includes(s)
-      );
-    }
-
-    if (cityFilter) {
-      list = list.filter(
-        (c) =>
-          c.isWalkin || c.city?.toLowerCase() === cityFilter.toLowerCase()
-      );
-    }
-
-    // Walk-in always first
     const walkin = list.filter((c) => c.isWalkin);
     let rest = list.filter((c) => !c.isWalkin);
 
     rest.sort((a, b) => {
       let av = a[sortKey] ?? '';
       let bv = b[sortKey] ?? '';
-
-      // Handle dates
       if (sortKey === 'lastOrderDate') {
         av = getTimestamp(av);
         bv = getTimestamp(bv);
       }
-
       if (typeof av === 'string') av = av.toLowerCase();
       if (typeof bv === 'string') bv = bv.toLowerCase();
-
       if (av < bv) return sortDir === 'asc' ? -1 : 1;
       if (av > bv) return sortDir === 'asc' ? 1 : -1;
       return 0;
     });
 
     return [...walkin, ...rest];
-  }, [customers, search, cityFilter, sortKey, sortDir]);
+  }, [customers, search, cityFilter, typeFilter, visitFilter, personaFilter, sortKey, sortDir]);
 
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
   const paginated = useMemo(
-    () => filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE),
-    [filtered, page]
+    () => filtered.slice((page - 1) * pageSize, page * pageSize),
+    [filtered, page, pageSize]
   );
 
   useEffect(() => {
     setPage(1);
-  }, [search, cityFilter, sortKey, sortDir]);
+  }, [search, cityFilter, branchFilter, typeFilter, visitFilter, personaFilter, sortKey, sortDir]);
 
   const handleSort = (key) => {
     if (sortKey === key) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
@@ -577,98 +694,60 @@ const CustomersControl = () => {
   // VIEW CUSTOMER ORDERS — MULTI-STRATEGY MATCHING
   // ═══════════════════════════════════════════════════════════
   const viewCustomerOrders = useCallback(
-    (customer) => {
+    async (customer) => {
       setViewingCustomer(customer);
       setViewLoading(true);
 
-      // Filter from already-loaded orders (no extra Firebase calls!)
-      const phone = normalizePhone(customer.phone);
-      let matched = [];
-
       if (customer.isWalkin) {
-        matched = allOrders.filter((order) => {
-          if (order.isDeleted || order.deleted) return false;
-          const info = getOrderCustomerInfo(order);
-          return isWalkinOrder(info);
-        });
-      } else {
-        const matchedMap = new Map();
-
-        allOrders.forEach((order) => {
-          if (order.isDeleted || order.deleted) return;
-          const info = getOrderCustomerInfo(order);
-
-          // Match by ID
-          if (info.id && info.id === customer.id) {
-            matchedMap.set(order.id, order);
-            return;
-          }
-
-          // Match by phone
-          if (
-            phone &&
-            phone.length >= 7 &&
-            info.phone &&
-            (info.phone === phone ||
-              info.phone.includes(phone) ||
-              phone.includes(info.phone))
-          ) {
-            matchedMap.set(order.id, order);
-            return;
-          }
-
-          // Match by name (last resort, exact only)
-          if (
-            customer.name &&
-            info.name &&
-            info.name === customer.name.toLowerCase().trim() &&
-            !isWalkinOrder(info)
-          ) {
-            matchedMap.set(order.id, order);
-          }
-        });
-
-        matched = [...matchedMap.values()];
+        setViewOrders([]);
+        setViewLoading(false);
+        return;
       }
 
-      // Sort by date desc
-      matched.sort(
-        (a, b) =>
-          getTimestamp(b.createdAt || b.savedAt) -
-          getTimestamp(a.createdAt || a.savedAt)
-      );
-
-      setViewOrders(matched.slice(0, 200));
-      setViewLoading(false);
-
-      if (matched.length === 0) {
-        toast(`No orders found for ${customer.name}`, { icon: 'ℹ️' });
+      try {
+        const orders = await loadCustomerOrders({
+          customerId: customer.id,
+          storeId: customer.storeId || branchScopeId,
+          branchId: branchScopeId,
+        });
+        setViewOrders(orders);
+      } catch (err) {
+        console.error('[Customers] view orders:', err);
+        setViewOrders([]);
+      } finally {
+        setViewLoading(false);
       }
     },
-    [allOrders]
+    [branchScopeId],
   );
 
   // ═══════════════════════════════════════════════════════════
   // DELETE CUSTOMER
   // ═══════════════════════════════════════════════════════════
-  const handleDelete = useCallback(async (id, isWalkin) => {
+  const handleDelete = useCallback(async (id, isWalkin, fromOrdersOnly) => {
     if (isWalkin) {
       toast.error('Cannot delete master walk-in.');
       return;
     }
-    if (!window.confirm('⚠️ Permanently delete this customer?')) return;
+    if (fromOrdersOnly) {
+      toast.error('This profile is from orders only — save as a customer first to delete.');
+      return;
+    }
+    if (!window.confirm('⚠️ Customer archive ho jayega — Backup → Archive se restore ho sakta hai. Continue?')) return;
 
     setDeletingId(id);
     try {
-      await deleteDoc(doc(db, 'customers', id));
-      // Live listener will auto-remove from state
-      toast.success('Customer deleted');
+      await deleteCustomerById(id, {
+        deletedBy: { uid: user?.uid, email: user?.email },
+        reason: 'deleted_from_customers_admin',
+      });
+      toast.success('Customer archive ho gaya ✓');
     } catch (e) {
       toast.error('Delete failed: ' + e.message);
     } finally {
       setDeletingId(null);
     }
-  }, []);
+  }, [user]);
 
   // ═══════════════════════════════════════════════════════════
   // EDIT CUSTOMER
@@ -693,7 +772,7 @@ const CustomersControl = () => {
         city: editForm.city.trim(),
       };
 
-      await updateDoc(doc(db, 'customers', editingCustomer.id), updates);
+      await updateCustomerFields(editingCustomer.id, updates);
       // Live listener will auto-update state
       toast.success('Customer updated');
       setEditingCustomer(null);
@@ -715,7 +794,7 @@ const CustomersControl = () => {
 
     const rows = filtered.map((c) =>
       [
-        c.isWalkin ? 'Walk-in' : 'Registered',
+        getCustomerType(c),
         c.isWalkin ? 'N/A' : c.id,
         c.name,
         c.phone || '-',
@@ -749,14 +828,44 @@ const CustomersControl = () => {
   const stats = useMemo(() => {
     const walkin = customers.find((c) => c.isWalkin);
     const registered = customers.filter((c) => !c.isWalkin);
+    const auto = registered.filter((c) => getCustomerType(c) === 'auto');
     return {
       total: customers.length,
       withPhone: registered.filter((c) => c.phone).length,
+      autoCount: auto.length,
       walkinSales: walkin?.totalSpent || 0,
       registeredSales: registered.reduce((s, c) => s + c.totalSpent, 0),
-      totalOrders: allOrders.length,
+      totalOrders: customers.reduce((s, c) => s + (c.purchaseCount || 0), 0),
     };
-  }, [customers, allOrders]);
+  }, [customers]);
+
+  const CustomerTypeBadge = ({ customer }) => {
+    const type = getCustomerType(customer);
+    const badge = TYPE_BADGE[type] || TYPE_BADGE.registered;
+    return (
+      <Badge className={cn('text-[10px] py-0 px-1.5 border-0 shrink-0', badge.cls)}>
+        {customer.isWalkin ? 'WALK-IN' : badge.label}
+      </Badge>
+    );
+  };
+
+  const PersonaBadges = ({ customer }) => {
+    if (customer.isWalkin) return null;
+    const tags = [];
+    if (customer.vipStatus) tags.push(PERSONA_BADGE.vip);
+    if (customer.isRepeatCustomer) tags.push(PERSONA_BADGE.repeat);
+    if (customer.hasCredit || customer.pendingAmount > 0) tags.push(PERSONA_BADGE.credit);
+    if (customer.inactiveStatus) tags.push(PERSONA_BADGE.inactive);
+    if (customer.recoveryRiskStatus) tags.push(PERSONA_BADGE.recovery);
+    if (!tags.length) return null;
+    return (
+      <span className="flex flex-wrap gap-1">
+        {tags.map((b) => (
+          <Badge key={b.label} className={cn('text-[9px] py-0 px-1 border-0', b.cls)}>{b.label}</Badge>
+        ))}
+      </span>
+    );
+  };
 
   // ── Sort icon ──────────────────────────────────────────────
   const SortIcon = ({ k }) =>
@@ -827,7 +936,7 @@ const CustomersControl = () => {
   // RENDER
   // ═══════════════════════════════════════════════════════════
   return (
-    <div className="p-4 sm:p-6 max-w-[1600px] mx-auto">
+    <div dir={isRTL ? 'rtl' : 'ltr'} className="p-4 sm:p-6 max-w-[1600px] mx-auto">
       {/* ── EDIT MODAL ─────────────────────────────────── */}
       {editingCustomer && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
@@ -995,6 +1104,18 @@ const CustomersControl = () => {
                 <X className="w-5 h-5" />
               </button>
             </div>
+
+            {/* Persona Foundation */}
+            {!viewingCustomer.isWalkin && (
+              <div className={cn('p-4 border-b shrink-0 overflow-y-auto max-h-[40vh]', isDark ? 'border-[#2a1f0d]' : 'border-amber-100')}>
+                <CustomerPersonaDetailPanel
+                  customer={viewingCustomer}
+                  isDark={isDark}
+                  fmt={fmt}
+                  fmtDate={fmtDate}
+                />
+              </div>
+            )}
 
             {/* Summary Stats */}
             {viewOrders.length > 0 && (
@@ -1258,8 +1379,8 @@ const CustomersControl = () => {
       {/* ── PAGE HEADER ────────────────────────────────── */}
       <PageHeader
         icon={UserCheck}
-        title="Customer Database"
-        description={`${customers.length} customers • ${stats.totalOrders.toLocaleString()} orders processed`}
+        title={t('admin.customersPage.title', 'Customer Database')}
+        description={t('admin.customersPage.subtitle', 'Manage customer records across all branches')}
         actions={
           <div className="flex items-center gap-2 flex-wrap">
             <SyncStatusBar />
@@ -1275,7 +1396,7 @@ const CustomersControl = () => {
               onClick={forceRefresh}
               disabled={syncing || loading}
             >
-              {syncing ? 'Syncing...' : 'Refresh'}
+              {syncing ? t('network.syncing', 'Syncing...') : t('common.refresh', 'Refresh')}
             </Button>
             <Button
               variant="primary"
@@ -1283,19 +1404,25 @@ const CustomersControl = () => {
               onClick={handleExport}
               disabled={filtered.length === 0}
             >
-              Export CSV
+              {t('admin.customersPage.exportCsv', 'Export CSV')}
             </Button>
           </div>
         }
       />
 
       {/* ── STAT CARDS ─────────────────────────────────── */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 mb-6">
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 sm:gap-4 mb-6">
         <StatCard
           label="Total Profiles"
           value={stats.total}
           icon={Users}
           color="amber"
+        />
+        <StatCard
+          label="Phone-only"
+          value={stats.autoCount}
+          icon={UserCheck}
+          color="purple"
         />
         <StatCard
           label="With Phone"
@@ -1310,98 +1437,67 @@ const CustomersControl = () => {
           color="blue"
         />
         <StatCard
-          label="Registered Sales"
+          label="All Other Sales"
           value={fmt(stats.registeredSales)}
           icon={Wallet}
           color="purple"
         />
       </div>
 
-      {/* ── FILTERS ────────────────────────────────────── */}
-      <div
-        className={cn(
-          'rounded-2xl border mb-4 p-4',
-          isDark
-            ? 'bg-[#0f0a05] border-[#2a1f0d]'
-            : 'bg-white border-amber-200'
+      {/* ── FILTERS — glass dropdowns ─────────────────── */}
+      <CustomerGlassFilterPanel
+        search={search}
+        onSearchChange={(v) => startTransition(() => setSearch(v))}
+        searchLoading={searchLoading}
+        branchFilter={branchFilter}
+        branches={branches.map((b) => ({ id: b.id, label: getStoreDisplayName(b) || b.id }))}
+        onBranchChange={(v) => startTransition(() => setBranchFilter(v))}
+        cityFilter={cityFilter}
+        cities={cities}
+        onCityChange={(v) => startTransition(() => setCityFilter(v))}
+        showCity={cities.length > 0}
+        typeFilter={typeFilter}
+        onTypeFilterChange={(v) => startTransition(() => setTypeFilter(v))}
+        visitFilter={visitFilter}
+        onVisitFilterChange={(v) => startTransition(() => setVisitFilter(v))}
+        personaFilter={personaFilter}
+        onPersonaFilterChange={(v) => startTransition(() => setPersonaFilter(v))}
+        sortValue={`${sortKey}:${sortDir}`}
+        onSortChange={(v) => {
+          const [k, d] = v.split(':');
+          startTransition(() => {
+            setSortKey(k);
+            setSortDir(d);
+          });
+        }}
+        sortOptions={SORT_OPTIONS}
+        counts={filterCounts}
+        hasActiveFilters={Boolean(
+          search || cityFilter || branchFilter !== 'all' || typeFilter !== 'all'
+          || visitFilter !== 'all' || personaFilter !== 'all',
         )}
-      >
-        <div className="flex flex-col sm:flex-row gap-3">
-          <Input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search name, phone, city, email..."
-            leftIcon={<Search className="w-4 h-4" />}
-            className="flex-1"
-          />
-
-          <select
-            value={cityFilter}
-            onChange={(e) => setCityFilter(e.target.value)}
-            className={cn(
-              'rounded-xl border px-3 py-2 text-sm min-w-[140px]',
-              isDark
-                ? 'bg-[#1a1208] border-[#2a1f0d] text-white'
-                : 'bg-white border-amber-200 text-gray-800'
-            )}
-          >
-            <option value="">All Cities</option>
-            {cities.map((c) => (
-              <option key={c} value={c}>
-                {c}
-              </option>
-            ))}
-          </select>
-
-          <select
-            value={`${sortKey}:${sortDir}`}
-            onChange={(e) => {
-              const [k, d] = e.target.value.split(':');
-              setSortKey(k);
-              setSortDir(d);
-            }}
-            className={cn(
-              'rounded-xl border px-3 py-2 text-sm min-w-[160px]',
-              isDark
-                ? 'bg-[#1a1208] border-[#2a1f0d] text-white'
-                : 'bg-white border-amber-200 text-gray-800'
-            )}
-          >
-            {SORT_OPTIONS.map((o, i) => (
-              <option key={i} value={`${o.key}:${o.dir}`}>
-                Sort: {o.label}
-              </option>
-            ))}
-          </select>
-
-          {(search || cityFilter) && (
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => {
-                setSearch('');
-                setCityFilter('');
-              }}
-            >
-              <X className="w-4 h-4 mr-1" /> Clear
-            </Button>
-          )}
-        </div>
-
-        <p
-          className={cn(
-            'text-xs mt-2',
-            isDark ? 'text-gray-500' : 'text-gray-400'
-          )}
-        >
-          Showing {paginated.length} of {filtered.length} customers
-          {search ? ` matching "${search}"` : ''}
-          {!isOnline && ' (offline mode)'}
-        </p>
-      </div>
+        onClear={() => {
+          startTransition(() => {
+            setSearch('');
+            setCityFilter('');
+            setBranchFilter('all');
+            setTypeFilter('all');
+            setVisitFilter('all');
+            setPersonaFilter('all');
+            setSortKey('totalSpent');
+            setSortDir('desc');
+          });
+        }}
+        filteredCount={filtered.length}
+        paginatedCount={paginated.length}
+        searchHasMore={searchHasMore}
+        onLoadMore={() => runCustomerSearch(search, searchLastDoc)}
+        isOnline={isOnline}
+        className="mb-4"
+      />
 
       {/* ── TABLE ──────────────────────────────────────── */}
-      {loading ? (
+      {loading || searchLoading ? (
         <div className="flex flex-col items-center justify-center py-16">
           <Loader2 className="w-10 h-10 animate-spin text-amber-500 mb-4" />
           <p
@@ -1410,12 +1506,7 @@ const CustomersControl = () => {
               isDark ? 'text-gray-400' : 'text-gray-500'
             )}
           >
-            Loading customer data & orders...
-          </p>
-          <p className="text-xs text-gray-500 mt-1">
-            {allOrders.length > 0
-              ? `${allOrders.length.toLocaleString()} orders loaded so far...`
-              : 'Connecting to Firebase...'}
+            {searchLoading ? 'Searching customers...' : 'Loading customer data...'}
           </p>
         </div>
       ) : filtered.length === 0 ? (
@@ -1423,86 +1514,61 @@ const CustomersControl = () => {
           icon={UserCheck}
           title="No customers found"
           description={
-            search || cityFilter
-              ? 'Try adjusting your search or filters'
-              : 'No customer data available'
+            search.trim().length > 0 && search.trim().length < 3
+              ? 'No match in loaded list — type 3+ characters for full search'
+              : search || cityFilter
+                ? 'Try adjusting your search or filters'
+                : 'Customers will appear here when online'
           }
         />
       ) : (
         <>
           {/* Desktop Table */}
-          <div
-            className={cn(
-              'rounded-2xl border overflow-hidden hidden md:block',
-              isDark
-                ? 'bg-[#0f0a05] border-[#2a1f0d]'
-                : 'bg-white border-amber-200'
-            )}
-          >
-            <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
+          <div className={cn(customersTableShell(isDark), 'hidden md:block')}>
+            <div className="overflow-x-auto max-h-[65vh] overflow-y-auto">
               <table className="w-full text-sm">
-                <thead
-                  className={cn(
-                    'sticky top-0 z-10',
-                    isDark ? 'bg-[#1a1208]' : 'bg-amber-50'
-                  )}
-                >
-                  <tr
-                    className={cn(
-                      isDark ? 'text-gray-400' : 'text-gray-600'
-                    )}
-                  >
-                    <th className="text-start px-4 py-3 w-12" />
-                    <th className="text-start px-4 py-3 font-semibold">
-                      <button
-                        onClick={() => handleSort('name')}
-                        className="hover:text-amber-500 transition-colors"
-                      >
+                <thead className={cn('sticky top-0 z-10 backdrop-blur-xl', customersTableHead(isDark))}>
+                  <tr>
+                    <th className={cn(customersTh(isDark), 'w-12')} />
+                    <th className={customersTh(isDark)}>
+                      <button type="button" onClick={() => handleSort('name')} className="hover:text-amber-400 transition-colors inline-flex items-center">
                         Customer <SortIcon k="name" />
                       </button>
                     </th>
-                    <th className="text-start px-4 py-3 font-semibold">
-                      Contact
-                    </th>
+                    <th className={cn(customersTh(isDark), 'hidden lg:table-cell')}>Type</th>
+                    <th className={cn(customersTh(isDark), 'hidden md:table-cell')}>Branch</th>
+                    <th className={customersTh(isDark)}>Contact</th>
+                    <th className={cn(customersTh(isDark), 'text-center')}>Visits</th>
+                    <th className={cn(customersTh(isDark), 'text-end hidden lg:table-cell')}>First Visit</th>
                     <th
-                      className="text-end px-4 py-3 font-semibold cursor-pointer hover:text-amber-500 transition-colors"
+                      className={cn(customersTh(isDark), 'text-end cursor-pointer hover:text-amber-400')}
                       onClick={() => handleSort('purchaseCount')}
                     >
                       Orders <SortIcon k="purchaseCount" />
                     </th>
                     <th
-                      className="text-end px-4 py-3 font-semibold cursor-pointer hover:text-amber-500 transition-colors"
+                      className={cn(customersTh(isDark), 'text-end cursor-pointer hover:text-amber-400')}
                       onClick={() => handleSort('totalSpent')}
                     >
-                      Total Spent <SortIcon k="totalSpent" />
+                      Spent <SortIcon k="totalSpent" />
                     </th>
                     <th
-                      className="text-end px-4 py-3 font-semibold cursor-pointer hover:text-amber-500 transition-colors"
+                      className={cn(customersTh(isDark), 'text-end cursor-pointer hover:text-amber-400')}
                       onClick={() => handleSort('lastOrderDate')}
                     >
-                      Last Order <SortIcon k="lastOrderDate" />
+                      Last Visit <SortIcon k="lastOrderDate" />
                     </th>
-                    <th className="text-end px-4 py-3 font-semibold">
-                      Actions
-                    </th>
+                    <th className={cn(customersTh(isDark), 'text-end')}>Actions</th>
                   </tr>
                 </thead>
                 <tbody>
                   {paginated.map((c) => (
                     <tr
                       key={c.id}
-                      className={cn(
-                        'border-t transition-colors',
-                        isDark
-                          ? 'border-[#2a1f0d] hover:bg-[#1a1208]/50'
-                          : 'border-amber-100 hover:bg-amber-50/50',
-                        c.isWalkin &&
-                          (isDark ? 'bg-[#1a1208]' : 'bg-blue-50/30'),
-                        deletingId === c.id && 'opacity-50'
-                      )}
+                      className={customersTableRow(isDark, { walkin: c.isWalkin, active: deletingId === c.id })}
                     >
                       {/* Avatar */}
-                      <td className="px-4 py-3">
+                      <td className={customersTd(isDark)}>
                         <div
                           className={cn(
                             'w-10 h-10 rounded-full font-bold flex items-center',
@@ -1519,36 +1585,45 @@ const CustomersControl = () => {
                       </td>
 
                       {/* Name */}
-                      <td className="px-4 py-3">
-                        <div className="flex flex-col">
+                      <td className={customersTd(isDark)}>
+                        <div className="flex flex-col gap-1">
                           <span
                             className={cn(
-                              'font-bold text-base flex items-center gap-2',
+                              'font-bold text-base flex items-center gap-2 flex-wrap',
                               isDark ? 'text-white' : 'text-gray-900'
                             )}
                           >
-                            {c.name}
-                            {c.isWalkin && (
-                              <Badge className="text-[10px] py-0 px-1.5 bg-blue-500/20 text-blue-500 border-0">
-                                MASTER
-                              </Badge>
-                            )}
-                            {c.isAutoNamed && !c.isWalkin && (
-                              <Badge className="text-[10px] py-0 px-1.5 bg-gray-500/20 text-gray-400 border-0">
-                                AUTO
-                              </Badge>
-                            )}
+                            {getCustomerDisplayName(c)}
+                            <CustomerTypeBadge customer={c} />
+                            <PersonaBadges customer={c} />
                           </span>
-                          <span className="text-xs text-gray-500 mt-0.5">
+                          <span className="text-xs text-gray-500">
                             {c.isWalkin
-                              ? 'Aggregated'
-                              : `...${c.id.slice(-8)}`}
+                              ? 'All walk-in bills combined'
+                              : isAutoNumberName(c.name)
+                                ? `${c.name} · no name entered at bill`
+                                : c.fromOrdersOnly
+                                  ? 'From order history'
+                                  : `ID …${String(c.id).slice(-8)}`}
                           </span>
                         </div>
                       </td>
 
+                      {/* Type */}
+                      <td className={cn(customersTd(isDark), 'hidden lg:table-cell')}>
+                        <CustomerTypeBadge customer={c} />
+                      </td>
+
+                      {/* Branch */}
+                      <td className={cn(customersTd(isDark), 'hidden md:table-cell')}>
+                        <span className="text-xs text-gray-500 flex items-center gap-1 max-w-[8rem] truncate" title={c.branchName || c.storeId || ''}>
+                          <MapPin className="w-3 h-3 shrink-0 text-stone-500" />
+                          {c.isWalkin ? (c.branchName || 'All') : (c.branchName || c.storeId || '—')}
+                        </span>
+                      </td>
+
                       {/* Contact */}
-                      <td className="px-4 py-3">
+                      <td className={customersTd(isDark)}>
                         <div className="space-y-1 text-sm">
                           <div
                             className={cn(
@@ -1571,72 +1646,73 @@ const CustomersControl = () => {
                         </div>
                       </td>
 
-                      {/* Orders */}
-                      <td
-                        className={cn(
-                          'px-4 py-3 text-end font-semibold text-base',
-                          isDark ? 'text-gray-200' : 'text-gray-800'
+                      {/* Visits */}
+                      <td className={cn(customersTd(isDark), 'text-center')}>
+                        <span className={cn(
+                          'inline-flex min-w-[2rem] justify-center px-2 py-0.5 rounded-lg text-xs font-bold',
+                          isDark ? 'bg-white/5 text-amber-300' : 'bg-amber-50 text-amber-700',
                         )}
-                      >
-                        {c.purchaseCount.toLocaleString()}
+                        >
+                          {c.visitCount ?? c.purchaseCount ?? 0}
+                        </span>
+                      </td>
+
+                      {/* First visit */}
+                      <td className={cn(customersTd(isDark), 'text-end text-sm hidden lg:table-cell', isDark ? 'text-gray-400' : 'text-gray-500')}>
+                        {fmtDate(c.firstVisit || c.createdAt)}
+                      </td>
+
+                      {/* Orders */}
+                      <td className={cn(customersTd(isDark), 'text-end font-semibold')}>
+                        {(c.purchaseCount || 0).toLocaleString()}
                       </td>
 
                       {/* Spent */}
-                      <td
-                        className={cn(
-                          'px-4 py-3 text-end font-bold text-base',
-                          isDark ? 'text-emerald-400' : 'text-emerald-600'
-                        )}
-                      >
+                      <td className={cn(customersTd(isDark), 'text-end font-bold', isDark ? 'text-emerald-400' : 'text-emerald-600')}>
                         {fmt(c.totalSpent)}
                       </td>
 
-                      {/* Last order */}
-                      <td
-                        className={cn(
-                          'px-4 py-3 text-end text-sm',
-                          isDark ? 'text-gray-400' : 'text-gray-500'
-                        )}
-                      >
-                        {fmtDate(c.lastOrderDate)}
+                      {/* Last visit */}
+                      <td className={cn(customersTd(isDark), 'text-end text-sm', isDark ? 'text-gray-400' : 'text-gray-500')}>
+                        {fmtDate(c.lastVisit || c.lastOrderDate)}
                       </td>
 
                       {/* Actions */}
-                      <td className="px-4 py-3 text-end">
+                      <td className={cn(customersTd(isDark), 'text-end')}>
                         <div className="inline-flex gap-1 justify-end">
-                          <Button
-                            variant="ghost"
-                            size="sm"
+                          <button
+                            type="button"
                             onClick={() => viewCustomerOrders(c)}
                             title="View Orders"
+                            className={glassActionBtn('view')}
                           >
-                            <Eye className="w-4 h-4 text-sky-500" />
-                          </Button>
-                          {!c.isWalkin && (
+                            <Eye className={cn('w-3.5 h-3.5', glassIcon())} />
+                          </button>
+                          {!c.isWalkin && !c.fromOrdersOnly && (
                             <>
-                              <Button
-                                variant="ghost"
-                                size="sm"
+                              <button
+                                type="button"
                                 onClick={() => openEdit(c)}
                                 title="Edit"
+                                className={glassActionBtn('edit')}
                               >
-                                <Edit className="w-4 h-4 text-amber-500" />
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="sm"
+                                <Edit className={cn('w-3.5 h-3.5', glassIcon())} />
+                              </button>
+                              <button
+                                type="button"
                                 onClick={() =>
-                                  handleDelete(c.id, c.isWalkin)
+                                  handleDelete(c.id, c.isWalkin, c.fromOrdersOnly)
                                 }
                                 disabled={deletingId === c.id}
                                 title="Delete"
+                                className={glassActionBtn('delete')}
                               >
                                 {deletingId === c.id ? (
-                                  <Loader2 className="w-4 h-4 animate-spin text-rose-400" />
+                                  <Loader2 className="w-3.5 h-3.5 animate-spin text-rose-400" />
                                 ) : (
-                                  <Trash2 className="w-4 h-4 text-rose-500" />
+                                  <Trash2 className={cn('w-3.5 h-3.5', glassIcon())} />
                                 )}
-                              </Button>
+                              </button>
                             </>
                           )}
                         </div>
@@ -1647,19 +1723,24 @@ const CustomersControl = () => {
               </table>
             </div>
 
-            {/* Table Footer */}
-            <div
-              className={cn(
-                'p-3 text-center text-xs border-t',
-                isDark
-                  ? 'text-gray-500 border-[#2a1f0d]'
-                  : 'text-gray-400 border-amber-100'
-              )}
-            >
-              {filtered.length} customers •{' '}
-              {stats.totalOrders.toLocaleString()} orders loaded
-              {!isOnline && ' • Offline mode'}
-            </div>
+            <PaginationBar
+              page={page}
+              totalPages={totalPages}
+              totalItems={filtered.length}
+              pageSize={pageSize}
+              onPageChange={setPage}
+              pageSizeOptions={[20, 50, 100]}
+              onPageSizeChange={(n) => {
+                setPageSize(n);
+                setPage(1);
+              }}
+              variant="glass"
+            />
+            {!isOnline && (
+              <p className="text-center text-[10px] text-stone-600 py-1 border-t border-white/[0.04]">
+                Offline mode — showing cached data
+              </p>
+            )}
           </div>
 
           {/* ── MOBILE CARDS ─────────────────────────────── */}
@@ -1691,29 +1772,37 @@ const CustomersControl = () => {
                     {c.isWalkin ? 'W' : (c.name || '?')[0].toUpperCase()}
                   </div>
                   <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
                       <p
                         className={cn(
                           'font-bold truncate',
                           isDark ? 'text-white' : 'text-gray-900'
                         )}
                       >
-                        {c.name}
+                        {getCustomerDisplayName(c)}
                       </p>
-                      {c.isWalkin && (
-                        <Badge className="text-[9px] py-0 px-1 bg-blue-500/20 text-blue-500 border-0 shrink-0">
-                          MASTER
-                        </Badge>
-                      )}
+                      <CustomerTypeBadge customer={c} />
                     </div>
                     <p className="text-xs text-gray-500 truncate">
-                      {c.phone || 'No phone'} • {c.city || 'No city'}
+                      {[c.branchName, c.phone || 'No phone', c.city || 'No city'].filter(Boolean).join(' · ')}
+                      {c.fromOrdersOnly ? ' · from orders' : ''}
                     </p>
                   </div>
                 </div>
 
                 {/* Stats grid */}
-                <div className="grid grid-cols-3 gap-2 mb-3">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-3">
+                  <div
+                    className={cn(
+                      'rounded-lg p-2 text-center',
+                      isDark ? 'bg-[#0f0a05]' : 'bg-amber-50'
+                    )}
+                  >
+                    <p className="text-[9px] text-gray-500 uppercase">Visits</p>
+                    <p className={cn('text-sm font-bold', isDark ? 'text-amber-300' : 'text-amber-700')}>
+                      {c.visitCount ?? c.purchaseCount ?? 0}
+                    </p>
+                  </div>
                   <div
                     className={cn(
                       'rounded-lg p-2 text-center',
@@ -1765,7 +1854,7 @@ const CustomersControl = () => {
                         isDark ? 'text-gray-300' : 'text-gray-700'
                       )}
                     >
-                      {fmtDate(c.lastOrderDate)}
+                      {fmtDate(c.lastVisit || c.lastOrderDate)}
                     </p>
                   </div>
                 </div>
@@ -1783,7 +1872,7 @@ const CustomersControl = () => {
                   >
                     <Eye className="w-3.5 h-3.5" /> Orders
                   </button>
-                  {!c.isWalkin && (
+                  {!c.isWalkin && !c.fromOrdersOnly && (
                     <>
                       <button
                         onClick={() => openEdit(c)}
@@ -1797,7 +1886,7 @@ const CustomersControl = () => {
                         <Edit className="w-3.5 h-3.5" /> Edit
                       </button>
                       <button
-                        onClick={() => handleDelete(c.id, c.isWalkin)}
+                        onClick={() => handleDelete(c.id, c.isWalkin, c.fromOrdersOnly)}
                         disabled={deletingId === c.id}
                         className={cn(
                           'px-3 flex items-center justify-center py-2 rounded-lg text-xs font-medium',
@@ -1819,70 +1908,18 @@ const CustomersControl = () => {
             ))}
           </div>
 
-          {/* ── PAGINATION ───────────────────────────────── */}
+          {/* Mobile pagination */}
           {totalPages > 1 && (
-            <div className="flex items-center justify-center gap-2 mt-6">
-              <Button
-                variant="ghost"
-                size="sm"
-                disabled={page === 1}
-                onClick={() => setPage((p) => Math.max(1, p - 1))}
-              >
-                <ChevronLeft className="w-4 h-4" />
-              </Button>
-
-              {Array.from(
-                { length: Math.min(7, totalPages) },
-                (_, i) => {
-                  let p;
-                  if (totalPages <= 7) {
-                    p = i + 1;
-                  } else if (page <= 4) {
-                    p = i + 1;
-                  } else if (page >= totalPages - 3) {
-                    p = totalPages - 6 + i;
-                  } else {
-                    p = page - 3 + i;
-                  }
-                  return (
-                    <button
-                      key={p}
-                      onClick={() => setPage(p)}
-                      className={cn(
-                        'w-8 h-8 rounded-lg text-sm font-medium transition-colors',
-                        page === p
-                          ? 'bg-amber-500 text-white'
-                          : isDark
-                          ? 'text-gray-400 hover:bg-white/10'
-                          : 'text-gray-600 hover:bg-amber-50'
-                      )}
-                    >
-                      {p}
-                    </button>
-                  );
-                }
-              )}
-
-              <Button
-                variant="ghost"
-                size="sm"
-                disabled={page === totalPages}
-                onClick={() =>
-                  setPage((p) => Math.min(totalPages, p + 1))
-                }
-              >
-                <ChevronRight className="w-4 h-4" />
-              </Button>
-
-              <span
-                className={cn(
-                  'text-xs ml-2',
-                  isDark ? 'text-gray-500' : 'text-gray-400'
-                )}
-              >
-                Page {page} of {totalPages}
-              </span>
-            </div>
+            <PaginationBar
+              page={page}
+              totalPages={totalPages}
+              totalItems={filtered.length}
+              pageSize={pageSize}
+              onPageChange={setPage}
+              compact
+              variant="glass"
+              className="md:hidden rounded-2xl border border-white/[0.08] mt-3"
+            />
           )}
         </>
       )}

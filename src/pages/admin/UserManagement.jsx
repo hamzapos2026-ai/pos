@@ -17,14 +17,13 @@ import {
   useEffect, useRef,
 } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import toast from 'react-hot-toast';
-import {
-  sendPasswordResetEmail,
-} from 'firebase/auth';
+import { toast } from 'react-hot-toast';
 import {
   doc, updateDoc, serverTimestamp,
 } from '../../services/firebase';
 import { db, auth } from '../../services/firebase';
+import { sendPasswordResetEmailSecondary } from '../../services/secondaryFirebase';
+import { validateUserEmail } from '../../utils/validators';
 import {
   Users, UserPlus, Search, Filter, RotateCcw,
   Edit3, KeyRound, Ban, Trash2, ChevronLeft,
@@ -33,29 +32,32 @@ import {
   XCircle, AlertTriangle, X, Loader2, ArrowUpDown,
   ArrowUp, ArrowDown, Clock, Building2, Mail,
   Shield, UserCheck, UserX, RefreshCw, WifiOff,
-  CheckCircle, AlertCircle, Database, Wifi,
+  CheckCircle, AlertCircle, Database, Wifi, Wrench,
 } from 'lucide-react';
-import { clsx } from 'clsx';
-import { twMerge } from 'tailwind-merge';
+import { cn } from '../../utils/cn';
 
 import UserForm from '../../components/admin/UserForm';
 import { ROLE_INFO, getPrimaryRole } from '../../utils/rolePermissions';
 import {
   fetchUsersOfflineFirst,
-  deleteUser as hardDeleteUser,
   localSaveUser,
   subscribeToUserChanges,
   processSyncQueue,
   normalizeUserRoles,
+  repairAllUserProfiles,
 } from '../../services/userSyncService';
+import { softArchiveUser } from '../../services/archiveService';
+import { isSuperAdminUser } from '../../utils/superAdminUtils';
 import { useAuth } from '../../context/AuthContext';
+import { useLanguage } from '../../hooks/useLanguage';
+import useStoresMap, { resolveStoreName, getStoreDisplayName } from '../../hooks/useStoresMap';
 
-const cn = (...inputs) => twMerge(clsx(inputs));
+import { COMPACT_PAGE_SIZE_OPTIONS } from '../../utils/paginationConstants';
+import PaginationBar from '../../components/ui/PaginationBar';
 
 // ══════════════════════════════════════════════════════════════
 // CONSTANTS
 // ══════════════════════════════════════════════════════════════
-const USERS_PER_PAGE = 10;
 
 const ROLE_ICON_MAP = {
   Crown, ShieldCheck,
@@ -82,28 +84,19 @@ const toDate = (v) => {
   } catch { return null; }
 };
 
-const getRelativeTime = (v) => {
+const getRelativeTime = (v, t) => {
   const date = toDate(v);
-  if (!date) return 'Never';
+  if (!date) return t('admin.usersPage.never', 'Never');
   const diff = Date.now() - date.getTime();
   const minutes = Math.floor(diff / 60_000);
   const hours = Math.floor(diff / 3_600_000);
   const days = Math.floor(diff / 86_400_000);
-  if (minutes < 1) return 'Just now';
+  if (minutes < 1) return t('admin.usersPage.justNow', 'Just now');
   if (minutes < 60) return `${minutes}m ago`;
   if (hours < 24) return `${hours}h ago`;
   if (days < 7) return `${days}d ago`;
   if (days < 30) return `${Math.floor(days / 7)}w ago`;
   return `${Math.floor(days / 30)}mo ago`;
-};
-
-// ✅ storeName first, then name (Master Prompt + backward compat)
-const getStoreName = (store) => {
-  if (!store) return '';
-  return (store.storeName || store.name || '')
-    .replace('A One Jewelry - ', '')
-    .replace('A One Jewellery - ', '')
-    .trim();
 };
 
 // ══════════════════════════════════════════════════════════════
@@ -152,11 +145,6 @@ const toggleUserActiveStatus = async (uid, isActive, adminUid) => {
       _syncStatus: navigator.onLine ? 'synced' : 'pending',
     });
   }
-};
-
-// Send password reset email
-const sendPasswordReset = async (email) => {
-  await sendPasswordResetEmail(auth, email.trim().toLowerCase());
 };
 
 // ══════════════════════════════════════════════════════════════
@@ -222,10 +210,9 @@ const RoleBadge = ({ role, size = 'sm' }) => {
 
 // ── Store Badge ──────────────────────────────────────────────
 // ✅ FIX: storeName || name
-const StoreBadge = ({ storeId, stores, isPrimary }) => {
-  const store = stores.find(s => s.id === storeId);
-  if (!store) return null;
-  const displayName = getStoreName(store) || storeId.slice(0, 8) + '…';
+const StoreBadge = ({ storeId, storesMap, isPrimary }) => {
+  const displayName = resolveStoreName(storeId, storesMap);
+  if (!displayName || displayName === '—') return null;
 
   return (
     <span className={cn(
@@ -242,26 +229,30 @@ const StoreBadge = ({ storeId, stores, isPrimary }) => {
 };
 
 // ── Status Badge ─────────────────────────────────────────────
-const StatusBadge = ({ isActive }) => (
-  <span className={cn(
-    'inline-flex items-center gap-1 rounded-full px-2 py-0.5',
-    'text-[10px] font-medium whitespace-nowrap border',
-    isActive
-      ? 'bg-green-500/15 text-green-400 border-green-500/20'
-      : 'bg-red-500/15 text-red-400 border-red-500/20',
-  )}>
-    {isActive
-      ? <CheckCircle2 className="h-2.5 w-2.5" />
-      : <XCircle className="h-2.5 w-2.5" />}
-    {isActive ? 'Active' : 'Inactive'}
-  </span>
-);
+const StatusBadge = ({ isActive }) => {
+  const { t } = useLanguage();
+  return (
+    <span className={cn(
+      'inline-flex items-center gap-1 rounded-full px-2 py-0.5',
+      'text-[10px] font-medium whitespace-nowrap border',
+      isActive
+        ? 'bg-green-500/15 text-green-400 border-green-500/20'
+        : 'bg-red-500/15 text-red-400 border-red-500/20',
+    )}>
+      {isActive
+        ? <CheckCircle2 className="h-2.5 w-2.5" />
+        : <XCircle className="h-2.5 w-2.5" />}
+      {isActive ? t('admin.usersPage.active', 'Active') : t('admin.usersPage.inactive', 'Inactive')}
+    </span>
+  );
+};
 
 // ── ✅ Sync Status Badge — §5 requirement ────────────────────
 const SyncBadge = ({ status }) => {
+  const { t } = useLanguage();
   if (!status || status === 'synced') {
     return (
-      <span title="Synced to cloud"
+      <span title={t('admin.usersPage.synced', 'Synced to cloud')}
         className="inline-flex items-center text-[9px] text-green-500/60">
         <CheckCircle className="h-2.5 w-2.5" />
       </span>
@@ -269,7 +260,7 @@ const SyncBadge = ({ status }) => {
   }
   if (status === 'pending') {
     return (
-      <span title="Pending sync — will sync when online"
+      <span title={t('admin.usersPage.pendingSync', 'Pending sync — will sync when online')}
         className="inline-flex items-center text-[9px] text-orange-400/80">
         <Database className="h-2.5 w-2.5 animate-pulse" />
       </span>
@@ -277,7 +268,7 @@ const SyncBadge = ({ status }) => {
   }
   if (status === 'failed') {
     return (
-      <span title="Sync failed — check connection"
+      <span title={t('admin.usersPage.syncFailed', 'Sync failed — check connection')}
         className="inline-flex items-center text-[9px] text-red-400/80">
         <AlertCircle className="h-2.5 w-2.5" />
       </span>
@@ -322,11 +313,13 @@ const StatCard = ({ label, value, icon: Icon, color = 'amber' }) => {
 const ConfirmDialog = ({
   isOpen, onClose, onConfirm,
   title, message, subMessage,
-  confirmText = 'Confirm',
+  confirmText,
   confirmIcon: ConfirmIcon = Trash2,
   confirmColor = 'red',
   loading = false,
 }) => {
+  const { t } = useLanguage();
+  const resolvedConfirm = confirmText || t('admin.usersPage.confirm', 'Confirm');
   const BG = { red: 'bg-red-500/10', blue: 'bg-blue-500/10', orange: 'bg-orange-500/10' };
   const TEXT = { red: 'text-red-400', blue: 'text-blue-400', orange: 'text-orange-400' };
   const BORDER = { red: 'border-red-500/30', blue: 'border-blue-500/30', orange: 'border-orange-500/30' };
@@ -369,7 +362,7 @@ const ConfirmDialog = ({
                 disabled={loading}
                 className="flex-1 rounded-xl border border-[#2a1f0d] bg-[#1a1208] px-4 py-2.5 text-sm text-gray-400 hover:text-gray-200 transition-colors disabled:opacity-40"
               >
-                Cancel
+                {t('common.cancel', 'Cancel')}
               </button>
               <button
                 type="button"
@@ -384,8 +377,8 @@ const ConfirmDialog = ({
                 )}
               >
                 {loading
-                  ? <><Loader2 className="h-4 w-4 animate-spin" /> Processing…</>
-                  : <><ConfirmIcon className="h-4 w-4" /> {confirmText}</>
+                  ? <><Loader2 className="h-4 w-4 animate-spin" /> {t('admin.usersPageExtra.processing', 'Processing…')}</>
+                  : <><ConfirmIcon className="h-4 w-4" /> {resolvedConfirm}</>
                 }
               </button>
             </div>
@@ -431,33 +424,37 @@ const SkeletonCard = ({ index }) => (
 );
 
 // ── Error State ──────────────────────────────────────────────
-const ErrorState = ({ error, onRetry }) => (
-  <div className="flex flex-col items-center justify-center py-16 text-center px-4">
-    <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-red-500/10 mb-4">
-      <WifiOff className="h-7 w-7 text-red-400" />
+const ErrorState = ({ error, onRetry }) => {
+  const { t } = useLanguage();
+  return (
+    <div className="flex flex-col items-center justify-center py-16 text-center px-4">
+      <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-red-500/10 mb-4">
+        <WifiOff className="h-7 w-7 text-red-400" />
+      </div>
+      <p className="text-sm font-semibold text-gray-300 mb-1">
+        {t('admin.usersPage.loadFailed', 'Failed to load users')}
+      </p>
+      <p className="text-xs text-gray-500 mb-4 max-w-xs">{error}</p>
+      <button
+        type="button"
+        onClick={onRetry}
+        className="flex items-center gap-2 rounded-xl border border-[#2a1f0d] bg-[#1a1208] px-4 py-2 text-xs text-amber-500 hover:text-amber-400 transition-colors"
+      >
+        <RefreshCw className="h-3.5 w-3.5" />
+        {t('common.tryAgain', 'Try Again')}
+      </button>
     </div>
-    <p className="text-sm font-semibold text-gray-300 mb-1">
-      Failed to load users
-    </p>
-    <p className="text-xs text-gray-500 mb-4 max-w-xs">{error}</p>
-    <button
-      type="button"
-      onClick={onRetry}
-      className="flex items-center gap-2 rounded-xl border border-[#2a1f0d] bg-[#1a1208] px-4 py-2 text-xs text-amber-500 hover:text-amber-400 transition-colors"
-    >
-      <RefreshCw className="h-3.5 w-3.5" />
-      Try Again
-    </button>
-  </div>
-);
+  );
+};
 
 // ── Mobile Card ──────────────────────────────────────────────
 const MobileUserCard = ({
-  user, stores, isSuperAdmin,
+  user, storesMap, isSuperAdmin,
   onEdit, onResetPassword,
   onToggleStatus, onDelete,
   index,
 }) => {
+  const { t } = useLanguage();
   const [showActions, setShowActions] = useState(false);
   const primaryRole = user.primaryRole
     || getPrimaryRole(user.roles || [])
@@ -480,7 +477,7 @@ const MobileUserCard = ({
             <div className="min-w-0">
               <div className="flex items-center gap-1.5">
                 <p className="text-sm font-semibold text-gray-200 truncate">
-                  {user.name || 'Unknown'}
+                  {user.name || t('admin.usersPage.unknown', 'Unknown')}
                 </p>
                 {/* ✅ §5: Sync badge */}
                 <SyncBadge status={user._syncStatus} />
@@ -522,7 +519,7 @@ const MobileUserCard = ({
               <StoreBadge
                 key={sid}
                 storeId={sid}
-                stores={stores}
+                storesMap={storesMap}
                 isPrimary={sid === user.primaryStore}
               />
             ))}
@@ -534,7 +531,7 @@ const MobileUserCard = ({
           </div>
           <span className="text-[10px] text-gray-600 flex items-center gap-1 shrink-0 ml-2">
             <Clock className="h-2.5 w-2.5" />
-            {getRelativeTime(user.lastLogin)}
+            {getRelativeTime(user.lastLogin, t)}
           </span>
         </div>
       </div>
@@ -556,7 +553,7 @@ const MobileUserCard = ({
                 className="flex flex-col items-center gap-1 py-3 text-amber-500 hover:bg-amber-500/5 transition-colors"
               >
                 <Edit3 className="h-4 w-4" />
-                <span className="text-[9px]">Edit</span>
+                <span className="text-[9px]">{t('common.edit', 'Edit')}</span>
               </button>
               <button
                 type="button"
@@ -568,7 +565,7 @@ const MobileUserCard = ({
                 )}
               >
                 <KeyRound className="h-4 w-4" />
-                <span className="text-[9px]">Reset</span>
+                <span className="text-[9px]">{t('admin.usersPage.resetPassword', 'Reset')}</span>
               </button>
               <button
                 type="button"
@@ -584,7 +581,7 @@ const MobileUserCard = ({
                   ? <Ban className="h-4 w-4" />
                   : <CheckCircle2 className="h-4 w-4" />}
                 <span className="text-[9px]">
-                  {user.isActive ? 'Disable' : 'Enable'}
+                  {user.isActive ? t('admin.usersPage.disable', 'Disable') : t('admin.usersPage.enable', 'Enable')}
                 </span>
               </button>
               {/* Delete — only super admin */}
@@ -600,7 +597,7 @@ const MobileUserCard = ({
                 )}
               >
                 <Trash2 className="h-4 w-4" />
-                <span className="text-[9px]">Delete</span>
+                <span className="text-[9px]">{t('common.delete', 'Delete')}</span>
               </button>
             </div>
           </motion.div>
@@ -612,11 +609,12 @@ const MobileUserCard = ({
 
 // ── Desktop Row ──────────────────────────────────────────────
 const DesktopUserRow = ({
-  user, stores, isSuperAdmin,
+  user, storesMap, isSuperAdmin,
   onEdit, onResetPassword,
   onToggleStatus, onDelete,
   index,
 }) => {
+  const { t } = useLanguage();
   const primaryRole = user.primaryRole
     || getPrimaryRole(user.roles || [])
     || user.role
@@ -637,7 +635,7 @@ const DesktopUserRow = ({
           <div className="min-w-0">
             <div className="flex items-center gap-1.5">
               <p className="text-sm font-medium text-gray-200 truncate max-w-[130px]">
-                {user.name || 'Unknown'}
+                {user.name || t('admin.usersPage.unknown', 'Unknown')}
               </p>
               {/* ✅ §5: Sync status */}
               <SyncBadge status={user._syncStatus} />
@@ -670,7 +668,7 @@ const DesktopUserRow = ({
             <StoreBadge
               key={sid}
               storeId={sid}
-              stores={stores}
+              storesMap={storesMap}
               isPrimary={sid === user.primaryStore}
             />
           ))}
@@ -691,7 +689,7 @@ const DesktopUserRow = ({
       <td className="px-3 py-3">
         <span className="text-xs text-gray-500 flex items-center gap-1.5">
           <Clock className="h-3 w-3" />
-          {getRelativeTime(user.lastLogin)}
+          {getRelativeTime(user.lastLogin, t)}
         </span>
       </td>
 
@@ -701,7 +699,7 @@ const DesktopUserRow = ({
           <button
             type="button"
             onClick={() => onEdit(user)}
-            title="Edit user"
+            title={t('admin.usersPage.editUser', 'Edit user')}
             className="p-1.5 rounded-lg text-amber-500 hover:bg-amber-500/10 transition-colors"
           >
             <Edit3 className="h-3.5 w-3.5" />
@@ -709,7 +707,7 @@ const DesktopUserRow = ({
           <button
             type="button"
             onClick={() => isSuperAdmin && onResetPassword(user)}
-            title={isSuperAdmin ? 'Reset password' : 'SuperAdmin only'}
+            title={isSuperAdmin ? t('admin.usersPage.resetPassword', 'Reset password') : t('admin.usersPage.superAdminOnly', 'SuperAdmin only')}
             disabled={!isSuperAdmin}
             className={cn(
               'p-1.5 rounded-lg transition-colors',
@@ -721,7 +719,7 @@ const DesktopUserRow = ({
           <button
             type="button"
             onClick={() => onToggleStatus(user)}
-            title={user.isActive ? 'Disable user' : 'Enable user'}
+            title={user.isActive ? t('admin.usersPageExtra.disableUser', 'Disable user') : t('admin.usersPageExtra.enableUser', 'Enable user')}
             className={cn(
               'p-1.5 rounded-lg transition-colors',
               user.isActive
@@ -737,7 +735,7 @@ const DesktopUserRow = ({
           <button
             type="button"
             onClick={() => isSuperAdmin && onDelete(user)}
-            title={isSuperAdmin ? 'Delete user' : 'SuperAdmin only'}
+            title={isSuperAdmin ? t('admin.usersPage.deleteUser', 'Delete user') : t('admin.usersPage.superAdminOnly', 'SuperAdmin only')}
             disabled={!isSuperAdmin}
             className={cn(
               'p-1.5 rounded-lg transition-colors',
@@ -777,6 +775,7 @@ const FilterSelect = ({ value, onChange, children }) => (
 // MAIN PAGE COMPONENT
 // ══════════════════════════════════════════════════════════════
 const UserManagement = () => {
+  const { t, isRTL } = useLanguage();
 
   // ── Auth context ─────────────────────────────────────────
   const {
@@ -789,36 +788,33 @@ const UserManagement = () => {
   // ── Current admin (from context, not localStorage) ───────
   const currentAdmin = useMemo(() => {
     const user = userData || currentUser;
-    if (!user) {
-      return {
-        uid: auth.currentUser?.uid || 'unknown',
-        name: 'Admin',
-        email: auth.currentUser?.email || '',
-        roles: ['superAdmin'],
-      };
-    }
+    if (!user?.uid && !auth.currentUser?.uid) return null;
 
     const roles = normalizeUserRoles(user);
     return {
-      uid: user.uid || auth.currentUser?.uid || 'unknown',
-      name: user.name || user.displayName || 'Admin',
-      email: user.email || '',
-      roles: roles.length > 0 ? roles : ['superAdmin'],
+      uid: user?.uid || auth.currentUser?.uid,
+      name: user?.name || user?.displayName || 'User',
+      email: user?.email || auth.currentUser?.email || '',
+      roles: roles.length > 0 ? roles : [],
     };
   }, [userData, currentUser]);
 
-  // ✅ §7: SuperAdmin check
-  const isSuperAdmin = useMemo(() =>
-    authIsSuperAdmin ||
-    currentAdmin.roles.some(r =>
-      ['superAdmin', 'superadmin', 'super_admin'].includes(r)
-    ),
-    [authIsSuperAdmin, currentAdmin]
+  const isSuperAdmin = useMemo(
+    () => authIsSuperAdmin || isSuperAdminUser(currentAdmin),
+    [authIsSuperAdmin, currentAdmin],
   );
 
   // ── Data state ───────────────────────────────────────────
   const [users, setUsers] = useState([]);
   const [stores, setStores] = useState([]);
+  const liveStoresMap = useStoresMap();
+  const storesMap = useMemo(() => {
+    const merged = { ...liveStoresMap };
+    stores.forEach((s) => {
+      if (s?.id) merged[s.id] = { ...s, id: s.id };
+    });
+    return merged;
+  }, [liveStoresMap, stores]);
   const [loadingUsers, setLoadingUsers] = useState(true);
   const [loadingStores, setLoadingStores] = useState(true);
   const [fetchError, setFetchError] = useState(null);
@@ -834,6 +830,7 @@ const UserManagement = () => {
   const [sortField, setSortField] = useState('name');
   const [sortDir, setSortDir] = useState('asc');
   const [currentPage, setCurrentPage] = useState(1);
+  const [usersPageSize, setUsersPageSize] = useState(10);
 
   // ── UI state ─────────────────────────────────────────────
   const [showUserForm, setShowUserForm] = useState(false);
@@ -841,10 +838,12 @@ const UserManagement = () => {
   const [deleteConfirm, setDeleteConfirm] = useState(null);
   const [resetConfirm, setResetConfirm] = useState(null);
   const [actionLoading, setActionLoading] = useState(false);
+  const [profileRepairRunning, setProfileRepairRunning] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
 
   const searchTimerRef = useRef(null);
   const syncTimerRef = useRef(null);
+  const profileRepairRanRef = useRef(false);
 
   // ── Responsive check ────────────────────────────────────
   useEffect(() => {
@@ -898,6 +897,45 @@ const UserManagement = () => {
       setLoadingStores(false);
     }
   }, []);
+
+  // ── Super Admin — one-time bulk profile repair (Auth uid → Firestore) ──
+  const runProfileRepair = useCallback(async (options = {}) => {
+    const { silentToast = false } = options;
+
+    if (!isSuperAdmin || !currentAdmin || !navigator.onLine) return null;
+    if (profileRepairRunning) return null;
+
+    setProfileRepairRunning(true);
+    try {
+      const result = await repairAllUserProfiles(currentAdmin, { silentToast, tryCloud: false });
+      if (result?.success) {
+        await loadUsers();
+      }
+      return result;
+    } finally {
+      setProfileRepairRunning(false);
+    }
+  }, [isSuperAdmin, currentAdmin, profileRepairRunning, loadUsers]);
+
+  // Auto-repair once per browser session when Super Admin opens this page
+  useEffect(() => {
+    if (!isSuperAdmin || !currentAdmin || profileRepairRanRef.current) return;
+    if (!navigator.onLine) return;
+
+    profileRepairRanRef.current = true;
+    const sessionKey = 'aone_bulk_profile_repair_done';
+    try {
+      if (sessionStorage.getItem(sessionKey) === '1') return;
+    } catch { /* ignore */ }
+
+    runProfileRepair({ silentToast: true }).then((result) => {
+      if (result?.success) {
+        try { sessionStorage.setItem(sessionKey, '1'); } catch { /* ignore */ }
+      }
+    }).catch(() => {
+      profileRepairRanRef.current = false;
+    });
+  }, [isSuperAdmin, currentAdmin, runProfileRepair]);
 
   // ── Initial load ─────────────────────────────────────────
   useEffect(() => {
@@ -1026,13 +1064,13 @@ const UserManagement = () => {
     return result;
   }, [users, searchQuery, roleFilter, storeFilter, statusFilter, sortField, sortDir]);
 
-  const totalPages = Math.max(1, Math.ceil(filteredUsers.length / USERS_PER_PAGE));
+  const totalPages = Math.max(1, Math.ceil(filteredUsers.length / usersPageSize));
   const paginatedUsers = useMemo(() => {
-    const start = (currentPage - 1) * USERS_PER_PAGE;
-    return filteredUsers.slice(start, start + USERS_PER_PAGE);
-  }, [filteredUsers, currentPage]);
+    const start = (currentPage - 1) * usersPageSize;
+    return filteredUsers.slice(start, start + usersPageSize);
+  }, [filteredUsers, currentPage, usersPageSize]);
 
-  useEffect(() => setCurrentPage(1), [searchQuery, roleFilter, storeFilter, statusFilter]);
+  useEffect(() => setCurrentPage(1), [searchQuery, roleFilter, storeFilter, statusFilter, usersPageSize]);
 
   const handleSort = useCallback((field) => {
     if (sortField === field) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
@@ -1052,9 +1090,17 @@ const UserManagement = () => {
 
   // ── Handlers ─────────────────────────────────────────────
   const handleCreateUser = useCallback(() => {
+    if (!isSuperAdmin) {
+      toast.error(t('admin.usersPageExtra.onlySuperAdminCreate', 'Only Super Admin can create users'));
+      return;
+    }
+    if (!currentAdmin?.uid) {
+      toast.error('Session expired — please log in again');
+      return;
+    }
     setEditingUser(null);
     setShowUserForm(true);
-  }, []);
+  }, [isSuperAdmin, currentAdmin, t]);
 
   const handleEditUser = useCallback((user) => {
     setEditingUser(user);
@@ -1064,12 +1110,15 @@ const UserManagement = () => {
   const handleFormSubmit = useCallback(async (result) => {
     setShowUserForm(false);
     setEditingUser(null);
-    // Refresh from IDB (service already saved it)
     await loadUsers();
-    toast.success(result?.uid ? 'User saved!' : 'Done!', {
-      icon: '✅',
-    });
-  }, [loadUsers]);
+    if (result?.verificationSent) {
+      toast.success('User created — verification email sent to their inbox', { icon: '📧', duration: 4500 });
+    } else {
+      toast.success(result?.uid ? t('admin.usersPage.userSaved', 'User saved!') : t('admin.usersPage.done', 'Done!'), {
+        icon: '✅',
+      });
+    }
+  }, [loadUsers, t]);
 
   // ── Toggle status ────────────────────────────────────────
   const handleToggleStatus = useCallback(async (user) => {
@@ -1088,7 +1137,10 @@ const UserManagement = () => {
     try {
       await toggleUserActiveStatus(uid, newStatus, currentAdmin.uid);
       toast.success(
-        `${user.name} ${newStatus ? 'enabled' : 'disabled'}`,
+        t('admin.usersPageExtra.userStatusChanged', '{{name}} {{status}}', {
+          name: user.name,
+          status: newStatus ? t('admin.usersPageExtra.enabled', 'enabled') : t('admin.usersPageExtra.disabled', 'disabled'),
+        }),
         { icon: newStatus ? '✅' : '⊘' }
       );
     } catch (err) {
@@ -1102,12 +1154,12 @@ const UserManagement = () => {
       );
       toast.error(`Failed: ${err?.message}`);
     }
-  }, [currentAdmin]);
+  }, [currentAdmin, t]);
 
-  // ── ✅ §7: Hard delete — SuperAdmin only ─────────────────
+  // ── Soft archive user — SuperAdmin only (restore from Backup → Archive) ──
   const handleDeleteUser = useCallback(async (user) => {
     if (!isSuperAdmin) {
-      toast.error('🚫 Only Super Admin can delete users!');
+      toast.error(t('admin.usersPageExtra.onlySuperAdminDelete', 'Only Super Admin can archive users!'));
       setDeleteConfirm(null);
       return;
     }
@@ -1115,41 +1167,69 @@ const UserManagement = () => {
     setActionLoading(true);
     try {
       const uid = user.uid || user.id;
-      await hardDeleteUser(uid, currentAdmin);
+      await softArchiveUser(uid, {
+        deletedBy: { uid: currentAdmin?.uid, email: currentAdmin?.email, name: currentAdmin?.name },
+        reason: 'archived_from_user_management',
+      });
 
-      // Remove from local state immediately
       setUsers(prev =>
         prev.filter(u => (u.uid || u.id) !== uid)
       );
 
       setDeleteConfirm(null);
-      toast.success(`${user.name} permanently deleted`, { icon: '🗑️' });
+      toast.success(
+        t('admin.usersPageExtra.archivedUser', '{{name}} archive ho gaya — Backup → Archive se restore', { name: user.name }),
+        { icon: '📦' },
+      );
     } catch (err) {
-      toast.error(`Delete failed: ${err?.message}`);
+      toast.error(t('admin.usersPageExtra.deleteFailed', 'Archive failed: {{msg}}', { msg: err?.message }));
     } finally {
       setActionLoading(false);
     }
-  }, [currentAdmin, isSuperAdmin]);
+  }, [currentAdmin, isSuperAdmin, t]);
 
   // ── Reset password ───────────────────────────────────────
   const handleResetPassword = useCallback(async (user) => {
     if (!isSuperAdmin) {
-      toast.error('🚫 Only Super Admin can reset passwords');
+      toast.error(t('admin.usersPageExtra.onlySuperAdminReset', 'Only Super Admin can reset passwords'));
+      setResetConfirm(null);
+      return;
+    }
+
+    const uid = String(user?.uid || user?.id || '');
+    if (uid.startsWith('temp_')) {
+      toast.error(t('admin.usersPageExtra.resetNeedsSync', 'User not synced yet — wait for cloud sync or recreate the account.'));
+      setResetConfirm(null);
+      return;
+    }
+
+    const emailCheck = validateUserEmail(user?.email || '');
+    if (!emailCheck.valid) {
+      toast.error(emailCheck.error || t('admin.usersPageExtra.invalidEmailReset', 'Invalid email — cannot send reset.'));
+      setResetConfirm(null);
+      return;
+    }
+
+    if (!navigator.onLine) {
+      toast.error(t('admin.usersPageExtra.resetNeedsOnline', 'Internet required to send password reset email.'));
       setResetConfirm(null);
       return;
     }
 
     setActionLoading(true);
     try {
-      await sendPasswordReset(user.email);
+      await sendPasswordResetEmailSecondary(emailCheck.normalized);
       setResetConfirm(null);
-      toast.success(`Reset email sent to ${user.email}`, { icon: '📧' });
+      toast.success(
+        t('admin.usersPageExtra.resetEmailSent', 'Reset email sent to {{email}}', { email: emailCheck.normalized }),
+        { icon: '📧', duration: 5000 },
+      );
     } catch (err) {
-      toast.error(`Failed: ${err?.message}`);
+      toast.error(err?.message || t('admin.usersPageExtra.resetFailed', 'Password reset failed'));
     } finally {
       setActionLoading(false);
     }
-  }, []);
+  }, [isSuperAdmin, t]);
 
   // ── Sort icon ────────────────────────────────────────────
   const SortIcon = ({ field }) => {
@@ -1160,29 +1240,15 @@ const UserManagement = () => {
       : <ArrowDown className="h-3 w-3 text-amber-500" />;
   };
 
-  // Pagination numbers
-  const pageNumbers = useMemo(() => {
-    const pages = [];
-    const max = 5;
-    if (totalPages <= max) {
-      for (let i = 1; i <= totalPages; i++) pages.push(i);
-    } else if (currentPage <= 3) {
-      for (let i = 1; i <= max; i++) pages.push(i);
-    } else if (currentPage >= totalPages - 2) {
-      for (let i = totalPages - max + 1; i <= totalPages; i++) pages.push(i);
-    } else {
-      for (let i = currentPage - 2; i <= currentPage + 2; i++) pages.push(i);
-    }
-    return pages;
-  }, [totalPages, currentPage]);
-
   const isLoading = loadingUsers || loadingStores;
 
   // ══════════════════════════════════════════════════════════
   // RENDER
   // ══════════════════════════════════════════════════════════
+  const roleLabel = (role) => t(`admin.roleNames.${role}`, t(`roles.${role}`, ROLE_INFO?.[role]?.label || role));
+
   return (
-    <div className="min-h-screen bg-[#0a0805] p-3 sm:p-4 md:p-6 lg:p-8">
+    <div dir={isRTL ? 'rtl' : 'ltr'} className="min-h-screen bg-[#0a0805] p-3 sm:p-4 md:p-6 lg:p-8">
       <div className="mx-auto max-w-7xl space-y-4">
 
         {/* ── PAGE HEADER ──────────────────────────────── */}
@@ -1192,7 +1258,7 @@ const UserManagement = () => {
               <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-amber-500/10">
                 <Users className="h-5 w-5 text-amber-500" />
               </div>
-              User Management
+              {t('admin.usersPageExtra.pageTitle', 'User Management')}
             </h1>
             <div className="flex flex-wrap items-center gap-2 mt-1 ml-[48px]">
               {/* Data source indicator */}
@@ -1205,14 +1271,14 @@ const UserManagement = () => {
                 {dataSource === 'firebase'
                   ? <Wifi className="h-3 w-3" />
                   : <Database className="h-3 w-3" />}
-                {dataSource === 'firebase' ? 'Live' : 'Cached'}
-                · {users.length} users
+                {dataSource === 'firebase' ? t('admin.usersPage.live', 'Live') : t('admin.usersPage.cached', 'Cached')}
+                · {t('admin.usersPageExtra.usersCount', '{{count}} users', { count: users.length })}
               </span>
               {/* ✅ §5: Sync queue indicators */}
               {pendingSync > 0 && (
                 <span className="text-xs text-orange-400 flex items-center gap-1">
                   <Database className="h-3 w-3 animate-pulse" />
-                  {pendingSync} pending sync
+                  {t('admin.usersPageExtra.pendingSyncCount', '{{count}} pending sync', { count: pendingSync })}
                 </span>
               )}
             </div>
@@ -1226,9 +1292,25 @@ const UserManagement = () => {
               className="flex items-center gap-1.5 rounded-xl border border-[#2a1f0d] bg-[#1a1208] px-3 py-2 text-xs text-gray-500 hover:text-gray-300 transition-colors disabled:opacity-40"
             >
               <RefreshCw className={cn('h-3.5 w-3.5', loadingUsers && 'animate-spin')} />
-              <span className="hidden sm:inline">Refresh</span>
+              <span className="hidden sm:inline">{t('admin.usersPage.refresh', 'Refresh')}</span>
             </button>
 
+            {isSuperAdmin && (
+              <button
+                type="button"
+                onClick={() => runProfileRepair()}
+                disabled={profileRepairRunning || !navigator.onLine}
+                title={t('admin.usersPage.syncAllProfilesHint', 'Fix login for all users — sync Auth accounts to Firestore')}
+                className="flex items-center gap-1.5 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-400 hover:bg-amber-500/20 transition-colors disabled:opacity-40"
+              >
+                <Wrench className={cn('h-3.5 w-3.5', profileRepairRunning && 'animate-spin')} />
+                <span className="hidden sm:inline">
+                  {t('admin.usersPage.syncAllProfiles', 'Sync All Profiles')}
+                </span>
+              </button>
+            )}
+
+            {isSuperAdmin && (
             <motion.button
               type="button"
               onClick={handleCreateUser}
@@ -1237,19 +1319,20 @@ const UserManagement = () => {
               className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-amber-500 to-amber-600 px-4 py-2.5 text-sm font-semibold text-[#0a0805] shadow-lg shadow-amber-500/20 hover:from-amber-400 hover:to-amber-500 transition-all"
             >
               <UserPlus className="h-4 w-4" />
-              Add User
+              {t('admin.usersPage.addUser', 'Add User')}
             </motion.button>
+            )}
           </div>
         </div>
 
         {/* ── STATS ────────────────────────────────────── */}
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
-          <StatCard label="Total" value={stats.total} icon={Users} color="amber" />
-          <StatCard label="Active" value={stats.active} icon={UserCheck} color="green" />
-          <StatCard label="Inactive" value={stats.inactive} icon={UserX} color="red" />
-          <StatCard label="Billers" value={stats.roleCounts.biller || 0} icon={Receipt} color="green" />
-          <StatCard label="Cashiers" value={stats.roleCounts.cashier || 0} icon={CreditCard} color="orange" />
-          <StatCard label="Managers" value={stats.roleCounts.manager || 0} icon={Shield} color="purple" />
+          <StatCard label={t('admin.usersPage.total', 'Total')} value={stats.total} icon={Users} color="amber" />
+          <StatCard label={t('admin.usersPage.active', 'Active')} value={stats.active} icon={UserCheck} color="green" />
+          <StatCard label={t('admin.usersPage.inactive', 'Inactive')} value={stats.inactive} icon={UserX} color="red" />
+          <StatCard label={t('admin.usersPage.billers', 'Billers')} value={stats.roleCounts.biller || 0} icon={Receipt} color="green" />
+          <StatCard label={t('admin.usersPage.cashiers', 'Cashiers')} value={stats.roleCounts.cashier || 0} icon={CreditCard} color="orange" />
+          <StatCard label={t('admin.usersPage.managers', 'Managers')} value={stats.roleCounts.manager || 0} icon={Shield} color="purple" />
         </div>
 
         {/* ── FILTERS ──────────────────────────────────── */}
@@ -1260,7 +1343,7 @@ const UserManagement = () => {
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-600" />
               <input
                 type="text"
-                placeholder="Search by name, email, phone or userCode…"
+                placeholder={t('admin.usersPage.searchPh', 'Search by name, email, phone or userCode…')}
                 value={searchInput}
                 onChange={handleSearchChange}
                 className={cn(
@@ -1287,29 +1370,28 @@ const UserManagement = () => {
             <div className="flex flex-wrap gap-2">
               {/* Role filter */}
               <FilterSelect value={roleFilter} onChange={v => { setRoleFilter(v); setCurrentPage(1); }}>
-                <option value="">All Roles</option>
-                <option value="superAdmin">Super Admin</option>
-                <option value="admin">Admin</option>
-                <option value="manager">Manager</option>
-                <option value="biller">Biller</option>
-                <option value="cashier">Cashier</option>
+                <option value="">{t('admin.usersPage.allRoles', 'All Roles')}</option>
+                <option value="superAdmin">{roleLabel('superAdmin')}</option>
+                <option value="manager">{roleLabel('manager')}</option>
+                <option value="biller">{roleLabel('biller')}</option>
+                <option value="cashier">{roleLabel('cashier')}</option>
               </FilterSelect>
 
               {/* ✅ FIX: Store filter uses storeName */}
               <FilterSelect value={storeFilter} onChange={v => { setStoreFilter(v); setCurrentPage(1); }}>
-                <option value="">All Stores</option>
+                <option value="">{t('admin.usersPageExtra.allStores', 'All Stores')}</option>
                 {stores.map(s => (
                   <option key={s.id} value={s.id}>
-                    {getStoreName(s) || s.id}
+                    {getStoreDisplayName(s) || resolveStoreName(s.id, storesMap)}
                   </option>
                 ))}
               </FilterSelect>
 
               {/* Status filter */}
               <FilterSelect value={statusFilter} onChange={v => { setStatusFilter(v); setCurrentPage(1); }}>
-                <option value="">All Status</option>
-                <option value="active">Active</option>
-                <option value="inactive">Inactive</option>
+                <option value="">{t('admin.usersPage.allStatus', 'All Status')}</option>
+                <option value="active">{t('admin.usersPage.active', 'Active')}</option>
+                <option value="inactive">{t('admin.usersPage.inactive', 'Inactive')}</option>
               </FilterSelect>
 
               {/* Reset filters */}
@@ -1319,7 +1401,7 @@ const UserManagement = () => {
                 className="flex items-center gap-1.5 rounded-xl border border-[#2a1f0d] bg-[#0a0805] px-3 py-2 text-xs text-gray-500 hover:text-gray-300 transition-colors"
               >
                 <RotateCcw className="h-3.5 w-3.5" />
-                <span className="hidden sm:inline">Reset</span>
+                <span className="hidden sm:inline">{t('admin.usersPageExtra.reset', 'Reset')}</span>
               </button>
             </div>
           </div>
@@ -1337,7 +1419,7 @@ const UserManagement = () => {
                 <div className="flex flex-wrap items-center gap-2 pt-3 mt-3 border-t border-[#0f0a04]">
                   <Filter className="h-3 w-3 text-gray-600" />
                   <span className="text-xs text-gray-500">
-                    {filteredUsers.length} of {users.length} users
+                    {t('admin.usersPageExtra.filterCount', '{{filtered}} of {{total}} users', { filtered: filteredUsers.length, total: users.length })}
                   </span>
 
                   {searchQuery && (
@@ -1359,7 +1441,7 @@ const UserManagement = () => {
                   {/* ✅ FIX: chip shows storeName */}
                   {storeFilter && (
                     <span className="flex items-center gap-1 bg-blue-500/10 text-blue-400 border border-blue-500/20 px-2 py-0.5 rounded-full text-[10px]">
-                      {getStoreName(stores.find(s => s.id === storeFilter)) || storeFilter}
+                      {resolveStoreName(storeFilter, storesMap)}
                       <button type="button" onClick={() => setStoreFilter('')}>
                         <X className="h-2.5 w-2.5" />
                       </button>
@@ -1393,12 +1475,12 @@ const UserManagement = () => {
                 <thead>
                   <tr className="border-b border-[#2a1f0d] bg-[#0f0a04]">
                     {[
-                      { label: 'User', field: 'name', sortable: true },
-                      { label: 'Roles', field: null, sortable: false },
-                      { label: 'Branch', field: null, sortable: false },
-                      { label: 'Status', field: null, sortable: false },
-                      { label: 'Last Login', field: 'lastLogin', sortable: true },
-                      { label: 'Actions', field: null, sortable: false, align: 'right' },
+                      { label: t('admin.usersPage.colUser', 'User'), field: 'name', sortable: true },
+                      { label: t('admin.usersPage.colRoles', 'Roles'), field: null, sortable: false },
+                      { label: t('admin.usersPage.colBranch', 'Branch'), field: null, sortable: false },
+                      { label: t('admin.usersPage.colStatus', 'Status'), field: null, sortable: false },
+                      { label: t('admin.usersPage.colLastLogin', 'Last Login'), field: 'lastLogin', sortable: true },
+                      { label: t('admin.usersPage.colActions', 'Actions'), field: null, sortable: false, align: 'right' },
                     ].map(col => (
                       <th
                         key={col.label}
@@ -1435,7 +1517,7 @@ const UserManagement = () => {
                         <DesktopUserRow
                           key={user.uid || user.id}
                           user={user}
-                          stores={stores}
+                          storesMap={storesMap}
                           isSuperAdmin={isSuperAdmin}
                           onEdit={handleEditUser}
                           onResetPassword={u => setResetConfirm(u)}
@@ -1463,7 +1545,7 @@ const UserManagement = () => {
                     <MobileUserCard
                       key={user.uid || user.id}
                       user={user}
-                      stores={stores}
+                      storesMap={storesMap}
                       isSuperAdmin={isSuperAdmin}
                       onEdit={handleEditUser}
                       onResetPassword={u => setResetConfirm(u)}
@@ -1487,13 +1569,13 @@ const UserManagement = () => {
               <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-[#1f1a0e] mb-4">
                 <Users className="h-7 w-7 text-gray-600" />
               </div>
-              <p className="text-sm font-medium text-gray-400 mb-1">No users found</p>
+              <p className="text-sm font-medium text-gray-400 mb-1">{t('admin.usersPageExtra.noUsersFound', 'No users found')}</p>
               <p className="text-xs text-gray-600 max-w-xs">
                 {searchQuery
-                  ? `No results for "${searchQuery}"`
+                  ? t('admin.usersPageExtra.noResultsFor', 'No results for "{{query}}"', { query: searchQuery })
                   : users.length === 0
-                    ? 'No users yet — create one!'
-                    : 'Try adjusting filters'}
+                    ? t('admin.usersPage.noUsers', 'No users yet — create one!')
+                    : t('admin.usersPage.noFilterMatch', 'Try adjusting filters')}
               </p>
               {(searchQuery || roleFilter || storeFilter || statusFilter) && (
                 <button
@@ -1502,64 +1584,22 @@ const UserManagement = () => {
                   className="mt-4 flex items-center gap-1.5 text-xs text-amber-500 hover:text-amber-400 transition-colors"
                 >
                   <RotateCcw className="h-3 w-3" />
-                  Reset filters
+                  {t('admin.usersPageExtra.resetFilters', 'Reset filters')}
                 </button>
               )}
             </motion.div>
           )}
 
-          {/* Pagination */}
-          {!isLoading && !fetchError && filteredUsers.length > USERS_PER_PAGE && (
-            <div className="flex items-center justify-between border-t border-[#2a1f0d] px-3 py-3">
-              <span className="text-xs text-gray-500">
-                {(currentPage - 1) * USERS_PER_PAGE + 1}–
-                {Math.min(currentPage * USERS_PER_PAGE, filteredUsers.length)} of {filteredUsers.length}
-              </span>
-
-              <div className="flex items-center gap-1">
-                <button
-                  type="button"
-                  onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
-                  disabled={currentPage === 1}
-                  className="flex items-center gap-1 rounded-lg border border-[#2a1f0d] bg-[#0a0805] px-2.5 py-1.5 text-xs text-gray-400 hover:text-gray-200 transition-colors disabled:opacity-30"
-                >
-                  <ChevronLeft className="h-3.5 w-3.5" />
-                  <span className="hidden sm:inline">Prev</span>
-                </button>
-
-                <div className="hidden sm:flex items-center gap-1">
-                  {pageNumbers.map(page => (
-                    <button
-                      key={page}
-                      type="button"
-                      onClick={() => setCurrentPage(page)}
-                      className={cn(
-                        'flex h-8 w-8 items-center justify-center rounded-lg text-xs font-medium transition-all',
-                        currentPage === page
-                          ? 'bg-amber-500/15 text-amber-400 border border-amber-500/30'
-                          : 'text-gray-500 hover:text-gray-300 hover:bg-[#0f0a04]',
-                      )}
-                    >
-                      {page}
-                    </button>
-                  ))}
-                </div>
-
-                <span className="sm:hidden text-xs text-gray-500 px-2">
-                  {currentPage}/{totalPages}
-                </span>
-
-                <button
-                  type="button"
-                  onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
-                  disabled={currentPage === totalPages}
-                  className="flex items-center gap-1 rounded-lg border border-[#2a1f0d] bg-[#0a0805] px-2.5 py-1.5 text-xs text-gray-400 hover:text-gray-200 transition-colors disabled:opacity-30"
-                >
-                  <span className="hidden sm:inline">Next</span>
-                  <ChevronRight className="h-3.5 w-3.5" />
-                </button>
-              </div>
-            </div>
+          {!isLoading && !fetchError && filteredUsers.length > 0 && (
+            <PaginationBar
+              page={currentPage}
+              totalPages={totalPages}
+              totalItems={filteredUsers.length}
+              pageSize={usersPageSize}
+              onPageChange={setCurrentPage}
+              pageSizeOptions={COMPACT_PAGE_SIZE_OPTIONS}
+              onPageSizeChange={(size) => { setUsersPageSize(size); setCurrentPage(1); }}
+            />
           )}
         </div>
       </div>
@@ -1575,6 +1615,7 @@ const UserManagement = () => {
         editUser={editingUser}
         stores={stores}
         currentAdmin={currentAdmin}
+        isSuperAdmin={isSuperAdmin}
       />
 
       {/* ── DELETE CONFIRM ────────────────────────────── */}
@@ -1582,14 +1623,14 @@ const UserManagement = () => {
         isOpen={!!deleteConfirm}
         onClose={() => !actionLoading && setDeleteConfirm(null)}
         onConfirm={() => handleDeleteUser(deleteConfirm)}
-        title="Permanently Delete User"
-        message={`Delete "${deleteConfirm?.name}" from the system?`}
+        title={t('admin.usersPage.deleteTitle', 'Permanently Delete User')}
+        message={t('admin.usersPageExtra.deleteConfirmMsg', 'Delete "{{name}}" from the system?', { name: deleteConfirm?.name })}
         subMessage={
           isSuperAdmin
-            ? 'This will remove the user from Firestore permanently. This action cannot be undone.'
-            : '⚠️ You need Super Admin role to delete users.'
+            ? t('admin.usersPage.deleteMsg', 'This will remove the user from Firestore permanently. This action cannot be undone.')
+            : t('admin.usersPageExtra.superAdminRequired', 'You need Super Admin role to delete users.')
         }
-        confirmText={isSuperAdmin ? 'Delete Forever' : 'No Permission'}
+        confirmText={isSuperAdmin ? t('admin.usersPage.deleteForever', 'Delete Forever') : t('admin.usersPage.noPermission', 'No Permission')}
         confirmIcon={Trash2}
         confirmColor="red"
         loading={actionLoading}
@@ -1600,10 +1641,10 @@ const UserManagement = () => {
         isOpen={!!resetConfirm}
         onClose={() => !actionLoading && setResetConfirm(null)}
         onConfirm={() => handleResetPassword(resetConfirm)}
-        title="Send Password Reset Email"
-        message="A password reset link will be sent to:"
+        title={t('admin.usersPage.resetTitle', 'Send Password Reset Email')}
+        message={t('admin.usersPageExtra.resetMsg', 'A password reset link will be sent to:')}
         subMessage={resetConfirm?.email}
-        confirmText="Send Email"
+        confirmText={t('admin.usersPage.sendEmail', 'Send Email')}
         confirmIcon={Mail}
         confirmColor="blue"
         loading={actionLoading}

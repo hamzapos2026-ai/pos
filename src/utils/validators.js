@@ -6,6 +6,11 @@
  */
 const toTrimmedString = (value) => String(value || '').trim();
 
+/** Biller product name — English letters, spaces, hyphen, apostrophe only (no digits). */
+export const sanitizeProductNameInput = (raw = '') => (
+  String(raw).replace(/[^a-zA-Z\s\-'.]/g, '')
+);
+
 /**
  * Validates required text values.
  */
@@ -45,6 +50,58 @@ export const validateMaxLength = (value, max, field = 'Field') => {
   return { valid: true, error: '' };
 };
 
+const USER_EMAIL_DOMAINS = new Set([
+  'gmail.com',
+  'googlemail.com',
+  'outlook.com',
+  'hotmail.com',
+  'live.com',
+  'hotmail.co.uk',
+  'outlook.co.uk',
+]);
+
+const FAKE_EMAIL_PATTERNS = [
+  /^test@/i,
+  /^fake@/i,
+  /^dummy@/i,
+  /^temp@/i,
+  /^asdf@/i,
+  /^abc@/i,
+  /^123@/i,
+  /^user@/i,
+  /^noreply@/i,
+  /^admin@/i,
+  /^sample@/i,
+  /^demo@/i,
+  /^qwerty@/i,
+  /^xyz@/i,
+  /^aaa+@/i,
+  /^xxx+@/i,
+  /^[0-9]+@/,
+  /@example\./i,
+  /@test\./i,
+  /@mailinator\./i,
+  /@tempmail\./i,
+  /@yopmail\./i,
+  /@guerrillamail\./i,
+  /@(gmail|googlemail)\.co$/i,
+  /@gmial\./i,
+  /@gmal\./i,
+  /\.{2,}/,
+];
+
+const FAKE_LOCAL_PART_PATTERNS = [
+  /^(fake|dummy|test|temp|demo|sample|asdf|qwerty|abcd|xyz|notreal|throwaway|tempmail)([._0-9-]*)$/i,
+  /^user([0-9._-]*)$/i,
+  /^admin([0-9._-]*)$/i,
+  /\+(fake|dummy|test|temp)\b/i,
+  /(fake|dummy|notreal|throwaway|tempmail)/i,
+  /^[0-9]+$/,
+  /^[a-z]{1,2}$/i,
+];
+
+const ALLOWED_EMAIL_HINT = 'Gmail, Outlook, or Hotmail only — e.g. ali@gmail.com';
+
 /**
  * Validates email addresses with required, no-space, and standard format checks.
  */
@@ -57,6 +114,132 @@ export const validateEmail = (email) => {
   }
 
   return { valid: true, error: '', normalized: text };
+};
+
+/**
+ * Validates staff account emails — Gmail, Outlook, Hotmail only.
+ * Returns reason codes for user-friendly center alerts.
+ */
+export const validateUserEmail = (email) => {
+  const raw = toTrimmedString(email);
+
+  if (!raw) {
+    return {
+      valid: false,
+      reason: 'empty',
+      title: 'Email Required',
+      error: 'Please enter the user\'s email address to continue.',
+    };
+  }
+
+  if (/\s/.test(String(email || ''))) {
+    return {
+      valid: false,
+      reason: 'format',
+      title: 'Wrong Email Format',
+      error: 'Email cannot contain spaces.\nExample: ali@gmail.com',
+    };
+  }
+
+  if (!raw.includes('@')) {
+    return {
+      valid: false,
+      reason: 'format',
+      title: 'Wrong Email Format',
+      error: 'Email must include @ symbol.\nExample: ali@gmail.com',
+    };
+  }
+
+  const text = raw.toLowerCase();
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+
+  if (!emailRegex.test(text)) {
+    return {
+      valid: false,
+      reason: 'format',
+      title: 'Wrong Email Format',
+      error: 'Enter a complete valid email.\nExamples:\n• ali@gmail.com\n• ali@outlook.com\n• ali@hotmail.com',
+    };
+  }
+
+  const [localPart, domain] = text.split('@');
+
+  if (!localPart || localPart.length < 2) {
+    return {
+      valid: false,
+      reason: 'format',
+      title: 'Wrong Email Format',
+      error: 'The name before @ is too short.\nExample: ali@gmail.com',
+    };
+  }
+
+  if (FAKE_EMAIL_PATTERNS.some((pattern) => pattern.test(text))) {
+    return {
+      valid: false,
+      reason: 'fake',
+      title: 'Fake Email Not Allowed',
+      error: 'This looks like a test or fake email.\nUse a real personal Gmail, Outlook, or Hotmail address.',
+    };
+  }
+
+  if (!/[a-zA-Z]/.test(localPart)) {
+    return {
+      valid: false,
+      reason: 'fake',
+      title: 'Fake Email Not Allowed',
+      error: 'Email name must include letters — numbers-only addresses are not allowed.',
+    };
+  }
+
+  if (FAKE_LOCAL_PART_PATTERNS.some((pattern) => pattern.test(localPart))) {
+    return {
+      valid: false,
+      reason: 'fake',
+      title: 'Fake Email Not Allowed',
+      error: 'This looks like a dummy or test email.\nUse a real Gmail, Outlook, or Hotmail address (e.g. ali.ahmed@gmail.com).',
+    };
+  }
+
+  if (!USER_EMAIL_DOMAINS.has(domain)) {
+    return {
+      valid: false,
+      reason: 'domain',
+      title: 'Email Provider Not Allowed',
+      error: `Only Gmail, Outlook & Hotmail are allowed.\nYou entered: @${domain}\nTry: name@gmail.com`,
+    };
+  }
+
+  return {
+    valid: true,
+    reason: 'ok',
+    title: '',
+    error: '',
+    normalized: text,
+    hint: ALLOWED_EMAIL_HINT,
+  };
+};
+
+/** Map validateUserEmail result to center-alert payload */
+export const emailCheckToAlert = (check, { duplicate = false } = {}) => {
+  if (duplicate) {
+    return {
+      variant: 'duplicate',
+      title: 'Email Already Registered',
+      message: 'This email is already used by another account.\nPlease use a different Gmail, Outlook, or Hotmail address.',
+    };
+  }
+  if (check?.valid) return null;
+  const variantMap = {
+    fake: 'warning',
+    domain: 'warning',
+    format: 'warning',
+    empty: 'warning',
+  };
+  return {
+    variant: variantMap[check?.reason] || 'error',
+    title: check?.title || 'Invalid Email',
+    message: check?.error || 'Please enter a valid email.',
+  };
 };
 
 /**
@@ -174,6 +357,8 @@ export const validateBusinessInfoForm = (data = {}) => {
  */
 export default {
   validateEmail,
+  validateUserEmail,
+  emailCheckToAlert,
   validatePassword,
   validatePasswordMatch,
   validateName,

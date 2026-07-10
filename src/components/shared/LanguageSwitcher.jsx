@@ -41,11 +41,11 @@ const LanguageSwitcher = memo(({ className }) => {
         className
       )}
       dir={isRTL ? 'rtl' : 'ltr'}
-      aria-label={`Switch to ${language === 'en' ? 'Urdu' : 'English'}`}
+      aria-label={language === 'en' ? t('language.urdu', 'Urdu') : t('language.english', 'English')}
     >
       <Globe className="w-4 h-4" />
       <span className="text-sm font-medium">
-        {language === 'en' ? 'اردو' : 'EN'}
+        {language === 'en' ? t('language.switchToUr', 'اردو') : t('language.switchToEn', 'EN')}
       </span>
     </motion.button>
   );

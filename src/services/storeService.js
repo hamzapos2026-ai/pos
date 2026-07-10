@@ -10,7 +10,7 @@ import {
   collection, doc, setDoc, updateDoc, deleteDoc,
   getDocs, getDoc, serverTimestamp, query, where, limit,
 } from './firebase';
-import toast from 'react-hot-toast';
+import { toast } from 'react-hot-toast';
 
 import { db } from './firebase';
 import {
@@ -193,14 +193,44 @@ export const fetchStoresOfflineFirst = async () => {
 // ═══════════════════════════════════════════════════════════
 // GET STORE BY ID (Offline-first)
 // ═══════════════════════════════════════════════════════════
+const _storeAliasKeys = (store) => {
+  if (!store) return [];
+  return [
+    store.id,
+    store.shortCode,
+    store.storeCode,
+    store.branchCode,
+    store.code,
+    store.legacyId,
+    store.branchName,
+    store.storeName,
+    store.name,
+  ].filter(Boolean).map((k) => String(k).trim());
+};
+
+/** Match Firebase doc id OR legacy code (JM-1, JMJ, etc.). */
+export const findStoreByAnyKey = (storeKey, rows = []) => {
+  const key = String(storeKey || '').trim();
+  if (!key) return null;
+  const byId = rows.find((s) => s?.id === key);
+  if (byId) return byId;
+  const upper = key.toUpperCase();
+  return rows.find((s) => _storeAliasKeys(s).some((k) => k === key || k.toUpperCase() === upper)) || null;
+};
+
 export const getStoreById = async (storeId) => {
   if (!storeId) return null;
 
-  // 1. Local first
+  // 1. Local cache — direct id
   const local = await dbGet(STORES.STORES_CACHE, storeId);
   if (local) return normalizeStore(local);
 
-  // 2. Firebase fallback
+  // 2. Local cache — alias (JM-1, shortCode, etc.)
+  const allLocal = await dbGetAll(STORES.STORES_CACHE);
+  const aliasHit = findStoreByAnyKey(storeId, allLocal);
+  if (aliasHit) return normalizeStore(aliasHit);
+
+  // 3. Firebase fallback
   if (navigator.onLine) {
     try {
       const snap = await getDoc(doc(db, 'stores', storeId));
@@ -208,6 +238,13 @@ export const getStoreById = async (storeId) => {
         const store = normalizeStore({ id: snap.id, ...snap.data() });
         await dbPut(STORES.STORES_CACHE, store);
         return store;
+      }
+      const fbSnap = await getDocs(collection(db, 'stores'));
+      const fbRows = fbSnap.docs.map((d) => normalizeStore({ id: d.id, ...d.data() }));
+      const fbHit = findStoreByAnyKey(storeId, fbRows);
+      if (fbHit) {
+        await dbPut(STORES.STORES_CACHE, fbHit);
+        return fbHit;
       }
     } catch (err) {
       console.warn('[storeService] getStoreById:', err.message);

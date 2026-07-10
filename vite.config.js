@@ -7,10 +7,15 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { VitePWA } from "vite-plugin-pwa";
+import basicSsl from "@vitejs/plugin-basic-ssl";
 
-export default defineConfig({
+export default defineConfig(({ mode }) => {
+  const useHttps = mode === "https";
+
+  return {
   plugins: [
     react(),
+    useHttps && basicSsl(),
 
     VitePWA({
       registerType: "autoUpdate",
@@ -18,6 +23,9 @@ export default defineConfig({
       strategies: 'injectManifest',
       srcDir: 'src',
       filename: 'sw-custom.js',
+      injectManifest: {
+        maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
+      },
 
       // ── Files to include in service worker pre-cache ───────
       includeAssets: [
@@ -167,7 +175,7 @@ export default defineConfig({
         navigateFallback: "index.html",
       },
     }),
-  ],
+  ].filter(Boolean),
 
   // ── Build optimization ───────────────────────────────────
   build: {
@@ -191,6 +199,7 @@ export default defineConfig({
   server: {
     port: 3000,
     host: true,    // for network access (192.168.x.x)
-    strictPort: true,
+    strictPort: false,
   },
+};
 });

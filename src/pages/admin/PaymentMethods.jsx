@@ -1,17 +1,19 @@
 // src/pages/admin/PaymentMethods.jsx
 // ✅ FIXED — CashFlow data fix: paymentType || paymentMethod both checked
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   CreditCard, Wallet, Smartphone, Building, DollarSign,
   Search, Edit, Wifi, Database, TrendingUp, Activity,
   Receipt, ShieldAlert,
 } from 'lucide-react';
-import { collection, onSnapshot, isFirebaseReady, db } from '../../services/firebase';
-import toast from 'react-hot-toast';
+import { collection, getDocs, query, orderBy, limit, isFirebaseReady, db } from '../../services/firebase';
+import { PAYMENT_STATS_ORDERS_LIMIT } from '../../utils/ordersQueryUtils';
+import { toast } from 'react-hot-toast';
 import { useSettings } from '../../context/SettingsContext';
 import { useAuth } from '../../context/AuthContext';
 import { useNetwork } from '../../context/NetworkContext';
 import { useTheme } from '../../context/ThemeContext';
+import { useLanguage } from '../../hooks/useLanguage';
 import { logActivity } from '../../services/activityLogger';
 import { cn } from '../../utils/cn';
 import Input from '../../components/ui/Input';
@@ -23,11 +25,11 @@ import EmptyState from '../../components/admin/EmptyState';
 import StatCard from '../../components/admin/StatCard';
 
 const DEFAULT_METHODS = [
-  { key: 'cash',         label: 'Cash',              desc: 'Standard cash payments',         icon: DollarSign, color: 'green',  type: 'cash',   defaultFee: 0,   defaultSurcharge: 0  },
-  { key: 'easypaisa',    label: 'Easypaisa',         desc: 'Mobile wallet payments',          icon: Smartphone, color: 'rose',   type: 'wallet', defaultFee: 1.5, defaultSurcharge: 0  },
-  { key: 'jazzcash',     label: 'JazzCash',          desc: 'Mobile wallet payments',          icon: Smartphone, color: 'red',    type: 'wallet', defaultFee: 1.5, defaultSurcharge: 0  },
-  { key: 'bankTransfer', label: 'Bank Transfer',     desc: 'Direct bank transfers',           icon: Building,   color: 'blue',   type: 'bank',   defaultFee: 0,   defaultSurcharge: 0  },
-  { key: 'creditCard',   label: 'Credit/Debit Card', desc: 'POS card swipes',                 icon: CreditCard, color: 'purple', type: 'card',   defaultFee: 2.0, defaultSurcharge: 50 },
+  { key: 'cash',         label: 'Cash',              desc: 'Standard cash payments',         icon: DollarSign, color: 'green',  type: 'cash'   },
+  { key: 'easypaisa',    label: 'Easypaisa',         desc: 'Mobile wallet payments',          icon: Smartphone, color: 'rose',   type: 'wallet' },
+  { key: 'jazzcash',     label: 'JazzCash',          desc: 'Mobile wallet payments',          icon: Smartphone, color: 'red',    type: 'wallet' },
+  { key: 'bankTransfer', label: 'Bank Transfer',     desc: 'Direct bank transfers',           icon: Building,   color: 'blue',   type: 'bank'   },
+  { key: 'creditCard',   label: 'Credit/Debit Card', desc: 'POS card swipes',                 icon: CreditCard, color: 'purple', type: 'card'   },
 ];
 
 const ICON_COLORS = {
@@ -42,6 +44,7 @@ const fmt = (v) => `Rs ${Number(v || 0).toLocaleString()}`;
 
 const PaymentMethods = () => {
   const { isDark }              = useTheme();
+  const { t, isRTL }            = useLanguage();
   const { userData }            = useAuth();
   const { isOnline }            = useNetwork();
   const { settings, setSetting} = useSettings();
@@ -59,17 +62,25 @@ const PaymentMethods = () => {
   const [isSubmitting,    setIsSubmitting]    = useState(false);
   const [customLabel,     setCustomLabel]     = useState('');
   const [customDesc,      setCustomDesc]      = useState('');
-  const [feePercent,      setFeePercent]      = useState(0);
-  const [flatSurcharge,   setFlatSurcharge]   = useState(0);
 
-  // ── Stream orders ──────────────────────────────────────────
-  useEffect(() => {
+  // ── Load recent paid/collected orders for stats (no live listener on full collection) ──
+  const loadOrderStats = useCallback(async () => {
     if (!isFirebaseReady() || !db) return;
-    const unsub = onSnapshot(collection(db, 'orders'), snap => {
+    try {
+      const snap = await getDocs(
+        query(collection(db, 'orders'), orderBy('createdAt', 'desc'), limit(PAYMENT_STATS_ORDERS_LIMIT)),
+      );
       setOrders(snap.docs.map(d => ({ id: d.id, ...d.data() })));
-    }, console.error);
-    return () => unsub();
+    } catch (err) {
+      console.warn('[PaymentMethods] order stats load failed:', err?.message || err);
+    }
   }, []);
+
+  useEffect(() => {
+    loadOrderStats();
+    const timer = setInterval(loadOrderStats, 5 * 60 * 1000);
+    return () => clearInterval(timer);
+  }, [loadOrderStats]);
 
   // ── Configured methods ─────────────────────────────────────
   const configuredMethods = useMemo(() => DEFAULT_METHODS.map(m => {
@@ -79,8 +90,6 @@ const PaymentMethods = () => {
       ...m,
       label:        typeof cfg === 'object' ? (cfg.label        || m.label)          : m.label,
       desc:         typeof cfg === 'object' ? (cfg.desc         || m.desc)           : m.desc,
-      feePercent:   Number(typeof cfg === 'object' ? (cfg.feePercent   ?? m.defaultFee)      : m.defaultFee),
-      flatSurcharge:Number(typeof cfg === 'object' ? (cfg.flatSurcharge?? m.defaultSurcharge): m.defaultSurcharge),
       enabled:      isEnabled,
     };
   }), [pm]);
@@ -159,8 +168,7 @@ const PaymentMethods = () => {
         ...pm,
         [m.key]: typeof cfg === 'object'
           ? { ...cfg, enabled: next }
-          : { enabled: next, label: m.label, desc: m.desc,
-              feePercent: m.feePercent, flatSurcharge: m.flatSurcharge },
+          : { enabled: next, label: m.label, desc: m.desc },
       });
       await logActivity('setting:payment:toggle', userData?.uid,
         userData?.primaryStore, { methodCode: m.key, status: next ? 'enabled' : 'disabled' }
@@ -174,14 +182,11 @@ const PaymentMethods = () => {
     setSelectedMethod(m);
     setCustomLabel(m.label);
     setCustomDesc(m.desc);
-    setFeePercent(m.feePercent);
-    setFlatSurcharge(m.flatSurcharge);
     setShowEditModal(true);
   };
 
   const handleSave = async () => {
     if (!customLabel.trim()) return toast.error('Label required');
-    if (feePercent < 0 || flatSurcharge < 0) return toast.error('Fees cannot be negative');
     setIsSubmitting(true);
     try {
       await setSetting('paymentMethods', {
@@ -189,25 +194,23 @@ const PaymentMethods = () => {
         [selectedMethod.key]: {
           enabled: selectedMethod.enabled,
           label: customLabel.trim(), desc: customDesc.trim(),
-          feePercent: Number(feePercent),
-          flatSurcharge: Number(flatSurcharge),
           updatedAt: new Date().toISOString(),
         },
       });
       await logActivity('setting:payment:update', userData?.uid,
         userData?.primaryStore, { methodCode: selectedMethod.key }).catch(() => {});
       setShowEditModal(false); setSelectedMethod(null);
-      toast.success('Payment config updated!');
+      toast.success(t('admin.paymentPage.saved', 'Payment method saved'));
     } catch (e) { toast.error(e.message); }
     finally { setIsSubmitting(false); }
   };
 
   return (
-    <div className="p-4 sm:p-6 max-w-[1600px] mx-auto space-y-6">
+    <div dir={isRTL ? 'rtl' : 'ltr'} className="p-4 sm:p-6 max-w-[1600px] mx-auto space-y-6">
 
       <PageHeader icon={Wallet}
-        title="Payment Methods Console"
-        description="Enable/disable gateways, configure fees, track transaction volumes" />
+        title={t('admin.paymentPage.title', 'Payment Methods')}
+        description={t('admin.paymentPage.subtitle', 'Enable/disable payment options for cashier & biller')} />
 
       {/* Stats */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
@@ -225,7 +228,7 @@ const PaymentMethods = () => {
         <div className="flex flex-col md:flex-row gap-4">
           <div className="relative flex-1">
             <Input
-              placeholder="Search payment label or code..."
+              placeholder={t('admin.paymentPage.searchPh', 'Search payment methods…')}
               value={search}
               onChange={e => { setSearch(e.target.value); setShowSug(true); }}
               onFocus={() => setShowSug(true)}
@@ -298,7 +301,7 @@ const PaymentMethods = () => {
                        : 'bg-amber-50/30 text-gray-600 border-amber-100',
               )}>
                 <tr>
-                  {['Code','Method','Type','Fee %','Surcharge','Bills',
+                  {['Code','Method','Type','Bills',
                     'Volume','Status','Sync','Edit'].map(h => (
                     <th key={h} className="px-4 py-3.5 whitespace-nowrap">{h}</th>
                   ))}
@@ -343,8 +346,6 @@ const PaymentMethods = () => {
                           {m.type.toUpperCase()}
                         </Badge>
                       </td>
-                      <td className="px-4 py-3.5 font-semibold">{m.feePercent}%</td>
-                      <td className="px-4 py-3.5 font-semibold">Rs {m.flatSurcharge}</td>
                       <td className="px-4 py-3.5 font-semibold text-gray-400">
                         {s.txCount.toLocaleString()}
                       </td>
@@ -408,12 +409,6 @@ const PaymentMethods = () => {
                     ? 'bg-[#0a0805] border-[#2a1f0d] text-white'
                     : 'bg-white border-amber-200 text-gray-900',
                 )} />
-            </div>
-            <div className="grid grid-cols-2 gap-4">
-              <Input label="Fee (%)" type="number" value={feePercent}
-                onChange={e => setFeePercent(e.target.value)} className="w-full" />
-              <Input label="Surcharge (Rs)" type="number" value={flatSurcharge}
-                onChange={e => setFlatSurcharge(e.target.value)} className="w-full" />
             </div>
           </div>
           <div className="flex gap-2 mt-6 pt-4 border-t border-[#2a1f0d]/30">

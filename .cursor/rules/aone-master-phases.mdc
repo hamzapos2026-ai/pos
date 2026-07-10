@@ -1,0 +1,37 @@
+---
+description: Master Prompt implementation phases — what is done vs pending
+alwaysApply: false
+---
+
+# A One Master Prompt — Implementation Phases
+
+## Phase 1 — DONE (foundation)
+- Customer Persona schema (`customerPersonaSchema.js`)
+- Tenant scope defaults (`tenantScope.js`)
+- Customer repository layer (`repositories/customerRepository.js`)
+- Persona service (`services/customerPersonaService.js`)
+- Hooks: bill submit, F8 identity, manager payment, cashier payment reconcile, returns
+
+## Phase 2 — DONE (incremental, safe)
+- Admin `CustomersControl.jsx` + manager `Customers.jsx` → `customerAdminService` (no direct Firestore)
+- Biller customer cache reads → `customerRepository` + `orderRepository`
+- `tenantId` in Firestore rules (`customers`) + setup wizard flag
+- Persona offline queue via `sync_queue` (`customer:merge` in syncWorker)
+- Credit transaction → `creditHistory` append on bill/payment persona patches
+
+## Phase 3 — DONE (architecture stubs)
+- Repository stubs: `orderRepository`, `paymentRepository`, `expenseRepository`, `inventoryRepository`
+- ESLint warn: pages must not import `firebase/firestore` or heavy firebase exports
+- Dashboard stats → `dashboardStatsService` (summary docs first)
+
+## Phase 4 — OUT OF SCOPE (current phase)
+- Business Hub
+- WhatsApp Hub
+- Heavy AI / historical analytics inside Operational POS
+
+## Remaining incremental (optional, not blocking)
+- Migrate remaining admin pages (Bills, Reports, Cashier, Biller core) to repositories gradually
+- Full `tenantId` enforcement on orders/payments/expenses rules
+- Cloud Function daily summary writes (client read-only today)
+
+When implementing, preserve stable billing/cashier modules unless explicitly requested.

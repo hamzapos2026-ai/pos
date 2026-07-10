@@ -72,18 +72,21 @@ export const createAuthUser = async (email, password, displayName = '') => {
                     displayName: displayName.trim(),
                 });
             } catch (profileErr) {
-                // Non-fatal — user created, just profile update failed
                 console.warn('[secondary] updateProfile failed:', profileErr?.message);
             }
         }
+
+        const uid = credential.user.uid;
+        const userEmail = credential.user.email;
 
         // Sign out from secondary (admin primary unaffected)
         await signOut(auth);
 
         return {
-            uid: credential.user.uid,
-            email: credential.user.email,
+            uid,
+            email: userEmail,
             displayName: credential.user.displayName,
+            verificationSent: false,
         };
 
     } catch (err) {
@@ -108,25 +111,52 @@ export const createAuthUser = async (email, password, displayName = '') => {
     }
 };
 
-// ══════════════════════════════════════════════════════════════
-// SEND WELCOME / PASSWORD RESET EMAIL
-// ✅ Uses secondary auth — no admin logout risk
-// ══════════════════════════════════════════════════════════════
-export const sendWelcomeEmail = async (email) => {
-    let secondaryApp = null;
+const PASSWORD_RESET_CODE_MAP = {
+    'auth/invalid-email': 'Invalid email format.',
+    'auth/user-not-found': 'No Firebase login exists for this email. Sync the user to cloud first.',
+    'auth/network-request-failed': 'Network error. Check internet connection.',
+    'auth/too-many-requests': 'Too many reset attempts. Wait a few minutes and try again.',
+    'auth/unauthorized-continue-uri': 'App URL not allowlisted in Firebase. Use default reset (no custom URL) or add your domain in Firebase Console → Authentication → Settings → Authorized domains.',
+};
 
+/** Password reset via secondary Auth — Super Admin session stays logged in. */
+export const sendPasswordResetEmailSecondary = async (email) => {
+    const { validateUserEmail } = await import('../utils/validators');
+    const normalized = String(email || '').trim().toLowerCase();
+    const check = validateUserEmail(normalized);
+    if (!check.valid) {
+        const err = new Error(check.error || 'Invalid email');
+        err.code = 'validation/fake-email';
+        throw err;
+    }
+
+    let secondaryApp = null;
     try {
         secondaryApp = _getSecondaryApp();
         const auth = getAuth(secondaryApp);
 
-        await sendPasswordResetEmail(auth, email.trim().toLowerCase());
-        return true;
+        // No custom continue URL — avoids auth/unauthorized-continue-uri on LAN IP,
+        // Netlify preview, localhost, etc. Firebase uses the default reset link.
+        await sendPasswordResetEmail(auth, check.normalized);
+        return { success: true, email: check.normalized };
+    } catch (err) {
+        const message = PASSWORD_RESET_CODE_MAP[err?.code] || err?.message || 'Password reset failed';
+        const error = new Error(message);
+        error.code = err?.code;
+        throw error;
+    } finally {
+        await _disposeSecondary();
+    }
+};
 
+// ══════════════════════════════════════════════════════════════
+// SEND WELCOME / PASSWORD RESET EMAIL (new user setup)
+export const sendWelcomeEmail = async (email) => {
+    try {
+        await sendPasswordResetEmailSecondary(email);
+        return true;
     } catch (err) {
         console.warn('[secondary] sendWelcomeEmail failed:', err?.message);
         return false;
-
-    } finally {
-        await _disposeSecondary();
     }
 };

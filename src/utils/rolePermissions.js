@@ -3,6 +3,8 @@
 // ✅ All exports needed by UserForm, RoleSelector, PermissionMatrix
 // ✅ Offline-safe pure functions
 
+import { canViewCommissionFromMatrix } from './roleFeaturePermissions';
+
 export const ROLES = {
   superAdmin: 'superAdmin',
   admin: 'admin',
@@ -114,6 +116,8 @@ export const DEFAULT_PERMISSIONS = {
     viewFraudAlerts: true,
     resetPasswords: false,
     showProductNames: true,
+    manageCommission: true,
+    viewCommissionReports: true,
     maxDiscountPercent: 100,
     maxBillDiscountPercent: 100,
   },
@@ -139,6 +143,8 @@ export const DEFAULT_PERMISSIONS = {
     viewFraudAlerts: true,
     resetPasswords: true,
     showProductNames: false,
+    manageCommission: false,
+    viewCommissionReports: true,
     maxDiscountPercent: 50,
     maxBillDiscountPercent: 50,
   },
@@ -164,6 +170,8 @@ export const DEFAULT_PERMISSIONS = {
     viewFraudAlerts: true,
     resetPasswords: false,
     showProductNames: false,
+    manageCommission: false,
+    viewCommissionReports: false,
     maxDiscountPercent: 20,
     maxBillDiscountPercent: 20,
   },
@@ -189,6 +197,8 @@ export const DEFAULT_PERMISSIONS = {
     viewFraudAlerts: false,
     resetPasswords: false,
     showProductNames: false,
+    manageCommission: false,
+    viewCommissionReports: false,
     maxDiscountPercent: 10,
     maxBillDiscountPercent: 10,
   },
@@ -214,6 +224,8 @@ export const DEFAULT_PERMISSIONS = {
     viewFraudAlerts: false,
     resetPasswords: false,
     showProductNames: false,
+    manageCommission: false,
+    viewCommissionReports: false,
     maxDiscountPercent: 5,
     maxBillDiscountPercent: 5,
   },
@@ -255,6 +267,7 @@ export const PERMISSION_GROUPS = [
     color: 'blue',
     keys: [
       { key: 'viewAllReports', label: 'View All Reports' },
+      { key: 'viewCommissionReports', label: 'Can View Commission Reports' },
       { key: 'viewAuditLog', label: 'View Audit Log' },
       { key: 'viewFraudAlerts', label: 'View Fraud Alerts' },
       { key: 'exportData', label: 'Export Data' },
@@ -280,9 +293,25 @@ export const PERMISSION_GROUPS = [
       { key: 'viewAllStores', label: 'View All Stores' },
       { key: 'manageStores', label: 'Manage Stores' },
       { key: 'changeSettings', label: 'Change Settings' },
+      { key: 'manageCommission', label: 'Manage Commission Module' },
     ],
   },
 ];
+
+/** Manager/SuperAdmin commission report access */
+export const canViewCommissionReports = (userDoc, roleFeatureMatrix = null) => {
+  const roles = normalizeUserRoles(userDoc);
+  if (roles.some((r) => ['superAdmin', 'superadmin', 'admin'].includes(r))) return true;
+
+  if (roleFeatureMatrix && canViewCommissionFromMatrix(roles, roleFeatureMatrix)) {
+    return true;
+  }
+
+  return Boolean(userHasPermission(userDoc, 'viewCommissionReports'));
+};
+
+export const canManageCommission = (userDoc) =>
+  Boolean(userHasPermission(userDoc, 'manageCommission'));
 
 // ─── ROLE PRESETS (Quick selection in RoleSelector) ─────────
 export const ROLE_PRESETS = [

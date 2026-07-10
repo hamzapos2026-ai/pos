@@ -16,10 +16,10 @@ import { CURRENCY, DATE_FORMATS } from './constants';
  */
 export const formatCurrency = (amount, options = {}) => {
   const {
-    currency = CURRENCY.code,
-    locale = CURRENCY.locale,
+    currency = CURRENCY.CODE,
+    locale = CURRENCY.LOCALE,
     showSymbol = true,
-    symbol = CURRENCY.symbol,
+    symbol = CURRENCY.SYMBOL,
     decimals = 0,
   } = options;
 

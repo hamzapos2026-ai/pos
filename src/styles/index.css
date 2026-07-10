@@ -281,6 +281,132 @@ input[type="number"]::-webkit-outer-spin-button {
   animation: shake 0.5s ease-in-out;
 }
 
+/* Manager / Admin bills table rows */
+.bills-table-wrap table {
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.bills-table-wrap tr.bill-data-row > td.bill-data-cell {
+  vertical-align: top;
+  padding: 11px 12px;
+  line-height: 1.4;
+  font-size: 0.8125rem;
+  color: rgb(209, 213, 219);
+  border-bottom: 1px solid rgba(55, 48, 35, 0.9);
+  transition: filter 0.12s ease, background-color 0.12s ease;
+}
+
+.bills-table-wrap tr.bill-row-default > td.bill-data-cell {
+  background-color: rgba(15, 10, 4, 0.18);
+}
+
+.bills-table-wrap tr.bill-row-default-alt > td.bill-data-cell {
+  background-color: rgba(15, 10, 4, 0.32);
+}
+
+.bills-table-wrap tr.bill-row-removed > td.bill-data-cell {
+  background-color: rgba(127, 29, 29, 0.16);
+  border-bottom-color: rgba(244, 63, 94, 0.5);
+}
+
+.bills-table-wrap tr.bill-row-removed > td.bill-data-cell:first-child {
+  box-shadow: inset 3px 0 0 rgb(244, 63, 94);
+}
+
+.bills-table-wrap tr.bill-row-edited > td.bill-data-cell {
+  background-color: rgba(76, 29, 149, 0.16);
+  border-bottom-color: rgba(139, 92, 246, 0.5);
+}
+
+.bills-table-wrap tr.bill-row-edited > td.bill-data-cell:first-child {
+  box-shadow: inset 3px 0 0 rgb(139, 92, 246);
+}
+
+.bills-table-wrap tr.bill-row-new > td.bill-data-cell {
+  background-color: rgba(120, 53, 15, 0.14);
+  border-bottom-color: rgba(245, 158, 11, 0.52);
+  animation: bill-row-cell-blink 1.15s ease-in-out infinite;
+}
+
+.bills-table-wrap tr.bill-row-new > td.bill-data-cell:first-child {
+  box-shadow: inset 3px 0 0 rgb(245, 158, 11);
+}
+
+.bills-table-wrap tr.bill-data-row:hover > td.bill-data-cell {
+  filter: brightness(1.07);
+}
+
+@keyframes bill-row-cell-blink {
+  0%, 100% {
+    background-color: rgba(120, 53, 15, 0.1);
+    border-bottom-color: rgba(245, 158, 11, 0.4);
+  }
+  50% {
+    background-color: rgba(120, 53, 15, 0.24);
+    border-bottom-color: rgba(251, 191, 36, 0.65);
+  }
+}
+
+@keyframes bill-row-blink {
+  0%, 100% {
+    background-color: rgba(120, 53, 15, 0.1);
+    border-color: rgba(245, 158, 11, 0.45);
+  }
+  50% {
+    background-color: rgba(120, 53, 15, 0.24);
+    border-color: rgba(251, 191, 36, 0.65);
+  }
+}
+
+/* Admin reports table */
+.reports-table-wrap table {
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.reports-table-wrap tbody tr.reports-row-paid > td {
+  border-bottom: 1px solid rgba(16, 185, 129, 0.15);
+}
+
+.reports-table-wrap tbody tr > td {
+  border-bottom: 1px solid rgba(42, 31, 13, 0.85);
+  vertical-align: top;
+}
+
+.reports-table-wrap tbody tr:hover > td {
+  filter: brightness(1.05);
+}
+
+/* Mobile bill cards */
+.bill-card-cancelled,
+.bill-card-removed {
+  border-color: rgba(244, 63, 94, 0.65) !important;
+  background: linear-gradient(to bottom right, rgba(127, 29, 29, 0.4), rgba(69, 10, 10, 0.55)) !important;
+}
+
+.bill-card-edited {
+  border-color: rgba(139, 92, 246, 0.6) !important;
+  background: linear-gradient(to bottom right, rgba(76, 29, 149, 0.35), rgba(46, 16, 101, 0.5)) !important;
+}
+
+.bill-card-new {
+  border-color: rgba(245, 158, 11, 0.65) !important;
+  animation: bill-row-blink 1.15s ease-in-out infinite;
+}
+
+.bill-alert-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.625rem 0.875rem;
+  border-radius: 0.75rem;
+  border: 1px solid rgba(245, 158, 11, 0.45);
+  background: linear-gradient(90deg, rgba(245, 158, 11, 0.12), rgba(239, 68, 68, 0.08));
+  animation: bill-row-blink 1.4s ease-in-out infinite;
+}
+
 /* ============================================
    PRINT STYLES
    ============================================ */
@@ -325,4 +451,32 @@ input[type="number"]::-webkit-outer-spin-button {
 /* Fix flex wrapping issues for headers, stats, and action bars on mobile/tablet viewports */
 .flex-wrap {
   flex-wrap: wrap !important;
+}
+
+/* ============================================
+   RTL (Urdu) — layout mirroring
+   ============================================ */
+
+[dir="rtl"] {
+  font-family: 'Inter', 'Noto Nastaliq Urdu', 'Jameel Noori Nastaleeq', system-ui, sans-serif;
+}
+
+[dir="rtl"] .text-left {
+  text-align: right;
+}
+
+[dir="rtl"] .text-right {
+  text-align: left;
+}
+
+[dir="rtl"] input,
+[dir="rtl"] textarea,
+[dir="rtl"] select {
+  text-align: right;
+}
+
+[dir="ltr"] input,
+[dir="ltr"] textarea,
+[dir="ltr"] select {
+  text-align: left;
 }

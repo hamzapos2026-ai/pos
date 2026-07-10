@@ -3,22 +3,70 @@
 // Rule: auditLogs collection is WRITE-ONLY — never edit or delete
 // Offline: Falls back to Dexie, syncs on reconnect
 
-import { collection, addDoc, serverTimestamp } from './firebase';
+import { collection, addDoc, serverTimestamp, query, where, getDocs } from './firebase';
 import { db as firebaseDb } from './firebase';
 import { db as dexieDb } from '../db/index';
+import { getDeviceId } from '../utils/billIdGenerator';
 
-const DEVICE_ID = (() => {
+// Store the actual device reference for this session
+let SESSION_DEVICE_ID = null;
+let SESSION_BILLER_CODE = null;
+
+// Initialize device ID — will be set during login or from localStorage
+const getOrCreateDeviceId = async () => {
+  // First check if we have a session device
+  if (SESSION_DEVICE_ID) return SESSION_DEVICE_ID;
+  
+  // Try localStorage / stable helper
   try {
-    let id = localStorage.getItem('aone_device_id');
-    if (!id) {
-      id = `DEV_${Math.random().toString(36).slice(2, 9).toUpperCase()}`;
-      localStorage.setItem('aone_device_id', id);
+    const id = getDeviceId();
+    const biller = localStorage.getItem('aone_biller_code');
+    if (id && biller) {
+      SESSION_DEVICE_ID = id;
+      SESSION_BILLER_CODE = biller;
+      return id;
     }
-    return id;
-  } catch {
-    return 'DEV_UNKNOWN';
+    if (id) {
+      SESSION_DEVICE_ID = id;
+      return id;
+    }
+  } catch (e) {
+    console.warn('[Device ID] localStorage access failed:', e);
   }
-})();
+  
+  const fallbackId = `DEV_${Math.random().toString(36).slice(2, 9).toUpperCase()}`;
+  SESSION_DEVICE_ID = fallbackId;
+  
+  try {
+    localStorage.setItem('aone_device_id', fallbackId);
+  } catch (e) {
+    console.warn('[Device ID] Cannot persist fallback ID:', e);
+  }
+  
+  return fallbackId;
+};
+
+// ✅ EXPORT: Call this from login/auth to set the actual device reference
+export const setDeviceReference = (deviceId, billerCode) => {
+  SESSION_DEVICE_ID = deviceId;
+  SESSION_BILLER_CODE = billerCode;
+  try {
+    localStorage.setItem('aone_device_id', deviceId);
+    localStorage.setItem('aone_biller_code', billerCode);
+  } catch (e) {
+    console.warn('[Device ID] Cannot persist device reference:', e);
+  }
+};
+
+// Get current device identifier for audit logging
+export const getCurrentDeviceId = () => {
+  return SESSION_DEVICE_ID || getOrCreateDeviceId();
+};
+
+// Get current biller code if available
+export const getCurrentBillerCode = () => {
+  return SESSION_BILLER_CODE;
+};
 
 // ══════════════════════════════════════════════════════════════
 // CORE AUDIT LOG — IMMUTABLE
@@ -34,6 +82,8 @@ export const writeAuditLog = async ({
   amount,
   details = {},
 }) => {
+  const deviceId = await getOrCreateDeviceId();
+  
   const entry = {
     action,
     cashierId: cashierId || 'unknown',
@@ -42,7 +92,8 @@ export const writeAuditLog = async ({
     billId: billId || null,
     billSerial: billSerial || null,
     amount: amount || 0,
-    deviceId: DEVICE_ID,
+    deviceId: deviceId,
+    billerCode: SESSION_BILLER_CODE || null,
     userAgent: navigator.userAgent?.slice(0, 100) || 'unknown',
     timestamp: new Date().toISOString(),
     _immutable: true,
@@ -91,6 +142,8 @@ export const writeCashierAction = async ({
   paymentMethod,
   details = {},
 }) => {
+  const deviceId = await getOrCreateDeviceId();
+  
   const entry = {
     type,
     cashierId: cashierId || 'unknown',
@@ -100,7 +153,8 @@ export const writeCashierAction = async ({
     billSerial: billSerial || null,
     amount: amount || 0,
     paymentMethod: paymentMethod || null,
-    deviceId: DEVICE_ID,
+    deviceId: deviceId,
+    billerCode: SESSION_BILLER_CODE || null,
     performedAt: new Date().toISOString(),
     ...details,
   };

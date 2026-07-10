@@ -13,7 +13,7 @@ import { useEffect, useRef } from "react";
 // ══════════════════════════════════════════════════════════════
 const KEY_DEBOUNCE = {
   Insert: 50,
-  F8: 300,
+  F8: 60,
   Escape: 120,
   Delete: 500,
   Home: 150,
@@ -36,7 +36,6 @@ const KEY_DEBOUNCE = {
   F4: 150,
   F5: 150,
   F6: 150,
-  F7: 200,
   F9: 300,
   F10: 300,
   F11: 500,
@@ -70,7 +69,6 @@ const ALWAYS_FIRE = new Set([
   "F4",
   "F5",
   "F6",
-  "F7",
   "F8",
   "F9",
   "F10",
@@ -315,6 +313,18 @@ function useKeyboardShortcuts(shortcuts, enabled = true) {
         effectiveModifiers,
       );
       if (typeof handler !== "function") return;
+
+      // Biller modal open — only Escape / F8 reach background handlers
+      if (document.body.dataset.billerModalOpen === "true") {
+        const paymentOpen = typeof document !== "undefined"
+          && document.querySelector('[data-biller-payment-modal="true"]');
+        const modalSafe = new Set(["Escape", "F8", ...(paymentOpen ? ["Enter"] : [])]);
+        if (!modalSafe.has(baseKey)) {
+          e.preventDefault();
+          e.stopPropagation();
+          return;
+        }
+      }
 
       const editable = isEditableElement(e.target);
       const dropdownOpen = isDropdownVisible();

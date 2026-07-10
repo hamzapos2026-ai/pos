@@ -1,0 +1,463 @@
+﻿A One Jewelry POS — Folder structure export
+Generated: 2026-07-10 20:06
+Root: aone-jewelry-pos/
+(Excluded: node_modules, .git, .firebase, dist, dev-dist, coverage, audit-dist, .cursor)
+
+aone-jewelry-pos/
+|-- .github/
+|   -- workflows/
+|       -- ci.yml
+|-- docs/
+|   |-- audit/
+|   |   |-- 00-AUDIT-PACKAGE-INDEX.md
+|   |   |-- 02-GIT-BACKUP.md
+|   |   |-- 05-DEPENDENCIES.md
+|   |   |-- 06-FIREBASE-OVERVIEW.md
+|   |   |-- 07-FEATURES-STATUS.md
+|   |   |-- 08-KNOWN-BUGS-AND-LIMITATIONS.md
+|   |   |-- 09-SCREEN-RECORDING-CHECKLIST.md
+|   |   |-- 10-DATABASE-STRUCTURE.md
+|   |   -- 11-VPS-DEPLOYMENT-OVERVIEW.md
+|   |-- master/
+|   |   |-- 00-MASTER-INDEX.md
+|   |   |-- 01-ARCHITECTURE-DECISIONS.md
+|   |   |-- 02-DATABASE-MIGRATION.md
+|   |   |-- 03-API-BACKEND.md
+|   |   |-- 04-FRONTEND-UI.md
+|   |   |-- 05-VPS-DEPLOYMENT.md
+|   |   |-- 06-TESTING-OPS.md
+|   |   |-- 07-CURSOR-PROMPTS-LIBRARY.md
+|   |   |-- 08-ADMIN-MANAGER-GUIDES.md
+|   |   -- 09-ZERO-TO-LIVE-FULL-MASTER-CHAT.md
+|   |-- DEPLOYMENT_PWA.md
+|   |-- final-testing-checklist.md
+|   |-- FIREBASE_BILLING_AND_ARCHITECTURE.md
+|   |-- FIRESTORE_USAGE_AUDIT.md
+|   |-- github-push-checklist.md
+|   |-- MANAGER_IMPLEMENTATION_NOTES.md
+|   |-- MANAGER_MODULE_PLAN.md
+|   |-- MIGRATION_POSTGRESQL_STEP_ZERO.md
+|   |-- MIGRATION_ROMAN_URDU_POORA_GUIDE.md
+|   |-- NEW_SYSTEM_MIGRATION_PLAYBOOK.md
+|   |-- OFFLINE_FIRST_ARCHITECTURE.md
+|   |-- OFFLINE_PAYMENT_RECONCILIATION.md
+|   |-- OFFLINE_QUICK_START.md
+|   |-- OFFLINE_SHOP_DEPLOYMENT_GUIDE.md
+|   -- TECHNICAL_DOCUMENTATION.md
+|-- functions/
+|   |-- index.js
+|   |-- package.json
+|   -- package-lock.json
+|-- pos/
+|   |-- init.txt
+|   -- README.md
+|-- public/
+|   |-- _redirects
+|   |-- favicon.svg
+|   |-- icon-192.png
+|   |-- icon-512.png
+|   |-- icon-maskable-192.png
+|   |-- icon-maskable-512.png
+|   -- manifest.json
+|-- scripts/
+|   |-- build-audit-zip.ps1
+|   |-- deploy-firestore-rules.ps1
+|   |-- deploy-firestore-rules.sh
+|   |-- show-network-info.js
+|   -- test-firestore-rules.js
+|-- shop-server/
+|   |-- data/
+|   |   -- .gitkeep
+|   |-- index.js
+|   |-- package.json
+|   -- package-lock.json
+|-- src/
+|   |-- assets/
+|   |   |-- hero.png
+|   |   |-- react.svg
+|   |   -- vite.svg
+|   |-- components/
+|   |   |-- activity/
+|   |   |   -- ActivityLogsDashboard.jsx
+|   |   |-- admin/
+|   |   |   |-- AdminHeader.jsx
+|   |   |   |-- AdminPageGuide.jsx
+|   |   |   |-- AdminSidebar.jsx
+|   |   |   |-- ArchivePanel.jsx
+|   |   |   |-- BackupMigratePanel.jsx
+|   |   |   |-- BackupModulesPanel.jsx
+|   |   |   |-- BillerStallPanel.jsx
+|   |   |   |-- CashierDeletedFlagsPanel.jsx
+|   |   |   |-- DataManagerPanel.jsx
+|   |   |   |-- EmptyState.jsx
+|   |   |   |-- PageHeader.jsx
+|   |   |   |-- PermissionMatrix.jsx
+|   |   |   |-- ProductCatalogPanel.jsx
+|   |   |   |-- RoleSelector.jsx
+|   |   |   |-- SettingsUi.jsx
+|   |   |   |-- ShopLogoUpload.jsx
+|   |   |   |-- StatCard.jsx
+|   |   |   -- UserForm.jsx
+|   |   |-- biller/
+|   |   |   |-- BillDiscount.jsx
+|   |   |   |-- BillerCollectPaymentModal.jsx
+|   |   |   |-- BillerHeader.jsx
+|   |   |   |-- BillerPaymentModal.jsx
+|   |   |   |-- BillerStatsWidget.jsx
+|   |   |   |-- BillItemsTable.jsx
+|   |   |   |-- BillNotes.jsx
+|   |   |   |-- BillSummary.jsx
+|   |   |   |-- CreditWarning.jsx
+|   |   |   |-- CustomerDialog.jsx
+|   |   |   |-- HoldBillModal.jsx
+|   |   |   |-- InvoicePrint.jsx
+|   |   |   |-- ItemEntryForm.jsx
+|   |   |   |-- LockScreen.jsx
+|   |   |   |-- ReprintDialog.jsx
+|   |   |   |-- ReturnModal.jsx
+|   |   |   -- SalespersonSelector.jsx
+|   |   |-- cashier/
+|   |   |   |-- BillCard.jsx
+|   |   |   |-- BillRow.jsx
+|   |   |   |-- BillSearch.jsx
+|   |   |   |-- CancelModal.jsx
+|   |   |   |-- CashierHeader.jsx
+|   |   |   |-- CashierPendingBillRow.jsx
+|   |   |   |-- DeletedBillFlagModal.jsx
+|   |   |   |-- EditBillModal.jsx
+|   |   |   |-- FilterTabs.jsx
+|   |   |   |-- ManualReviewPanel.jsx
+|   |   |   |-- OfflinePaymentModal.jsx
+|   |   |   |-- PaymentMethodMenu.jsx
+|   |   |   |-- PaymentModal.jsx
+|   |   |   |-- QRScannerModal.jsx
+|   |   |   |-- RecentBillsPanel.jsx
+|   |   |   -- ViewBillModal.jsx
+|   |   |-- commission/
+|   |   |   |-- CommissionDashboard.jsx
+|   |   |   -- PayCommissionModal.jsx
+|   |   |-- layout/
+|   |   |   -- BillerLayout.jsx
+|   |   |-- manager/
+|   |   |   |-- AdvancedFilters.jsx
+|   |   |   |-- ChartCard.jsx
+|   |   |   |-- ConfirmDialog.jsx
+|   |   |   |-- DataTable.jsx
+|   |   |   |-- ExportMenu.jsx
+|   |   |   |-- ManagerPageLayout.jsx
+|   |   |   -- StatCard.jsx
+|   |   |-- reconciliation/
+|   |   |   -- ReconciliationDashboard.jsx
+|   |   |-- shared/
+|   |   |   |-- BillPaymentSyncBridge.jsx
+|   |   |   |-- BillsAdvancedToolbar.jsx
+|   |   |   |-- ConnectionIndicator.jsx
+|   |   |   |-- CustomerFilterToolbar.jsx
+|   |   |   |-- CustomerGlassFilterPanel.jsx
+|   |   |   |-- CustomerPersonaDetailPanel.jsx
+|   |   |   |-- CustomerPersonaFilterBar.jsx
+|   |   |   |-- customerTableTheme.js
+|   |   |   |-- DatePresetBar.jsx
+|   |   |   |-- DeliveryStatusBadge.jsx
+|   |   |   |-- glassUiTheme.js
+|   |   |   |-- KeyboardShortcutsHelp.jsx
+|   |   |   |-- LanguageSwitcher.jsx
+|   |   |   -- ThemeToggle.jsx
+|   |   -- ui/
+|   |       |-- AuthErrorModal.jsx
+|   |       |-- Badge.jsx
+|   |       |-- Button.jsx
+|   |       |-- CenterAlert.jsx
+|   |       |-- FieldAlertHost.jsx
+|   |       |-- Input.jsx
+|   |       |-- LoadingSpinner.jsx
+|   |       |-- Modal.jsx
+|   |       |-- PaginationBar.jsx
+|   |       -- ToastProvider.jsx
+|   |-- config/
+|   |   |-- channelConfig.js
+|   |   -- customerConfig.js
+|   |-- context/
+|   |   |-- AuthContext.jsx
+|   |   |-- LanguageContext.jsx
+|   |   |-- NetworkContext.jsx
+|   |   |-- SettingsContext.jsx
+|   |   -- ThemeContext.jsx
+|   |-- db/
+|   |   -- index.js
+|   |-- hooks/
+|   |   |-- useBarcodeScanner.js
+|   |   |-- useBillerBill.js
+|   |   |-- useBillerHotkeys.js
+|   |   |-- useBillerStallMonitor.js
+|   |   |-- useBillerTabs.js
+|   |   |-- useBillRowAlerts.js
+|   |   |-- useCameraCapture.js
+|   |   |-- useCashierDiscountPolicy.js
+|   |   |-- useCashierHotkeys.js
+|   |   |-- useCashierPayAllPolicy.js
+|   |   |-- useCommissionReport.js
+|   |   |-- useDiscountPolicy.js
+|   |   |-- useDraft.js
+|   |   |-- useEmailOtpVerification.js
+|   |   |-- useEmailVerification.js
+|   |   |-- useEnabledPaymentMethods.js
+|   |   |-- useFraudDetection.js
+|   |   |-- useKeyboardShortcuts.js
+|   |   |-- useLanguage.js
+|   |   |-- useManagerData.js
+|   |   |-- useNetwork.js
+|   |   |-- useNextSerial.js
+|   |   |-- useOfflinePayments.js
+|   |   |-- usePagination.js
+|   |   |-- useQRVerification.js
+|   |   |-- useReconciliationScope.js
+|   |   |-- useReprintBill.js
+|   |   |-- useSalesperson.js
+|   |   |-- useSessionTimeout.js
+|   |   |-- useShopBrand.js
+|   |   |-- useSound.js
+|   |   |-- useSoundFeedback.js
+|   |   |-- useSpeech.js
+|   |   -- useStoresMap.js
+|   |-- lang/
+|   |   |-- en.json
+|   |   -- ur.json
+|   |-- pages/
+|   |   |-- admin/
+|   |   |   |-- AdminDashboard.jsx
+|   |   |   |-- AuditLogs.jsx
+|   |   |   |-- BackupExport.jsx
+|   |   |   |-- BillerSummaryDiscountSettings.jsx
+|   |   |   |-- BillsControl.jsx
+|   |   |   |-- BranchManagement.jsx
+|   |   |   |-- CashFlowMonitor.jsx
+|   |   |   |-- CashierDiscountSettings.jsx
+|   |   |   |-- CommissionSettings.jsx
+|   |   |   |-- CustomersControl.jsx
+|   |   |   |-- DashboardHome.jsx
+|   |   |   |-- DeviceManagement.jsx
+|   |   |   |-- DiscountSettings.jsx
+|   |   |   |-- FirebaseAssistant.jsx
+|   |   |   |-- PaymentMethods.jsx
+|   |   |   |-- ProductCatalogSettings.jsx
+|   |   |   |-- Reconciliation.jsx
+|   |   |   |-- ReportsAnalytics.jsx
+|   |   |   |-- RolePermissions.jsx
+|   |   |   |-- RoleSettings.jsx
+|   |   |   |-- SalespersonReports.jsx
+|   |   |   |-- ShopSettings.jsx
+|   |   |   |-- SyncMonitor.jsx
+|   |   |   -- UserManagement.jsx
+|   |   |-- auth/
+|   |   |   -- LoginPage.jsx
+|   |   |-- biller/
+|   |   |   |-- BillerDashboard.jsx
+|   |   |   |-- Reports.jsx
+|   |   |   |-- SalesHistory.jsx
+|   |   |   -- useBillerSettings.js
+|   |   |-- cashier/
+|   |   |   -- CashierDashboard.jsx
+|   |   |-- manager/
+|   |   |   |-- ActivityLogs.jsx
+|   |   |   |-- Approvals.jsx
+|   |   |   |-- BillDetail.jsx
+|   |   |   |-- Bills.jsx
+|   |   |   |-- CashFlow.jsx
+|   |   |   |-- Credits.jsx
+|   |   |   |-- Customers.jsx
+|   |   |   |-- Dashboard.jsx
+|   |   |   |-- Expenses.jsx
+|   |   |   |-- ManagerDashboard.jsx
+|   |   |   |-- PaymentModal.jsx
+|   |   |   |-- Reconciliation.jsx
+|   |   |   |-- Reports.jsx
+|   |   |   |-- Returns.jsx
+|   |   |   |-- Salespersons.jsx
+|   |   |   -- Shifts.jsx
+|   |   -- setup/
+|   |       -- SetupPage.jsx
+|   |-- providers/
+|   |-- repositories/
+|   |   |-- customerRepository.js
+|   |   |-- expenseRepository.js
+|   |   |-- inventoryRepository.js
+|   |   |-- orderRepository.js
+|   |   -- paymentRepository.js
+|   |-- routes/
+|   |   |-- ProtectedRoute.jsx
+|   |   |-- RoleBasedRedirect.jsx
+|   |   |-- RoleBasedRoute.jsx
+|   |   |-- SetupRoute.jsx
+|   |   -- UnknownRouteRedirect.jsx
+|   |-- services/
+|   |   |-- activityLogger.js
+|   |   |-- approvalService.js
+|   |   |-- archiveService.js
+|   |   |-- authService.js
+|   |   |-- backupNotificationService.js
+|   |   |-- backupService.js
+|   |   |-- billerStallService.js
+|   |   |-- billPaymentWriteService.js
+|   |   |-- cashierAuditService.js
+|   |   |-- cashierCacheService.js
+|   |   |-- cashierDeletedBillService.js
+|   |   |-- cashierSyncWorker.js
+|   |   |-- commissionService.js
+|   |   |-- customerAdminService.js
+|   |   |-- customerPersonaService.js
+|   |   |-- customerQueryService.js
+|   |   |-- dailySummaryService.js
+|   |   |-- dashboardStatsService.js
+|   |   |-- deletedBillsService.js
+|   |   |-- draftService.js
+|   |   |-- emailOtpService.js
+|   |   |-- emailVerificationService.js
+|   |   |-- firebase.js
+|   |   |-- firebaseHealthService.js
+|   |   |-- firebaseUserService.js
+|   |   |-- holdBillService.js
+|   |   |-- indexedDBService.js
+|   |   |-- localBillService.js
+|   |   |-- localDB.js
+|   |   |-- localSyncService.js
+|   |   |-- managerService.js
+|   |   |-- offlinePaymentService.js
+|   |   |-- paidBillIndexService.js
+|   |   |-- paymentReconciliationService.js
+|   |   |-- qrHashService.js
+|   |   |-- returnService.js
+|   |   |-- secondaryFirebase.js
+|   |   |-- serialService.js
+|   |   |-- sessionService.js
+|   |   |-- settingsRemoteSync.js
+|   |   |-- settingsStore.js
+|   |   |-- settingsSyncWorker.js
+|   |   |-- setupGuardService.js
+|   |   |-- shiftService.js
+|   |   |-- shopApiService.js
+|   |   |-- soundService.js
+|   |   |-- storeService.js
+|   |   |-- superAdminActivityService.js
+|   |   |-- syncService.js
+|   |   |-- syncWorker.js
+|   |   |-- userSyncService.js
+|   |   -- userTombstoneService.js
+|   |-- styles/
+|   |   -- index.css
+|   |-- utils/
+|   |   |-- activityContext.js
+|   |   |-- activityLogMeta.js
+|   |   |-- activityLogNormalizer.js
+|   |   |-- adminPageGuides.js
+|   |   |-- asyncBatch.js
+|   |   |-- backupRomanUrdu.js
+|   |   |-- billChannelUtils.js
+|   |   |-- billerOrderToast.js
+|   |   |-- billIdGenerator.js
+|   |   |-- billRowStyles.js
+|   |   |-- billsFilterUtils.js
+|   |   |-- billsListHelpers.js
+|   |   |-- billsMergeUtils.js
+|   |   |-- branchAccess.js
+|   |   |-- cacheUtils.js
+|   |   |-- calculations.js
+|   |   |-- cancelledBillDisplayUtils.js
+|   |   |-- cashierCancelledIndex.js
+|   |   |-- cashierDiscountPolicy.js
+|   |   |-- cashierOrderUtils.js
+|   |   |-- cashierPayAllPolicy.js
+|   |   |-- cn.js
+|   |   |-- commission.js
+|   |   |-- constants.js
+|   |   |-- countingSpeech.js
+|   |   |-- countries.js
+|   |   |-- customerFilterUtils.js
+|   |   |-- customerHelpers.js
+|   |   |-- customerPersonaSchema.js
+|   |   |-- customerUtils.js
+|   |   |-- dateHelpers.js
+|   |   |-- datePresetUtils.js
+|   |   |-- deleteCascade.js
+|   |   |-- deletedBillDisplayUtils.js
+|   |   |-- deliveryStatus.js
+|   |   |-- deviceRegistry.js
+|   |   |-- discountPolicy.js
+|   |   |-- exportUtils.js
+|   |   |-- fieldAlert.js
+|   |   |-- firebaseQuotaConfig.js
+|   |   |-- firebaseUsageTelemetry.js
+|   |   |-- formatters.js
+|   |   |-- invoiceQrCache.js
+|   |   |-- invoiceUtils.js
+|   |   |-- managerHelpers.js
+|   |   |-- networkReachability.js
+|   |   |-- orderDiscountUtils.js
+|   |   |-- ordersQueryUtils.js
+|   |   |-- paginationConstants.js
+|   |   |-- paymentMethodsUtils.js
+|   |   |-- permissionsHints.js
+|   |   |-- reconciliationDismissedStore.js
+|   |   |-- reconciliationHints.js
+|   |   |-- roleFeaturePermissions.js
+|   |   |-- roleHome.js
+|   |   |-- rolePermissions.js
+|   |   |-- roleSettingsHints.js
+|   |   |-- roleUiSettings.js
+|   |   |-- rtl.js
+|   |   |-- serialMatch.js
+|   |   |-- shopApiConfig.js
+|   |   |-- shopLogoUtils.js
+|   |   |-- superAdminUtils.js
+|   |   |-- tabSession.js
+|   |   |-- tenantScope.js
+|   |   |-- toast.js
+|   |   -- validators.js
+|   |-- App.css
+|   |-- App.jsx
+|   |-- index.css
+|   |-- main.jsx
+|   -- sw-custom.js
+|-- test/
+|   |-- asyncBatch.spec.js
+|   |-- managerService.integration.spec.js
+|   |-- managerService.spec.js
+|   |-- serialService.spec.js
+|   |-- setup.js
+|   -- sync.conflict.spec.js
+|-- .env
+|-- .env.example
+|-- .firebaserc
+|-- .gitignore
+|-- COMMISSION_TROUBLESHOOTING.md
+|-- DEBUG_STORE_ASSIGNMENT.js
+|-- DEPLOY_FIRESTORE.md
+|-- DEPLOYMENT_GUIDE.md
+|-- diff.txt
+|-- ENTERPRISE_ARCHITECTURE.md
+|-- eslint.config.js
+|-- firebase.json
+|-- firestore.indexes.json
+|-- firestore.rules
+|-- firestore.rules.backup
+|-- FIRESTORE_SCHEMA_VERIFICATION.md
+|-- firestore-debug.log
+|-- index.html
+|-- init.txt
+|-- netlify.toml
+|-- package.json
+|-- package-lock.json
+|-- postcss.config.js
+|-- README.md
+|-- SECURITY_RULES.md
+|-- SETUP_INSTRUCTIONS.md
+|-- STORE_ASSIGNMENT_ANALYSIS.md
+|-- sw.js
+|-- tailwind.config.js
+|-- temp_correct.jsx
+|-- TEST_PLAN.md
+|-- test-query.js
+|-- TROUBLESHOOTING.md
+|-- vercel.json
+|-- vite.config.js
+-- vitest.config.js

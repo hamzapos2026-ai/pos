@@ -73,66 +73,51 @@ const StatCard = ({
             whileHover={onClick ? { y: -2, transition: { duration: 0.15 } } : {}}
             onClick={onClick}
             className={cn(
-                'relative overflow-hidden rounded-xl border border-[#2a1f0d]',
-                'bg-gradient-to-br from-[#1a1208] to-[#12100a]',
-                'transition-all duration-200',
-                onClick && 'cursor-pointer hover:border-amber-500/30',
+                'rounded-2xl p-3 sm:p-4 border transition-all duration-300 relative overflow-hidden',
+                onClick && 'cursor-pointer hover:-translate-y-1 hover:shadow-xl',
+                'bg-[#0f0a05] border-[#2a1f0d]',
                 compact ? 'p-3' : 'p-4',
             )}
         >
-            {/* Decorative gradient blob */}
             <div className={cn(
-                'absolute -top-8 -right-8 h-24 w-24 rounded-full blur-2xl opacity-30',
+                'absolute -top-10 -right-10 w-32 h-32 rounded-full bg-gradient-to-br opacity-20',
                 palette.bg,
             )} />
 
-            <div className="relative flex items-start justify-between gap-3">
-                <div className="min-w-0 flex-1">
-                    <p className={cn(
-                        'text-[10px] sm:text-xs font-medium uppercase tracking-wider text-gray-500 truncate',
-                    )}>
+            <div className="relative">
+                <div className="flex items-start justify-between gap-2 mb-2 sm:mb-3">
+                    <p className={cn('text-[10px] sm:text-xs font-medium uppercase tracking-wider leading-tight text-gray-400')}>
                         {label}
                     </p>
-
-                    {loading ? (
-                        <div className="h-7 w-24 rounded-lg bg-[#1f1a0e] animate-pulse mt-1.5" />
-                    ) : (
-                        <p className={cn(
-                            'font-bold text-gray-100 mt-1 truncate',
-                            compact ? 'text-lg' : 'text-xl sm:text-2xl',
-                        )}>
-                            {prefix}{formattedValue}{suffix}
-                        </p>
-                    )}
-
-                    {subtitle && !loading && (
-                        <p className="text-[10px] text-gray-500 mt-0.5 truncate">{subtitle}</p>
-                    )}
-
-                    {trend && !loading && (
-                        <div className={cn(
-                            'inline-flex items-center gap-1 mt-2 text-[10px] font-medium',
-                            trend.direction === 'up' && 'text-green-400',
-                            trend.direction === 'down' && 'text-red-400',
-                            trend.direction === 'neutral' && 'text-gray-500',
-                        )}>
-                            {trend.direction === 'up' && <TrendingUp className="h-3 w-3" />}
-                            {trend.direction === 'down' && <TrendingDown className="h-3 w-3" />}
-                            {trend.direction === 'neutral' && <Minus className="h-3 w-3" />}
-                            {Math.abs(trend.value)}% {trend.label || 'vs last'}
+                    {Icon && (
+                        <div className={cn('w-9 h-9 sm:w-10 sm:h-10 rounded-xl flex items-center justify-center shrink-0', palette.text)}>
+                            <Icon className="w-4 h-4 sm:w-5 sm:h-5" />
                         </div>
                     )}
                 </div>
-
-                {Icon && (
-                    <div className={cn(
-                        'flex shrink-0 items-center justify-center rounded-xl ring-1',
-                        palette.bg, palette.ring,
-                        compact ? 'h-9 w-9' : 'h-10 w-10 sm:h-11 sm:w-11',
-                    )}>
-                        <Icon className={cn(palette.text, compact ? 'h-4 w-4' : 'h-5 w-5')} />
+                <div className="flex items-end justify-between gap-2">
+                    <div className="min-w-0 flex-1">
+                        {loading ? (
+                            <div className="h-7 w-24 rounded-lg bg-[#1f1a0e] animate-pulse mt-1.5" />
+                        ) : (
+                            <p className="text-xl sm:text-2xl lg:text-3xl font-bold tracking-tight break-words text-white">
+                                {prefix}{formattedValue}{suffix}
+                            </p>
+                        )}
+                        {subtitle && !loading && (
+                            <p className="text-xs mt-1 text-gray-500">{subtitle}</p>
+                        )}
                     </div>
-                )}
+                    {trend && !loading && (
+                        <div className={cn(
+                            'flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-semibold',
+                            trend.direction === 'up' ? 'bg-emerald-500/10 text-emerald-500' : 'bg-rose-500/10 text-rose-500'
+                        )}>
+                            {trend.direction === 'up' ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
+                            {Math.abs(trend.value)}%
+                        </div>
+                    )}
+                </div>
             </div>
         </motion.div>
     );

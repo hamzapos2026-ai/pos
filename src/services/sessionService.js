@@ -1,6 +1,7 @@
 // src/services/sessionService.js
 // Encrypted offline session storage (IndexedDB + localStorage fallback)
 import { getCachedSetting, setCachedSetting } from './indexedDBService';
+import { getDeviceId } from '../utils/billIdGenerator';
 
 const IDB_KEY = 'offline_session_enc_v1';
 const LS_KEY = 'aone_offline_session_enc';
@@ -8,7 +9,7 @@ const PBKDF_SALT = 'aone_session_salt_v1';
 const PBKDF_ITER = 120000;
 
 const _getDeviceId = () => {
-  try { return localStorage.getItem('aone_device_id') || 'unknown_device'; } catch { return 'unknown_device'; }
+  try { return getDeviceId() || 'unknown_device'; } catch { return 'unknown_device'; }
 };
 
 const _bufToB64 = (buf) => {

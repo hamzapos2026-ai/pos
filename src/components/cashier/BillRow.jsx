@@ -77,7 +77,7 @@ const BillRow = memo(({ bill, index, onView, onPay, onCancel, onEdit }) => {
         {/* Serial + customer */}
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-1.5 flex-wrap">
-            <span className={`text-sm font-bold font-mono ${tx}`}>{serial}</span>
+            <span className={`text-[11px] font-bold font-mono whitespace-nowrap ${tx}`}>{serial}</span>
             {isEdited && (
               <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-purple-500/15 text-purple-400 border border-purple-500/25">
                 <Edit3 className="w-2.5 h-2.5"/>EDITED

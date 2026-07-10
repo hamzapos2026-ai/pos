@@ -86,10 +86,14 @@ export const useDiscountPolicy = ({
       }
       try {
         const approval = {
+          requestId: `apr_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
           type,
           details,
           billerId: billerId || null,
           billerName: billerName || "Unknown",
+          requestedBy: billerId || null,
+          requestedByName: billerName || "Unknown",
+          requestedByRole: "biller",
           storeId: storeId || "default",
           status: "pending",
           createdAt: serverTimestamp(),

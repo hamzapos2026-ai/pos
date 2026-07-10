@@ -1,0 +1,56 @@
+---
+description: Full project audit memory — bugs, architecture, critical paths (Jul 2026)
+alwaysApply: true
+---
+
+# A One POS — Audit Memory (Jul 2026)
+
+## Architecture
+UI → Services → Repository → Firebase. Offline-first: Dexie `aone_pos_db` + `cashier_offline_payments` IDB + `aone_local_db_v1` settings. Sync: `localSyncService`, `syncWorker` (5s), `cashierSyncWorker` (15s), `settingsSyncWorker` (30s).
+
+## Critical Bugs (fix first)
+1. ~~**Cashier instant pay**~~ — pending (cashier module)
+2. ~~**Serial collision**~~ — FIXED: `claimSerialForBilling()` in F8 checkout (online atomic + offline/LAN fallback)
+3. **Print-before-save** — receipt may print before save confirms (by design for speed; save has duplicate guard)
+4. **Manager returns blocked** — firestore.rules
+5. **Firestore security** — branch isolation missing
+6. **NetworkContext fake sync** — stub toast only
+
+## Biller Fixes Applied (Jul 2026)
+- InvoicePrint: window-first print for F8, longer QR/image wait, off-screen full render, 18s print dialog timeout, auto-retry
+- BillerDashboard: `claimSerialForBilling`, tab switch saves draft immediately, 22s print safety timer
+- holdBillService: Dexie query + holdId restore fixed
+- useOfflinePayments: broken imports fixed
+
+## Broken/Dead Code
+- `useOfflinePayments.js` — broken imports (`syncOfflinePayments`, `getMismatchRecords`, `resolveMismatch` don't exist); unused.
+- `HoldBillModal` + `holdBillService` — not wired to BillerDashboard; Dexie compound index bug.
+- `ReprintDialog.jsx` — orphaned; would list pending bills only if wired.
+- `SuperApprovals.jsx` — not routed in AdminDashboard/sidebar.
+- `BillDetail.jsx` (manager) — not routed.
+- `useBillerTabs.js`, `useBillerBill.js`, `BillerPaymentModal`, cashier `PaymentModal` — unused duplicates.
+- `SalesHistory.handleReprint` — toast stub only.
+- Dead `syncOfflinePayments` in CashierDashboard (~120 lines).
+
+## Working Flows
+- Biller F8 checkout → Dexie → cashier pending queue (online/offline same PC).
+- InvoicePrint v7 (thermal/A4/A5, QR, reprint watermark).
+- Cashier paid index (`paidBillIndexService`) + optimistic paid + cross-device `cashierPaidKeys`.
+- Offline payments via `offlinePaymentService` + `flushPendingPaymentsToFirebase` on reconnect.
+- Deleted/cancelled bill flags (`cashierDeletedBillService`).
+- Manager bills/reports/reconciliation (scoped wrappers).
+
+## Key Files
+- Biller: `BillerDashboard.jsx`, `serialService.js`, `localBillService.js`, `InvoicePrint.jsx`
+- Cashier: `CashierDashboard.jsx`, `paidBillIndexService.js`, `offlinePaymentService.js`, `cashierSyncWorker.js`
+- Manager: `managerService.js`, `branchAccess.js`, pages under `src/pages/manager/`
+- Admin: `AdminDashboard.jsx`, `userSyncService.js`, `settingsStore.js`
+- Rules: `firestore.rules`, `firestore.indexes.json`
+
+## Payment Write Fragmentation
+Canonical path `billPaymentWriteService.applyCashierPayment` exists but cashier uses `paidBillIndexService`, direct `updateDoc`, and `offlinePaymentService` instead.
+
+## Admin Gaps
+- Admin can open user edit UI but only SuperAdmin can write (`userSyncService` + Firestore rules).
+- `InvoiceSerialManagement` config fields (prefix, date, current counter) partially ignored by `serialService`.
+- `/reports/*` route is placeholder; real reports at `/manager/reports`.

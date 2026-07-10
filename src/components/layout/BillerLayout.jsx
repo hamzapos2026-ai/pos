@@ -30,7 +30,7 @@ import { useSound }   from '../../hooks/useSound';
 import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts';
 import { useDraft }   from '../../hooks/useDraft';
 import { cn }         from '../../utils/cn';
-import toast          from 'react-hot-toast';
+import { toast }          from 'react-hot-toast';
 
 // ─── Allowed roles ────────────────────────────────────────────
 const ALLOWED_ROLES = ['biller', 'admin', 'superadmin', 'manager'];

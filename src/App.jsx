@@ -10,7 +10,6 @@ import { Toaster }                    from 'react-hot-toast';
 
 // ── Context providers (that are NOT in main.jsx) ─────────────
 import { ThemeProvider }    from './context/ThemeContext';
-import { LanguageProvider } from './context/LanguageContext';
 import { NetworkProvider }  from './context/NetworkContext';
 
 // ── Auth hook ─────────────────────────────────────────────────
@@ -19,12 +18,15 @@ import { useAuth }          from './context/AuthContext';
 // ── Services ─────────────────────────────────────────────────
 import { setupAutoSync }      from './services/localSyncService';
 import { setupDeleteListener } from './utils/deleteCascade';
+import BillPaymentSyncBridge from './components/shared/BillPaymentSyncBridge';
+import FieldAlertHost from './components/ui/FieldAlertHost';
 
 // ── Route guards ─────────────────────────────────────────────
 import SetupRoute        from './routes/SetupRoute';
 import ProtectedRoute    from './routes/ProtectedRoute';
 import RoleBasedRoute    from './routes/RoleBasedRoute';
 import RoleBasedRedirect from './routes/RoleBasedRedirect';
+import UnknownRouteRedirect from './routes/UnknownRouteRedirect';
 
 // ── Pages ─────────────────────────────────────────────────────
 import SetupPage        from './pages/setup/SetupPage';
@@ -192,7 +194,7 @@ const AppRoutes = () => (
         <ProtectedRoute>
           <RoleBasedRoute
             allowedRoles={['superAdmin', 'admin']}
-            allowedPermissions={['manageUsers', 'changeSettings', 'manageStores']}
+            allowedPermissions={['createUsers', 'changeSettings', 'manageStores', 'viewAllStores']}
           >
             <AdminDashboard />
           </RoleBasedRoute>
@@ -273,10 +275,10 @@ const AppRoutes = () => (
       }
     />
 
-    {/* Errors */}
-    <Route path="/unauthorized" element={<UnauthorizedPage />} />
-    <Route path="/not-found"    element={<NotFoundPage />} />
-    <Route path="*"             element={<Navigate to="/not-found" replace />} />
+    {/* Errors + unknown URLs → login (guest) or dashboard (signed in) */}
+    <Route path="/unauthorized" element={<UnknownRouteRedirect />} />
+    <Route path="/not-found"    element={<UnknownRouteRedirect />} />
+    <Route path="*"             element={<UnknownRouteRedirect />} />
 
   </Routes>
 );
@@ -321,10 +323,11 @@ function App() {
 
   return (
     <ThemeProvider>
-      <LanguageProvider>
-        <NetworkProvider>
+      <NetworkProvider>
 
           <AppRoutes />
+          <BillPaymentSyncBridge />
+          <FieldAlertHost />
 
           {/* ✅ Single global Toaster */}
           <Toaster
@@ -362,7 +365,6 @@ function App() {
           />
 
         </NetworkProvider>
-      </LanguageProvider>
     </ThemeProvider>
   );
 }

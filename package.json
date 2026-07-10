@@ -6,14 +6,20 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:https": "vite --mode https",
+    "deploy:functions": "cd functions && npm install && cd .. && firebase deploy --only functions:deleteUserAccount",
     "test": "vitest",
     "build": "vite build",
     "lint": "eslint .",
     "preview": "vite preview",
     "network": "node scripts/show-network-info.js",
-    "dev:network": "npm run network && npm run dev"
+    "dev:network": "npm run network && npm run dev",
+    "shop:install": "cd shop-server && npm install",
+    "shop:server": "node shop-server/index.js",
+    "shop:dev": "cd shop-server && npm run dev"
   },
   "dependencies": {
+    "@clerk/clerk-react": "^5.61.8",
     "@tanstack/react-table": "^8.17.3",
     "@tanstack/react-virtual": "^3.13.25",
     "bcryptjs": "^2.4.3",
@@ -49,6 +55,7 @@
     "@firebase/rules-unit-testing": "^5.0.1",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-basic-ssl": "^1.1.0",
     "@vitejs/plugin-react": "^4.3.1",
     "autoprefixer": "^10.4.19",
     "eslint": "^10.2.1",

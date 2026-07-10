@@ -1,42 +1,127 @@
-// src/components/cashier/OfflinePaymentModal.jsx
-// ✨ NEW: Manual bill entry for OFFLINE payment when QR/bill not found
-// Used when scanned QR has no matching bill in local DB
+// Offline payment — local pending list OR receipt verify (cross-PC)
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { motion } from "framer-motion";
 import {
   X, WifiOff, Save, AlertTriangle, User, Phone,
   Banknote, Smartphone, CreditCard, Building2, Loader2,
-  Hash, Receipt,
+  Hash, Receipt, CheckCircle2, ShieldCheck,
 } from "lucide-react";
+import { showFieldAlert, showValidationAlert } from "../../utils/fieldAlert";
 import { toast } from "react-hot-toast";
-import { saveManualOfflineBill } from "../../services/offlinePaymentService";
 import { useSettings } from "../../context/SettingsContext";
-import { logCashierAction } from "../../services/cashierAuditService";
+import { isCashierOfflinePaymentEnabled } from "../../utils/roleUiSettings";
+import { useLanguage } from "../../hooks/useLanguage";
+import { decodeAndVerifyQR } from "../../services/qrHashService";
+import {
+  findOrdersBySerialInput,
+  resolveUniqueSerialMatch,
+  normalizeSerial,
+  serialMatches,
+} from "../../utils/serialMatch";
+import { getPendingOrdersForCashier, findCashierBillBySerial } from "../../services/localBillService";
+import { isCashierPendingBill } from "../../utils/cashierOrderUtils";
+import { getOrderDisplayTotal } from "../../utils/invoiceUtils";
 
-const PAY_METHODS = [
-  { v: "Cash", icon: Banknote, color: "emerald" },
-  { v: "EasyPaisa", icon: Smartphone, color: "green" },
-  { v: "JazzCash", icon: Smartphone, color: "orange" },
-  { v: "Bank Transfer", icon: Building2, color: "blue" },
-  { v: "Card", icon: CreditCard, color: "purple" },
-];
+import { getEnabledPaymentMethods } from "../../utils/paymentMethodsUtils";
+
+const PAY_METHOD_UI = {
+  cash: { icon: Banknote },
+  easypaisa: { icon: Smartphone },
+  jazzcash: { icon: Smartphone },
+  bankTransfer: { icon: Building2 },
+  creditCard: { icon: CreditCard },
+};
+
+const findPendingBySerial = (orders, serial, effectiveStatus) => {
+  const pendingOnly = orders.filter((o) => isCashierPendingBill(o));
+  const matches = findOrdersBySerialInput(pendingOnly, serial);
+  if (!matches.length) return null;
+  const found = resolveUniqueSerialMatch(pendingOnly, serial) || (matches.length === 1 ? matches[0] : null);
+  if (!found) return null;
+  const status = effectiveStatus ? effectiveStatus(found) : found.status;
+  if (status !== "pending") return { ...found, _notPending: true };
+  return found;
+};
 
 const OfflinePaymentModal = ({
   isDark,
-  userData,
+  storeId = "",
+  orders = [],
   prefilledSerial = "",
+  effectiveStatus,
   onClose,
-  onSaved,
+  onPayPending,
+  onPayReceipt,
+  onRefreshPending,
 }) => {
+  const { t } = useLanguage();
   const [billSerial, setBillSerial] = useState(prefilledSerial);
-  const [customerName, setCustomerName] = useState("Walking Customer");
-  const [customerPhone, setCustomerPhone] = useState("");
-  const [amount, setAmount] = useState("");
-  const [paymentMethod, setPaymentMethod] = useState("Cash");
-  const [notes, setNotes] = useState("");
+  const [receiptAmount, setReceiptAmount] = useState("");
+  const { settings } = useSettings();
+  const payMethods = useMemo(() => getEnabledPaymentMethods(settings).map((m) => {
+    const ui = PAY_METHOD_UI[m.key] || PAY_METHOD_UI.cash;
+    return { v: m.label, icon: ui.icon };
+  }), [settings?.paymentMethods]);
+  const defaultPay = payMethods[0]?.v || "Cash";
+  const [paymentMethod, setPaymentMethod] = useState(defaultPay);
+  useEffect(() => {
+    setPaymentMethod(defaultPay);
+  }, [defaultPay]);
+
   const [saving, setSaving] = useState(false);
-  const { getSetting } = useSettings();
+  const [dexieBills, setDexieBills] = useState([]);
+  const [lookedUpBill, setLookedUpBill] = useState(null);
+  const [lookupLoading, setLookupLoading] = useState(false);
+
+  const loadDexieBills = useCallback(async () => {
+    if (!storeId) return;
+    try {
+      const bills = await getPendingOrdersForCashier(storeId);
+      setDexieBills(bills || []);
+    } catch {
+      setDexieBills([]);
+    }
+  }, [storeId]);
+
+  const refreshPendingRef = useRef(onRefreshPending);
+  refreshPendingRef.current = onRefreshPending;
+
+  useEffect(() => {
+    loadDexieBills();
+    refreshPendingRef.current?.();
+  }, [storeId, loadDexieBills]);
+
+  const mergedOrders = useMemo(() => {
+    const map = new Map();
+    [...orders, ...dexieBills].forEach((o) => {
+      const key = o.id || o.localId || o.billSerial || o.serialNo;
+      if (key) map.set(key, o);
+    });
+    if (lookedUpBill) {
+      const key = lookedUpBill.id || lookedUpBill.localId || lookedUpBill.billSerial;
+      if (key) map.set(key, lookedUpBill);
+    }
+    return Array.from(map.values());
+  }, [orders, dexieBills, lookedUpBill]);
+
+  const pendingBills = useMemo(() => {
+    return mergedOrders.filter((o) => {
+      if (!isCashierPendingBill(o)) return false;
+      const st = effectiveStatus ? effectiveStatus(o) : o.status;
+      return st === "pending";
+    });
+  }, [mergedOrders, effectiveStatus]);
+
+  const filteredPendingBills = useMemo(() => {
+    if (!billSerial.trim()) return pendingBills;
+    return findOrdersBySerialInput(pendingBills, billSerial, { limit: 20 });
+  }, [pendingBills, billSerial]);
+
+  const serialSuggestions = useMemo(() => {
+    if (!billSerial.trim() || billSerial.length < 2) return [];
+    return findOrdersBySerialInput(pendingBills, billSerial, { limit: 8 });
+  }, [pendingBills, billSerial]);
 
   const cardBg = isDark ? "bg-[#1a1208]" : "bg-white";
   const border = isDark ? "border-[#2a1f0f]" : "border-gray-200";
@@ -46,7 +131,76 @@ const OfflinePaymentModal = ({
     ? "bg-[#120d06] border-[#2a1f0f] text-gray-100 placeholder:text-gray-600"
     : "bg-gray-50 border-gray-200 text-gray-900 placeholder:text-gray-400";
 
-  // ESC close
+  const matched = useMemo(
+    () => findPendingBySerial(mergedOrders, billSerial, effectiveStatus),
+    [mergedOrders, billSerial, effectiveStatus]
+  );
+
+  useEffect(() => {
+    if (!storeId || !billSerial.trim() || billSerial.length < 3) {
+      setLookedUpBill(null);
+      return;
+    }
+    if (matched && !matched._notPending) {
+      setLookedUpBill(null);
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      setLookupLoading(true);
+      try {
+        const found = await findCashierBillBySerial(storeId, billSerial);
+        if (!cancelled) setLookedUpBill(found);
+      } catch {
+        if (!cancelled) setLookedUpBill(null);
+      } finally {
+        if (!cancelled) setLookupLoading(false);
+      }
+    }, 350);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [storeId, billSerial, matched]);
+
+  const resolvedBill = (matched && !matched._notPending) ? matched : lookedUpBill;
+  const isLocalPending = Boolean(resolvedBill && isCashierPendingBill(resolvedBill)
+    && (!effectiveStatus || effectiveStatus(resolvedBill) === "pending"));
+  const plainSerial = useMemo(() => {
+    const decoded = decodeAndVerifyQR(billSerial);
+    if (decoded.valid && decoded.billId) return normalizeSerial(decoded.billId);
+    return normalizeSerial(billSerial);
+  }, [billSerial]);
+
+  const receiptReady = useMemo(() => {
+    if (isLocalPending) return false;
+    if (!plainSerial) return false;
+    const amt = Number(receiptAmount);
+    return amt > 0;
+  }, [isLocalPending, plainSerial, receiptAmount]);
+
+  const amount = isLocalPending
+    ? (resolvedBill?.totalAmount || resolvedBill?.grandTotal || 0)
+    : receiptReady
+    ? Number(receiptAmount)
+    : 0;
+
+  const canSave = isLocalPending || receiptReady;
+
+  useEffect(() => {
+    setBillSerial(prefilledSerial);
+  }, [prefilledSerial]);
+
+  const handleSerialChange = useCallback((raw) => {
+    const val = raw.toUpperCase().replace(/^#+/, "");
+    setBillSerial(val);
+    const decoded = decodeAndVerifyQR(val);
+    if (decoded.valid && decoded.billId) {
+      setBillSerial(normalizeSerial(decoded.billId));
+      setReceiptAmount(String(decoded.amount ?? ""));
+    }
+  }, []);
+
   useEffect(() => {
     const h = (e) => {
       if (e.key === "Escape" && !saving) {
@@ -59,93 +213,58 @@ const OfflinePaymentModal = ({
   }, [onClose, saving]);
 
   const handleSave = useCallback(async () => {
-    const disableOffline = getSetting('disableCashierOffline', false);
-    if (disableOffline) {
-      toast.error('Offline cashier mode is disabled');
+    if (!isCashierOfflinePaymentEnabled(settings)) {
+      showValidationAlert(
+        t("offlinePayDisabled", "Manual / offline bill is disabled by Super Admin"),
+        { variant: "superAdmin", title: "Feature Disabled", fieldLabel: "Super Admin" },
+      );
       return;
     }
 
-    if (!billSerial.trim()) {
-      toast.error("Bill serial required");
-      return;
-    }
-    if (!amount || Number(amount) <= 0) {
-      toast.error("Valid amount required");
+    if (!canSave) {
+      if (matched?._notPending) {
+        showValidationAlert(
+          t("offlinePayNotPending", "This bill is not pending — cannot pay"),
+          { variant: "warning", title: "Bill Not Pending", fieldLabel: "Status" },
+        );
+      } else if (!isLocalPending) {
+        showFieldAlert("offlineSerial", {
+          message: t("offlineReceiptVerifyRequired", "Enter serial and amount from printed bill"),
+        });
+      }
       return;
     }
 
     setSaving(true);
-    const tid = toast.loading("Saving offline...");
-
     try {
-      const result = await saveManualOfflineBill({
-        billSerial: billSerial.trim().toUpperCase(),
-        amount: Number(amount),
-        paymentMethod,
-        customer: {
-          name: customerName || "Walking Customer",
-          phone: customerPhone || "",
-        },
-        items: [
-          {
-            productName: "Manual Entry",
-            qty: 1,
-            price: Number(amount),
-            total: Number(amount),
-          },
-        ],
-        notes,
-        cashierId: userData?.uid || "",
-        cashierName: userData?.displayName || userData?.name || "Cashier",
-        storeId: userData?.storeId || userData?.primaryStore || "default",
-      });
-
-      if (result.success) {
-        // Log audit
-        await logCashierAction({
-          action: "OFFLINE_MANUAL_BILL_CREATED",
-          billSerial: billSerial.trim().toUpperCase(),
-          userId: userData?.uid,
-          userName: userData?.displayName || userData?.name,
-          storeId: userData?.storeId || userData?.primaryStore,
-          amount: Number(amount),
-          paymentType: paymentMethod,
-          metadata: {
-            localId: result.localId,
-            queueId: result.queueId,
-            customerName,
-            customerPhone,
-            notes,
-          },
-        });
-
-        toast.success(`Saved offline — #${billSerial}`, {
-          id: tid,
-          icon: <WifiOff className="w-4 h-4 text-blue-500" />,
-          duration: 2500,
-        });
-
-        if (onSaved) onSaved(result);
+      if (isLocalPending && onPayPending) {
+        await onPayPending(resolvedBill, paymentMethod);
         onClose();
-      } else {
-        toast.error("Save failed", { id: tid });
+        return;
+      }
+      if (receiptReady && onPayReceipt) {
+        const ok = await onPayReceipt({
+          billSerial: plainSerial,
+          amount: Number(receiptAmount),
+          paymentMethod,
+          qrVerified: true,
+          allowCrossPc: true,
+        });
+        if (ok) onClose();
       }
     } catch (err) {
       console.error(err);
-      toast.error(err.message || "Save failed", { id: tid });
+      toast.error(err.message || t("offlinePaySaveFailed", "Save failed"));
     } finally {
       setSaving(false);
     }
   }, [
-    billSerial, amount, paymentMethod, customerName,
-    customerPhone, notes, userData, onClose, onSaved,
+    canSave, isLocalPending, matched, resolvedBill, receiptReady, plainSerial, receiptAmount,
+    paymentMethod, onPayPending, onPayReceipt, onClose, settings, t,
   ]);
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4"
-      data-modal-open="true"
-    >
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4" data-modal-open="true">
       <motion.div
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
@@ -162,7 +281,6 @@ const OfflinePaymentModal = ({
         style={{ maxHeight: "95vh" }}
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Header */}
         <div className={`flex items-center justify-between px-5 py-3 border-b ${border} flex-shrink-0 ${
           isDark ? "bg-blue-900/20" : "bg-blue-50/50"
         }`}>
@@ -171,101 +289,185 @@ const OfflinePaymentModal = ({
               <WifiOff className="text-blue-500 w-5 h-5" />
             </div>
             <div>
-              <h2 className={`font-bold text-sm ${text}`}>Offline Payment</h2>
+              <h2 className={`font-bold text-sm ${text}`}>{t("offlinePayTitle", "Offline Payment")}</h2>
               <p className={`text-[10px] ${subText}`}>
-                Bill will sync when online · ESC to close
+                {t("offlinePaySubtitleCrossPc", "Biller offline bills show here · Other PC: serial + amount")}
               </p>
             </div>
           </div>
-          <motion.button
-            whileTap={{ scale: 0.9 }}
-            onClick={onClose}
-            disabled={saving}
-            className={`p-1.5 rounded-lg ${subText} hover:text-red-500 disabled:opacity-50`}
-          >
+          <motion.button whileTap={{ scale: 0.9 }} onClick={onClose} disabled={saving}
+            className={`p-1.5 rounded-lg ${subText} hover:text-red-500 disabled:opacity-50`}>
             <X className="w-4 h-4" />
           </motion.button>
         </div>
 
-        {/* Warning */}
-        <div className={`px-5 py-2 flex items-start gap-2 ${
-          isDark ? "bg-amber-900/15" : "bg-amber-50"
-        } border-b ${border}`}>
-          <AlertTriangle className="w-4 h-4 text-amber-500 flex-shrink-0 mt-0.5" />
-          <p className={`text-[11px] ${text}`}>
-            Bill not found locally. Saving as offline manual entry — will sync when internet returns.
-          </p>
+        <div className={`px-5 py-2 flex items-start gap-2 border-b ${border} ${
+          canSave
+            ? isDark ? "bg-emerald-900/15" : "bg-emerald-50"
+            : isDark ? "bg-amber-900/15" : "bg-amber-50"
+        }`}>
+          {canSave ? (
+            <>
+              <CheckCircle2 className="w-4 h-4 text-emerald-500 flex-shrink-0 mt-0.5" />
+              <p className={`text-[11px] ${text}`}>
+                {isLocalPending
+                  ? t("offlinePayBillFound", "Pending bill found — amount is fixed from bill.")
+                  : t("offlineReceiptVerified", "Serial + amount ready — save payment.")}
+              </p>
+            </>
+          ) : (
+            <>
+              <AlertTriangle className="w-4 h-4 text-amber-500 flex-shrink-0 mt-0.5" />
+              <p className={`text-[11px] ${text}`}>
+                {matched?._notPending
+                  ? t("offlinePayNotPending", "This bill is not pending — cannot pay")
+                  : t("offlineReceiptHint", "Other PC? Enter serial + amount from printed bill (or scan QR).")}
+              </p>
+            </>
+          )}
         </div>
 
-        {/* Body */}
         <div className="flex-1 overflow-y-auto p-4 space-y-3">
-
-          {/* Bill Serial */}
           <div>
             <label className={`text-[10px] font-bold uppercase tracking-wider block mb-1 ${subText}`}>
-              <Hash className="inline w-3 h-3 mr-0.5" /> Bill Serial *
+              <Hash className="inline w-3 h-3 mr-0.5" /> {t("offlinePaySerialLabel", "Bill Serial")} *
             </label>
             <input
               type="text"
               value={billSerial}
-              onChange={(e) => setBillSerial(e.target.value.toUpperCase())}
-              placeholder="AON-BIL-XXXXXX-000001"
-              autoFocus={!prefilledSerial}
+              onChange={(e) => handleSerialChange(e.target.value)}
+              placeholder="000030 or AON-BIL-050626-000030"
+              autoFocus
               className={`w-full px-3 py-2 rounded-lg border text-sm font-mono font-bold uppercase focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 transition-all ${inputBg}`}
             />
+            <p className={`text-[10px] mt-1 ${subText}`}>
+              {t("offlineSerialPartialHint", "Type last digits e.g. 000030")}
+            </p>
+            {serialSuggestions.length > 0 && !isLocalPending && (
+              <div className="mt-1.5 flex flex-wrap gap-1">
+                {serialSuggestions.map((bill) => {
+                  const serial = normalizeSerial(bill.billSerial || bill.serialNo);
+                  return (
+                    <button
+                      key={bill.id || serial}
+                      type="button"
+                      onClick={() => {
+                        setBillSerial(serial);
+                        setReceiptAmount("");
+                      }}
+                      className={`px-2 py-1 rounded-md text-[10px] font-mono font-bold border ${
+                        isDark
+                          ? "border-amber-500/40 text-amber-400 hover:bg-amber-500/10"
+                          : "border-amber-300 text-amber-700 hover:bg-amber-50"
+                      }`}
+                    >
+                      #{serial}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+            {lookupLoading && (
+              <p className={`text-[10px] mt-1 ${subText} flex items-center gap-1`}>
+                <Loader2 className="w-3 h-3 animate-spin" />
+                {t("offlineSerialSearching", "Searching local & cloud bills...")}
+              </p>
+            )}
+            {isLocalPending && resolvedBill && !serialMatches(billSerial, resolvedBill.billSerial || resolvedBill.serialNo) && (
+              <p className="text-[10px] mt-1 text-emerald-500 font-semibold">
+                ✓ {t("offlineSerialMatched", "Matched")}: #{resolvedBill.billSerial || resolvedBill.serialNo}
+              </p>
+            )}
           </div>
 
-          {/* Amount */}
-          <div>
-            <label className={`text-[10px] font-bold uppercase tracking-wider block mb-1 ${subText}`}>
-              Amount (Rs.) *
-            </label>
-            <input
-              type="number"
-              value={amount}
-              onChange={(e) => setAmount(e.target.value)}
-              placeholder="0"
-              min="1"
-              autoFocus={!!prefilledSerial}
-              className={`w-full px-3 py-3 rounded-lg border text-lg font-extrabold text-amber-500 focus:outline-none focus:border-amber-500 focus:ring-2 focus:ring-amber-500/20 transition-all ${inputBg}`}
-            />
-          </div>
-
-          {/* Customer */}
-          <div className="grid grid-cols-2 gap-2">
+          {(filteredPendingBills.length > 0 || pendingBills.length > 0) && (
             <div>
-              <label className={`text-[10px] font-bold uppercase tracking-wider block mb-1 ${subText}`}>
-                <User className="inline w-3 h-3 mr-0.5" /> Customer
+              <label className={`text-[10px] font-bold uppercase tracking-wider block mb-1.5 ${subText}`}>
+                {t("offlinePayPendingList", "Pending bills (offline + online)")} ({pendingBills.length})
               </label>
-              <input
-                type="text"
-                value={customerName}
-                onChange={(e) => setCustomerName(e.target.value)}
-                placeholder="Walking Customer"
-                className={`w-full px-3 py-2 rounded-lg border text-sm focus:outline-none focus:border-amber-500 focus:ring-2 focus:ring-amber-500/20 transition-all ${inputBg}`}
-              />
+              <div className={`max-h-28 overflow-y-auto rounded-xl border ${border} divide-y ${isDark ? "divide-white/5" : "divide-gray-100"}`}>
+                {(filteredPendingBills.length ? filteredPendingBills : pendingBills).map((bill) => {
+                  const serial = normalizeSerial(bill.billSerial || bill.serialNo);
+                  const selected = plainSerial === serial || serialMatches(billSerial, serial);
+                  return (
+                    <button
+                      key={bill.id || serial}
+                      type="button"
+                      onClick={() => {
+                        setBillSerial(serial);
+                        setReceiptAmount("");
+                      }}
+                      className={`w-full px-3 py-2 text-start flex items-center justify-between gap-2 transition-colors ${
+                        selected ? isDark ? "bg-amber-500/15" : "bg-amber-50" : isDark ? "hover:bg-white/[0.03]" : "hover:bg-gray-50"
+                      }`}
+                    >
+                      <span className={`text-xs font-mono font-bold ${text}`}>#{serial}</span>
+                      <span className="text-xs font-black text-amber-500 tabular-nums">
+                        Rs.{getOrderDisplayTotal(bill).toLocaleString()}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
-            <div>
-              <label className={`text-[10px] font-bold uppercase tracking-wider block mb-1 ${subText}`}>
-                <Phone className="inline w-3 h-3 mr-0.5" /> Phone
-              </label>
-              <input
-                type="tel"
-                value={customerPhone}
-                onChange={(e) => setCustomerPhone(e.target.value)}
-                placeholder="03XX..."
-                className={`w-full px-3 py-2 rounded-lg border text-sm focus:outline-none focus:border-amber-500 focus:ring-2 focus:ring-amber-500/20 transition-all ${inputBg}`}
-              />
-            </div>
-          </div>
+          )}
 
-          {/* Payment Method */}
+          {isLocalPending && (
+            <div className={`rounded-xl border ${border} p-3 space-y-2 ${isDark ? "bg-white/[0.02]" : "bg-gray-50/80"}`}>
+              <div className="flex items-center gap-2">
+                <Receipt className="w-4 h-4 text-amber-500" />
+                <span className={`text-xs font-bold ${text}`}>#{resolvedBill.billSerial || resolvedBill.serialNo}</span>
+                {(resolvedBill.isLocalOnly || resolvedBill.source === 'dexie') && (
+                  <span className={`text-[9px] px-1.5 py-0 rounded font-bold ${isDark ? "bg-blue-500/20 text-blue-400" : "bg-blue-100 text-blue-700"}`}>
+                    {t("offlinePayBillerBill", "BILLER OFFLINE")}
+                  </span>
+                )}
+              </div>
+              <p className="text-2xl font-black text-amber-500 tabular-nums">Rs.{amount.toLocaleString()}</p>
+              <div className="text-[11px]">
+                <span className={subText}>
+                  <User className="inline w-3 h-3 mr-0.5" />
+                  {resolvedBill.customer?.name || t("walkInCustomer", "Walk-in")}
+                </span>
+              </div>
+            </div>
+          )}
+
+          {!isLocalPending && (
+            <div className={`rounded-xl border ${border} p-3 space-y-3 ${isDark ? "bg-white/[0.02]" : "bg-gray-50/80"}`}>
+              <div className="flex items-center gap-2">
+                <ShieldCheck className="w-4 h-4 text-blue-500" />
+                <span className={`text-xs font-bold ${text}`}>
+                  {t("offlineReceiptSection", "From printed bill (other PC)")}
+                </span>
+              </div>
+              <div>
+                <label className={`text-[10px] font-bold uppercase tracking-wider block mb-1 ${subText}`}>
+                  {t("offlineReceiptAmount", "Amount (Rs.) from bill")} *
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  value={receiptAmount}
+                  onChange={(e) => setReceiptAmount(e.target.value)}
+                  placeholder="0"
+                  className={`w-full px-3 py-2 rounded-lg border text-lg font-extrabold text-amber-500 focus:outline-none focus:border-amber-500 ${inputBg}`}
+                />
+              </div>
+              {receiptReady && (
+                <p className="text-[11px] text-emerald-500 font-semibold">
+                  ✓ {plainSerial} · Rs.{Number(receiptAmount).toLocaleString()}
+                </p>
+              )}
+            </div>
+          )}
+
           <div>
             <label className={`text-[10px] font-bold uppercase tracking-wider block mb-1.5 ${subText}`}>
-              Payment Method
+              {t("offlinePayMethod", "Payment Method")}
             </label>
             <div className="flex gap-1.5 flex-wrap">
-              {PAY_METHODS.map((m) => {
+              {payMethods.map((m) => {
                 const Icon = m.icon;
                 const active = paymentMethod === m.v;
                 return (
@@ -273,12 +475,11 @@ const OfflinePaymentModal = ({
                     key={m.v}
                     whileTap={{ scale: 0.95 }}
                     onClick={() => setPaymentMethod(m.v)}
-                    className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-[11px] font-semibold transition-all ${
+                    disabled={!canSave && !receiptAmount}
+                    className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-[11px] font-semibold transition-all disabled:opacity-40 ${
                       active
                         ? "border-amber-500 bg-amber-500/15 text-amber-500"
-                        : isDark
-                        ? "border-[#2a1f0f] text-gray-400 hover:border-amber-500/30"
-                        : "border-gray-200 text-gray-500 hover:border-amber-300"
+                        : isDark ? "border-[#2a1f0f] text-gray-400" : "border-gray-200 text-gray-500"
                     }`}
                   >
                     <Icon className="w-3 h-3" />
@@ -288,44 +489,17 @@ const OfflinePaymentModal = ({
               })}
             </div>
           </div>
-
-          {/* Notes */}
-          <div>
-            <label className={`text-[10px] font-bold uppercase tracking-wider block mb-1 ${subText}`}>
-              Notes (Optional)
-            </label>
-            <input
-              type="text"
-              value={notes}
-              onChange={(e) => setNotes(e.target.value)}
-              placeholder="Any details..."
-              className={`w-full px-3 py-2 rounded-lg border text-sm focus:outline-none focus:border-amber-500 focus:ring-2 focus:ring-amber-500/20 transition-all ${inputBg}`}
-            />
-          </div>
         </div>
 
-        {/* Footer */}
         <div className={`px-5 py-3 border-t ${border} flex items-center gap-2 flex-shrink-0`}>
-          <motion.button
-            whileTap={{ scale: 0.97 }}
-            onClick={onClose}
-            disabled={saving}
-            className={`px-4 py-2 rounded-lg border ${border} text-xs font-medium ${subText} hover:bg-gray-500/5 disabled:opacity-50`}
-          >
-            Cancel
+          <motion.button whileTap={{ scale: 0.97 }} onClick={onClose} disabled={saving}
+            className={`px-4 py-2 rounded-lg border ${border} text-xs font-medium ${subText} disabled:opacity-50`}>
+            {t("cancel", "Cancel")}
           </motion.button>
-          <motion.button
-            whileTap={{ scale: 0.98 }}
-            onClick={handleSave}
-            disabled={saving || !billSerial.trim() || !amount}
-            className="flex-1 py-2 rounded-lg bg-gradient-to-r from-blue-500 to-blue-600 text-white text-sm font-bold flex items-center justify-center gap-2 shadow-lg shadow-blue-500/25 disabled:opacity-50 transition-all"
-          >
-            {saving ? (
-              <Loader2 className="w-4 h-4 animate-spin" />
-            ) : (
-              <Save className="w-4 h-4" />
-            )}
-            {saving ? "Saving..." : "Save Offline"}
+          <motion.button whileTap={{ scale: 0.98 }} onClick={handleSave} disabled={saving || !canSave}
+            className="flex-1 py-2 rounded-lg bg-gradient-to-r from-blue-500 to-blue-600 text-white text-sm font-bold flex items-center justify-center gap-2 shadow-lg shadow-blue-500/25 disabled:opacity-50">
+            {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+            {saving ? t("offlinePaySaving", "Saving...") : t("offlinePaySave", "Save Offline")}
           </motion.button>
         </div>
       </motion.div>

@@ -1,9 +1,18 @@
 // src/hooks/useSound.js
-// ✅ FIXED FINAL v4 — speak + speakNumber added
 
 import { useState, useCallback, useEffect, useRef } from "react";
 import { useAuth } from "../context/AuthContext";
 import { playSound, initAudio } from "../services/soundService";
+import {
+  speakCountingPhrase,
+  ensureSpeechVoices,
+  ensureUrduVoicesReady,
+  primeSpeechEngine,
+  bindUrduCountingVoice,
+  pickSpeechVoice,
+  pickUrduCountingVoice,
+  DEFAULT_COUNTING_SPEECH,
+} from "../utils/countingSpeech";
 
 const _storageKey = (uid) => `aone_sound_enabled_${uid || "default"}`;
 
@@ -40,23 +49,40 @@ const _writeEnabled = (uid, val) => {
   } catch { }
 };
 
-// ✅ Internal speech engine — cancel + speak
 const _doSpeak = (text, lang = "en-US") => {
   if (!text) return;
   if (typeof window === "undefined") return;
   if (!window.speechSynthesis) return;
-  try {
-    window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(String(text));
-    utterance.lang = lang;
-    // Slightly slower for Urdu for clearer pronunciation
-    utterance.rate = (lang === 'ur-PK' || lang === 'ur') ? 0.9 : 1;
-    utterance.pitch = 1;
-    utterance.volume = 1;
-    window.speechSynthesis.speak(utterance);
-  } catch {
-    /* browser blocked — ignore */
-  }
+
+  const isUrdu = lang === "ur-PK" || lang === "ur";
+
+  ensureSpeechVoices().then((voices) => {
+    try {
+      window.speechSynthesis.cancel();
+      if (window.speechSynthesis.paused) window.speechSynthesis.resume();
+
+      const picked = isUrdu
+        ? pickUrduCountingVoice(voices)
+        : {
+            voice: pickSpeechVoice(lang, voices),
+            langTag: lang,
+            pitch: DEFAULT_COUNTING_SPEECH.en.pitch,
+          };
+
+      const utterance = new SpeechSynthesisUtterance(String(text));
+      utterance.lang = picked.langTag || picked.voice?.lang || (isUrdu ? "ur-PK" : lang);
+      if (picked.voice) utterance.voice = picked.voice;
+
+      utterance.rate = isUrdu ? DEFAULT_COUNTING_SPEECH.ur.rate : DEFAULT_COUNTING_SPEECH.en.rate;
+      utterance.pitch = isUrdu
+        ? (picked.pitch ?? DEFAULT_COUNTING_SPEECH.ur.pitch)
+        : DEFAULT_COUNTING_SPEECH.en.pitch;
+      utterance.volume = 1;
+      window.speechSynthesis.speak(utterance);
+    } catch {
+      /* browser blocked — ignore */
+    }
+  });
 };
 
 export function useSound() {
@@ -74,6 +100,12 @@ export function useSound() {
 
   useEffect(() => {
     try { initAudio(); } catch { }
+    ensureSpeechVoices()
+      .then(() => {
+        bindUrduCountingVoice();
+        primeSpeechEngine();
+      })
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -101,41 +133,32 @@ export function useSound() {
     _writeEnabled(userId, next);
   }, [userId]);
 
-  // ── Sound effects ─────────────────────────────────────────
   const play = useCallback((name) => {
     if (!enabledRef.current) return;
     try { playSound(name); } catch { }
   }, []);
 
-  // ✅ speak — koi bhi text, koi bhi language
   const speak = useCallback((text, lang = "en-US") => {
     if (!enabledRef.current) return;
     _doSpeak(text, lang);
   }, []);
 
-  // ✅ speakNumber — sirf number bolega
-  // "5" → "five" (en-US)
-  // "5" → "5" (ur-PK)
   const speakNumber = useCallback((num, lang = "en-US") => {
     if (!enabledRef.current) return;
     if (num === null || num === undefined) return;
     _doSpeak(String(num), lang);
   }, []);
 
-  // ✅ speakPriceQty — "100 times 2 equals 200"
-  const speakPriceQty = useCallback((price, qty, lang = "en-US") => {
-    if (!enabledRef.current) return;
-    const p = Number(price || 0);
-    const q = Number(qty || 0);
-    const total = p * q;
-    const isUrdu = lang === "ur-PK" || lang === "ur";
-    const text = isUrdu
-      ? `${p} ضرب ${q} برابر ${total}`
-      : `${p} times ${q} equals ${total}`;
-    _doSpeak(text, lang);
+  const speakPriceQty = useCallback((price, qty, lang = "en-US", options = {}) => {
+    const force = options?.force === true;
+    if (!force && !enabledRef.current) return;
+    const phraseLang = /^ur/i.test(String(lang)) ? "ur" : "en";
+    const { rate, pitch } = options;
+    void speakCountingPhrase(price, qty, phraseLang, { rate, pitch });
   }, []);
 
-  // ── Named helpers ─────────────────────────────────────────
+  const speakCounting = speakPriceQty;
+
   const playAdd = useCallback(() => play(SOUNDS.ADD), [play]);
   const playDelete = useCallback(() => play(SOUNDS.DELETE), [play]);
   const playError = useCallback(() => play(SOUNDS.ERROR), [play]);
@@ -150,15 +173,17 @@ export function useSound() {
   const playKeyPress = useCallback(() => play(SOUNDS.KEY_PRESS), [play]);
   const playBarcode = useCallback(() => play(SOUNDS.BARCODE), [play]);
   const playWarning = useCallback(() => play(SOUNDS.WARNING), [play]);
+  const playLog = useCallback(() => play("log"), [play]);
 
   return {
     isSoundEnabled,
     toggleSound,
     setSoundEnabled,
     play,
-    speak,         // ✅ new
-    speakNumber,   // ✅ new
-    speakPriceQty, // ✅ new
+    speak,
+    speakNumber,
+    speakPriceQty,
+    speakCounting,
     playAdd,
     playDelete,
     playError,
@@ -173,6 +198,7 @@ export function useSound() {
     playKeyPress,
     playBarcode,
     playWarning,
+    playLog,
   };
 }
 

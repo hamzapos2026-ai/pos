@@ -34,7 +34,7 @@ const createTabState = (tabId, tabIndex = 0) => ({
     name: "Walking Customer", phone: "", city: "", market: "",
   },
   billDiscount: 0,
-  billDiscountType: "percent",
+  billDiscountType: "fixed",
   subtotal: 0,
   grandTotal: 0,
   totalItems: 0,

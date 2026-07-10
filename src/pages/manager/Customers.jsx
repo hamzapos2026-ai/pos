@@ -2,26 +2,44 @@
 // Purpose: Customer management — Firebase live sync + offline + walk-in fix
 
 import React, {
-  useState, useEffect, useCallback, useRef, useMemo,
+  useState, useEffect, useCallback, useRef, useMemo, startTransition,
 } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Users, Plus, Edit3, X, Loader2, History,
   Wifi, WifiOff, RefreshCw, ShoppingBag,
-  AlertTriangle, Search, ChevronLeft, ChevronRight,
-  UserCheck, UserX,
+  AlertTriangle, MapPin,
 } from 'lucide-react';
-import toast from 'react-hot-toast';
+import { toast } from 'react-hot-toast';
 import {
-  collection, doc, onSnapshot, getDocs,
-  addDoc, updateDoc, query, orderBy,
-  limit, startAfter, serverTimestamp, where,
-} from 'firebase/firestore';
-import { db } from '../../services/firebase';
+  searchCustomers,
+  browseCustomers,
+  loadCustomerOrders,
+  loadOrdersForCustomerMetrics,
+  saveCustomer,
+  CUSTOMER_SEARCH_PAGE_SIZE,
+} from '../../services/customerAdminService';
+import CustomerGlassFilterPanel from '../../components/shared/CustomerGlassFilterPanel';
+import CustomerPersonaDetailPanel from '../../components/shared/CustomerPersonaDetailPanel';
 import {
-  formatPKR, getInitials, truncate,
-} from '../../utils/managerHelpers';
+  customersTableShell, customersTableHead, customersTableRow, customersTh, customersTd,
+  glassActionBtn,
+} from '../../components/shared/customerTableTheme';
+import PaginationBar from '../../components/ui/PaginationBar';
+import { glassBtnGhost, glassBtnPrimary, glassIcon } from '../../components/shared/glassUiTheme';
+import { formatPKR, getInitials, truncate } from '../../utils/managerHelpers';
 import ExportMenu from '../../components/manager/ExportMenu';
+import { useLanguage } from '../../hooks/useLanguage';
+import { useAuth } from '../../context/AuthContext';
+import {
+  resolveUserBranchIds,
+  resolveUserPrimaryBranch,
+  isElevatedRole,
+} from '../../utils/branchAccess';
+import { mapCustomerRowPersona, applyCustomerFilters, countCustomerFilters } from '../../utils/customerFilterUtils';
+import { getCustomerDisplayName } from '../../utils/customerHelpers';
+import { cn } from '../../utils/cn';
+import useStoresMap, { resolveStoreName, resolveEffectiveStoreId } from '../../hooks/useStoresMap';
 
 // ═══════════════════════════════════════════════════════════
 // HELPERS
@@ -98,57 +116,39 @@ const getOrderMatchInfo = (order) => ({
   name: (order.customer?.name || order.customerName || '').toLowerCase().trim(),
 });
 
-const PAGE_SIZE = 20;
+const DEFAULT_PAGE_SIZE = 20;
 
-// ═══════════════════════════════════════════════════════════
-// GET STORE ID — from auth/session/localStorage
-// ═══════════════════════════════════════════════════════════
-const getStoreId = () => {
-  // Try multiple sources where your app stores storeId
-  try {
-    // Option 1: localStorage
-    const stored = localStorage.getItem('storeId') ||
-                   localStorage.getItem('currentStoreId') ||
-                   localStorage.getItem('branchId');
-    if (stored) return stored;
-
-    // Option 2: sessionStorage
-    const session = sessionStorage.getItem('storeId');
-    if (session) return session;
-
-    // Option 3: from manager auth user object
-    const managerUser = JSON.parse(
-      localStorage.getItem('managerUser') ||
-      localStorage.getItem('user') || '{}'
-    );
-    if (managerUser?.storeId) return managerUser.storeId;
-    if (managerUser?.branchId) return managerUser.branchId;
-  } catch { /* ignore */ }
-  return null;
-};
+const SORT_OPTIONS = [
+  { key: 'totalSpent', label: 'Total Spent', dir: 'desc' },
+  { key: 'purchaseCount', label: 'Total Bills', dir: 'desc' },
+  { key: 'name', label: 'Name A→Z', dir: 'asc' },
+  { key: 'name', label: 'Name Z→A', dir: 'desc' },
+  { key: 'lastOrderDate', label: 'Last Visit', dir: 'desc' },
+];
 
 // ═══════════════════════════════════════════════════════════
 // ONLINE STATUS HOOK
 // ═══════════════════════════════════════════════════════════
 const useOnlineStatus = () => {
+  const { t } = useLanguage();
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   useEffect(() => {
-    const on  = () => { setIsOnline(true);  toast.success('Back online — syncing…', { icon: '🟢' }); };
-    const off = () => { setIsOnline(false); toast('Offline — cached data shown', { icon: '🔴' }); };
+    const on  = () => { setIsOnline(true);  toast.success(t('manager.common.backOnline', 'Back online — syncing…'), { icon: '🟢' }); };
+    const off = () => { setIsOnline(false); toast(t('manager.common.offlineCached', 'Offline — cached data shown'), { icon: '🔴' }); };
     window.addEventListener('online',  on);
     window.addEventListener('offline', off);
     return () => {
       window.removeEventListener('online',  on);
       window.removeEventListener('offline', off);
     };
-  }, []);
+  }, [t]);
   return isOnline;
 };
 
 // ═══════════════════════════════════════════════════════════
 // SYNC STATUS BAR
 // ═══════════════════════════════════════════════════════════
-const SyncBar = ({ isOnline, dataSource, syncing, lastSync }) => (
+const SyncBar = ({ isOnline, dataSource, syncing, lastSync, t }) => (
   <div className={`
     flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[10px] font-medium border
     ${isOnline
@@ -163,10 +163,10 @@ const SyncBar = ({ isOnline, dataSource, syncing, lastSync }) => (
         : <Wifi className="w-2.5 h-2.5" />
       : <WifiOff className="w-2.5 h-2.5" />}
     <span>
-      {!isOnline ? 'Offline'
-        : syncing ? 'Syncing…'
-        : dataSource === 'live' ? 'Live'
-        : 'Cached'}
+      {!isOnline ? t('manager.common.offline', 'Offline')
+        : syncing ? t('manager.common.syncing', 'Syncing…')
+        : dataSource === 'live' ? t('manager.common.live', 'Live')
+        : t('manager.common.cached', 'Cached')}
     </span>
     {lastSync && (
       <span className="opacity-50 ml-1">
@@ -179,7 +179,8 @@ const SyncBar = ({ isOnline, dataSource, syncing, lastSync }) => (
 // ═══════════════════════════════════════════════════════════
 // CUSTOMER FORM MODAL
 // ═══════════════════════════════════════════════════════════
-const CustomerForm = ({ isOpen, onClose, customer, isOnline }) => {
+const CustomerForm = ({ isOpen, onClose, customer, isOnline, storeId }) => {
+  const { t } = useLanguage();
   const emptyForm = {
     name: '', phone: '', email: '',
     city: '', address: '', creditLimit: 0,
@@ -199,53 +200,48 @@ const CustomerForm = ({ isOpen, onClose, customer, isOnline }) => {
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
 
   const handleSubmit = async () => {
-    if (!form.name?.trim()) { toast.error('Name is required'); return; }
+    if (!form.name?.trim()) { toast.error(t('manager.common.nameRequired', 'Name is required')); return; }
     setSaving(true);
     try {
-      const storeId = getStoreId();
+      if (!storeId) {
+        toast.error(t('manager.customersPage.branchRequired', 'Branch assignment required'));
+        return;
+      }
       const payload = {
         name:        form.name.trim(),
-        nameLower:   form.name.trim().toLowerCase(),
         phone:       form.phone.trim(),
-        phoneNormalized: normalizePhone(form.phone),
         email:       form.email.trim(),
         city:        form.city.trim(),
         address:     form.address.trim(),
         creditLimit: Number(form.creditLimit) || 0,
-        updatedAt:   serverTimestamp(),
-        ...(storeId ? { storeId } : {}),
       };
 
-      if (customer?.id) {
-        await updateDoc(doc(db, 'customers', customer.id), payload);
-        toast.success('Customer updated');
-      } else {
-        await addDoc(collection(db, 'customers'), {
-          ...payload,
-          createdAt:    serverTimestamp(),
-          isWalking:    false,
-          isAutoNamed:  false,
-          isAutoSerial: false,
-          market:       '',
-          billerId:     '',
-        });
-        toast.success('Customer added');
-      }
+      await saveCustomer({
+        customer,
+        form: payload,
+        storeId,
+        scope: { storeId, userId: '' },
+      });
+      toast.success(
+        customer
+          ? t('manager.customersPage.customerUpdated', 'Customer updated')
+          : t('manager.customersPage.customerAdded', 'Customer added'),
+      );
       onClose();
     } catch (err) {
       console.error(err);
-      toast.error(err.message || 'Failed to save');
+      toast.error(err.message || t('manager.common.failedToSave', 'Failed to save'));
     } finally {
       setSaving(false);
     }
   };
 
   const fields = [
-    { key: 'name',    label: 'Name *',  placeholder: 'Full name'         },
-    { key: 'phone',   label: 'Phone',   placeholder: '03XX-XXXXXXX'      },
-    { key: 'email',   label: 'Email',   placeholder: 'email@example.com' },
-    { key: 'city',    label: 'City',    placeholder: 'Karachi'           },
-    { key: 'address', label: 'Address', placeholder: 'Street, area…'    },
+    { key: 'name',    label: t('manager.customersPage.nameLabel', 'Name *'),  placeholder: t('manager.customersPage.fullNamePh', 'Full name') },
+    { key: 'phone',   label: t('manager.common.phone', 'Phone'),   placeholder: t('manager.customersPage.phonePh', '03XX-XXXXXXX') },
+    { key: 'email',   label: t('manager.common.email', 'Email'),   placeholder: t('manager.customersPage.emailPh', 'email@example.com') },
+    { key: 'city',    label: t('manager.common.city', 'City'),    placeholder: t('manager.customersPage.cityPh', 'Karachi') },
+    { key: 'address', label: t('manager.common.address', 'Address'), placeholder: t('manager.customersPage.addressPh', 'Street, area…') },
   ];
 
   return (
@@ -264,7 +260,7 @@ const CustomerForm = ({ isOpen, onClose, customer, isOnline }) => {
           >
             <div className="flex justify-between items-center p-4 border-b border-[#2a1f0d]">
               <h3 className="text-base font-bold text-gray-100">
-                {customer ? 'Edit Customer' : 'Add Customer'}
+                {customer ? t('manager.customersPage.editCustomer', 'Edit Customer') : t('manager.customersPage.addCustomer', 'Add Customer')}
               </h3>
               <button onClick={onClose}
                 className="p-2 rounded-lg hover:bg-[#2a1f0d] text-gray-400">
@@ -285,7 +281,7 @@ const CustomerForm = ({ isOpen, onClose, customer, isOnline }) => {
                 </div>
               ))}
               <div>
-                <label className="text-xs text-gray-400 mb-1 block">Credit Limit</label>
+                <label className="text-xs text-gray-400 mb-1 block">{t('manager.common.creditLimit', 'Credit Limit')}</label>
                 <input
                   type="number"
                   value={form.creditLimit || 0}
@@ -296,7 +292,7 @@ const CustomerForm = ({ isOpen, onClose, customer, isOnline }) => {
               {!isOnline && (
                 <div className="flex items-center gap-2 p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/20 text-xs text-amber-400">
                   <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-                  Changes will sync when back online
+                  {t('manager.customersPage.syncWhenOnline', 'Changes will sync when back online')}
                 </div>
               )}
             </div>
@@ -304,12 +300,12 @@ const CustomerForm = ({ isOpen, onClose, customer, isOnline }) => {
             <div className="p-3 border-t border-[#2a1f0d] flex gap-2">
               <button onClick={onClose} disabled={saving}
                 className="flex-1 rounded-xl border border-[#2a1f0d] bg-[#1a1208] py-2.5 text-sm text-gray-400">
-                Cancel
+                {t('manager.common.cancel', 'Cancel')}
               </button>
               <button onClick={handleSubmit} disabled={saving}
                 className="flex-1 rounded-xl bg-gradient-to-r from-amber-500 to-amber-600 py-2.5 text-sm font-semibold text-[#1a1208] disabled:opacity-50 flex items-center justify-center gap-2">
                 {saving && <Loader2 className="w-4 h-4 animate-spin" />}
-                {customer ? 'Update' : 'Add Customer'}
+                {customer ? t('manager.common.update', 'Update') : t('manager.customersPage.addCustomer', 'Add Customer')}
               </button>
             </div>
           </motion.div>
@@ -322,55 +318,39 @@ const CustomerForm = ({ isOpen, onClose, customer, isOnline }) => {
 // ═══════════════════════════════════════════════════════════
 // HISTORY MODAL
 // ═══════════════════════════════════════════════════════════
-const HistoryModal = ({ customer, onClose, allOrders }) => {
-  const orders = useMemo(() => {
-    if (!customer) return [];
+const HistoryModal = ({ customer, onClose, branchIds = [] }) => {
+  const { t } = useLanguage();
+  const [orders, setOrders] = useState([]);
+  const [loadingOrders, setLoadingOrders] = useState(false);
 
-    const custId     = (customer.id || customer.customerId || '').trim();
-    const custPhone  = normalizePhone(customer.phone);
-    const custNameLc = (customer.name || '').toLowerCase().trim();
-    const isWalkin   = isWalkinCustomer(customer);
-
-    const matched = new Map();
-
-    allOrders.forEach((order) => {
-      if (order.isDeleted || order.deleted) return;
-
-      const info          = getOrderMatchInfo(order);
-      const orderIsWalkin = isWalkinFromOrder(order);
-
-      if (isWalkin) {
-        // Walk-in customer → match walk-in orders only
-        if (orderIsWalkin) matched.set(order.id, order);
+  useEffect(() => {
+    if (!customer) {
+      setOrders([]);
+      return;
+    }
+    let cancelled = false;
+    setLoadingOrders(true);
+    (async () => {
+      if (customer.isWalkin || customer.id === 'virtual-walkin') {
+        if (!cancelled) {
+          setOrders([]);
+          setLoadingOrders(false);
+        }
         return;
       }
-
-      // Regular customer → must NOT be walk-in order
-      if (orderIsWalkin) return;
-
-      const byId = custId && info.custId === custId;
-
-      const byPhone =
-        custPhone.length >= 7 &&
-        info.phone.length >= 7 &&
-        (info.phone === custPhone ||
-          info.phone.includes(custPhone) ||
-          custPhone.includes(info.phone));
-
-      const byName =
-        custNameLc &&
-        custNameLc.length > 3 &&
-        info.name === custNameLc;
-
-      if (byId || byPhone || byName) matched.set(order.id, order);
-    });
-
-    return [...matched.values()].sort(
-      (a, b) =>
-        getTimestamp(b.createdAt || b.savedAt) -
-        getTimestamp(a.createdAt || a.savedAt)
-    );
-  }, [customer, allOrders]);
+      const rows = await loadCustomerOrders({
+        customerId: customer.id,
+        storeIds: branchIds,
+        storeId: branchIds[0] || customer.storeId,
+        branchId: branchIds[0] || customer.storeId,
+      });
+      if (!cancelled) {
+        setOrders(rows);
+        setLoadingOrders(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [customer, branchIds]);
 
   const stats = useMemo(() => {
     let totalSpent = 0, totalPaid = 0, totalDue = 0;
@@ -409,7 +389,7 @@ const HistoryModal = ({ customer, onClose, allOrders }) => {
               <div>
                 <h3 className="text-base font-bold text-gray-100">{customer.name}</h3>
                 <p className="text-[10px] text-gray-500">
-                  {customer.phone || 'No phone'} • {customer.city || 'No city'}
+                  {customer.phone || t('manager.common.noPhone', 'No phone')} • {customer.city || t('manager.common.noCity', 'No city')}
                 </p>
               </div>
             </div>
@@ -422,10 +402,10 @@ const HistoryModal = ({ customer, onClose, allOrders }) => {
           {/* Stats */}
           <div className="grid grid-cols-4 gap-2 p-4 border-b border-[#2a1f0d] shrink-0">
             {[
-              { label: 'Bills', value: stats.billCount,             cls: 'bg-[#1a1208] border-[#2a1f0d]',       text: 'text-gray-100'  },
-              { label: 'Spent', value: formatPKR(stats.totalSpent), cls: 'bg-[#1a1208] border-[#2a1f0d]',       text: 'text-gray-100'  },
-              { label: 'Paid',  value: formatPKR(stats.totalPaid),  cls: 'bg-green-500/5 border-green-500/20',  text: 'text-green-400' },
-              { label: 'Due',   value: formatPKR(stats.totalDue),   cls: 'bg-red-500/5 border-red-500/20',      text: 'text-red-400'   },
+              { label: t('manager.common.bills', 'bills'), value: stats.billCount,             cls: 'bg-[#1a1208] border-[#2a1f0d]',       text: 'text-gray-100'  },
+              { label: t('manager.common.spent', 'Spent'), value: formatPKR(stats.totalSpent), cls: 'bg-[#1a1208] border-[#2a1f0d]',       text: 'text-gray-100'  },
+              { label: t('manager.common.paid', 'Paid'),  value: formatPKR(stats.totalPaid),  cls: 'bg-green-500/5 border-green-500/20',  text: 'text-green-400' },
+              { label: t('manager.common.due', 'Due'),   value: formatPKR(stats.totalDue),   cls: 'bg-red-500/5 border-red-500/20',      text: 'text-red-400'   },
             ].map((s) => (
               <div key={s.label} className={`rounded-lg p-2.5 border ${s.cls}`}>
                 <p className="text-[9px] text-gray-500 uppercase mb-1">{s.label}</p>
@@ -434,16 +414,27 @@ const HistoryModal = ({ customer, onClose, allOrders }) => {
             ))}
           </div>
 
+          {!customer.isWalkin && !isWalkinCustomer(customer) && (
+            <div className="px-4 pb-2 border-b border-[#2a1f0d] shrink-0 overflow-y-auto max-h-[38vh]">
+              <CustomerPersonaDetailPanel
+                customer={customer}
+                isDark
+                fmt={formatPKR}
+                fmtDate={fmtDate}
+              />
+            </div>
+          )}
+
           {/* Orders list */}
           <div className="flex-1 overflow-y-auto p-4">
             <p className="text-xs font-semibold text-gray-400 mb-2">
-              Bill History ({orders.length})
+              {t('manager.customersPage.billHistory', 'Bill History ({{count}})', { count: orders.length })}
             </p>
 
             {orders.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-12">
                 <ShoppingBag className="w-10 h-10 text-gray-700 mb-2" />
-                <p className="text-sm text-gray-600">No bills found</p>
+                <p className="text-sm text-gray-600">{t('manager.customersPage.noBillsFound', 'No bills found')}</p>
               </div>
             ) : (
               <div className="space-y-1.5">
@@ -466,7 +457,7 @@ const HistoryModal = ({ customer, onClose, allOrders }) => {
                             {o.items.slice(0, 2).map(
                               (it) => it.productName || it.name || 'Item'
                             ).join(', ')}
-                            {o.items.length > 2 && ` +${o.items.length - 2} more`}
+                            {o.items.length > 2 && ` ${t('manager.common.moreItems', '+{{count}} more', { count: o.items.length - 2 })}`}
                           </p>
                         )}
                       </div>
@@ -476,7 +467,7 @@ const HistoryModal = ({ customer, onClose, allOrders }) => {
                         </p>
                         {due > 0 && (
                           <p className="text-[10px] text-red-400">
-                            Due {formatPKR(due)}
+                            {t('manager.customersPage.dueLabel', 'Due {{amount}}', { amount: formatPKR(due) })}
                           </p>
                         )}
                         {o.paymentStatus && (
@@ -497,7 +488,7 @@ const HistoryModal = ({ customer, onClose, allOrders }) => {
           </div>
 
           <div className="p-3 text-center text-[10px] text-gray-600 border-t border-[#2a1f0d] shrink-0">
-            {orders.length} bills loaded from memory
+            {t('manager.customersPage.billsLoaded', '{{count}} bills loaded from memory', { count: orders.length })}
           </div>
         </motion.div>
       </motion.div>
@@ -509,22 +500,43 @@ const HistoryModal = ({ customer, onClose, allOrders }) => {
 // MAIN CUSTOMERS PAGE
 // ═══════════════════════════════════════════════════════════
 const Customers = () => {
+  const { t } = useLanguage();
+  const { userData } = useAuth();
   const isOnline = useOnlineStatus();
-  const storeId  = useMemo(() => getStoreId(), []);
+  const branchIds = useMemo(() => {
+    if (isElevatedRole(userData)) return [];
+    return resolveUserBranchIds(userData);
+  }, [userData]);
+  const primaryStoreId = useMemo(
+    () => resolveUserPrimaryBranch(userData),
+    [userData],
+  );
+  const { storesMap } = useStoresMap();
+  const branchRestricted = !isElevatedRole(userData);
+  const hasBranchAccess = !branchRestricted || branchIds.length > 0;
 
   // ── Data ────────────────────────────────────────────────
   const [rawCustomers, setRawCustomers] = useState([]);
-  const [allOrders,    setAllOrders]    = useState([]);
+  const [orderSnapshot, setOrderSnapshot] = useState([]);
   const [customers,    setCustomers]    = useState([]);
   const [loading,      setLoading]      = useState(true);
   const [syncing,      setSyncing]      = useState(false);
-  const [dataSource,   setDataSource]   = useState('loading');
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchLastDoc, setSearchLastDoc] = useState(null);
+  const [searchHasMore, setSearchHasMore] = useState(false);
+  const [dataSource,   setDataSource]   = useState('idle');
   const [lastSync,     setLastSync]     = useState(null);
 
   // ── Filters ─────────────────────────────────────────────
   const [search,      setSearch]      = useState('');
-  const [typeFilter,  setTypeFilter]  = useState('all'); // 'all' | 'regular' | 'walkin'
+  const [typeFilter,  setTypeFilter]  = useState('all');
+  const [visitFilter, setVisitFilter] = useState('all');
+  const [personaFilter, setPersonaFilter] = useState('all');
+  const [cityFilter,  setCityFilter]  = useState('');
+  const [sortKey,     setSortKey]     = useState('totalSpent');
+  const [sortDir,     setSortDir]     = useState('desc');
   const [page,        setPage]        = useState(1);
+  const [pageSize,    setPageSize]    = useState(DEFAULT_PAGE_SIZE);
 
   // ── UI ───────────────────────────────────────────────────
   const [formOpen,   setFormOpen]   = useState(false);
@@ -532,25 +544,31 @@ const Customers = () => {
   const [historyFor, setHistoryFor] = useState(null);
 
   // ── Refs ─────────────────────────────────────────────────
-  const unsubCustRef   = useRef(null);
-  const unsubOrdersRef = useRef(null);
-  const ordersReadyRef = useRef(false);
+  const searchTimerRef = useRef(null);
 
   // ═══════════════════════════════════════════════════════
   // BUILD METRICS — attach order stats to each customer
   // ═══════════════════════════════════════════════════════
-  const buildMetrics = useCallback((custDocs, orders) => {
+  const buildMetrics = useCallback((custDocs, orders, sm = {}) => {
+    const resolveSid = (c) =>
+      resolveEffectiveStoreId(c?.storeId || c?.branchId, sm) || c?.storeId || c?.branchId || 'default';
+    const branchLabel = (sid) => resolveStoreName(sid, sm, sid);
+
     // ── Index orders ──────────────────────────────────────
     const byId    = new Map(); // custId   → metrics
     const byPhone = new Map(); // phone    → metrics
     let walkinM   = { count: 0, spent: 0, lastDate: null, lastOrder: null };
 
     const bump = (map, key, order, total, date) => {
-      if (!map.has(key)) map.set(key, { count: 0, spent: 0, lastDate: null, lastOrder: null });
+      if (!map.has(key)) {
+        map.set(key, { count: 0, spent: 0, lastDate: null, firstDate: null, lastOrder: null });
+      }
       const m = map.get(key);
       m.count++;
       m.spent += total;
-      if (getTimestamp(date) > getTimestamp(m.lastDate)) {
+      const ts = getTimestamp(date);
+      if (!m.firstDate || ts < getTimestamp(m.firstDate)) m.firstDate = date;
+      if (ts > getTimestamp(m.lastDate)) {
         m.lastDate  = date;
         m.lastOrder = order;
       }
@@ -586,31 +604,34 @@ const Customers = () => {
       if (isWalkin) { hasWalkinDoc = true; return; }
 
       const phone = normalizePhone(c.phone);
-      const m = byId.get(c.id) || (phone.length >= 7 ? byPhone.get(phone) : null) || { count: 0, spent: 0, lastDate: null, lastOrder: null };
+      const sid = resolveSid(c);
+      const m = byId.get(c.id) || (phone.length >= 7 ? byPhone.get(phone) : null)
+        || { count: 0, spent: 0, lastDate: null, firstDate: null, lastOrder: null };
 
-      mapped.push({
+      mapped.push(mapCustomerRowPersona({
         ...c,
+        storeId: sid,
+        branchName: branchLabel(sid),
         isWalkin: false,
-        purchaseCount: m.count,
-        totalSpent: m.spent,
-        lastOrderDate: m.lastDate,
         lastOrder: m.lastOrder
           ? {
               serialNo: m.lastOrder.serialNo || m.lastOrder.billSerial || m.lastOrder.id?.slice(-8),
               total: Number(m.lastOrder.grandTotal || m.lastOrder.totalAmount || 0),
             }
           : null,
-      });
+      }, m));
     });
 
     // If any walk-in customer docs exist OR we saw walk-in orders, expose a single virtual Walk-in row
     if (hasWalkinDoc || walkinM.count > 0) {
-      const v = {
+      const v = mapCustomerRowPersona({
         id: 'virtual-walkin',
-        name: 'Walk-in Customer',
+        name: t('manager.common.walkInCustomer', 'Walk-in Customer'),
         isWalkin: true,
         phone: '—',
         city: '',
+        storeId: primaryStoreId || resolveSid(custDocs[0]) || 'default',
+        branchName: branchLabel(primaryStoreId || resolveSid(custDocs[0])),
         purchaseCount: walkinM.count,
         totalSpent: walkinM.spent,
         lastOrderDate: walkinM.lastDate,
@@ -620,190 +641,151 @@ const Customers = () => {
               total: Number(walkinM.lastOrder.grandTotal || walkinM.lastOrder.totalAmount || 0),
             }
           : null,
-      };
+      }, walkinM);
       return [v, ...mapped];
     }
 
     return mapped;
-  }, []);
+  }, [t, primaryStoreId]);
 
-  // ═══════════════════════════════════════════════════════
-  // LOAD ALL ORDERS — batched, storeId-scoped
-  // ═══════════════════════════════════════════════════════
-  const loadAllOrders = useCallback(async () => {
-    const all   = [];
-    let lastDoc = null;
-    let more    = true;
-
-    while (more) {
-      // Build query — filter by storeId if available
-      const constraints = storeId
-        ? [where('storeId', '==', storeId), orderBy('createdAt', 'desc'), limit(500)]
-        : [orderBy('createdAt', 'desc'), limit(500)];
-
-      if (lastDoc) constraints.push(startAfter(lastDoc));
-
-      const snap = await getDocs(query(collection(db, 'orders'), ...constraints));
-      snap.docs.forEach((d) => all.push({ id: d.id, ...d.data() }));
-
-      if (snap.docs.length < 500) more = false;
-      else lastDoc = snap.docs[snap.docs.length - 1];
-    }
-    return all;
-  }, [storeId]);
-
-  // ═══════════════════════════════════════════════════════
-  // START LIVE SYNC
-  // ═══════════════════════════════════════════════════════
-  const startSync = useCallback(() => {
+  const runCustomerSearch = useCallback(async (term, cursor = null) => {
+    const q = String(term || '').trim();
+    setSearchLoading(true);
     setSyncing(true);
-    setLoading(true);
-    ordersReadyRef.current = false;
-
-    // ── Customers listener ────────────────────────────────
-    if (unsubCustRef.current) unsubCustRef.current();
-
-    // Build customer query — storeId scoped if available
-    const custQuery = storeId
-      ? query(collection(db, 'customers'), where('storeId', '==', storeId))
-      : collection(db, 'customers');
-
-    unsubCustRef.current = onSnapshot(
-      custQuery,
-      { includeMetadataChanges: true },
-      (snap) => {
-        const fromCache  = snap.metadata.fromCache;
-        const hasPending = snap.metadata.hasPendingWrites;
-
-        // ✅ Include ALL customers including walk-in
-        // We'll categorize them via isWalkinCustomer()
-        const docs = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-
-        setRawCustomers(docs);
-        setDataSource(hasPending ? 'pending' : fromCache ? 'cache' : 'live');
-        setSyncing(false);
-        setLastSync(new Date());
-
-        console.log(`[Customers] ${docs.length} loaded (${fromCache ? 'cache' : 'server'})`);
-      },
-      (err) => {
-        console.error('[Customers]', err);
-        toast.error('Customer sync error');
-        setSyncing(false);
-      }
-    );
-
-    // ── Orders: load all then listen for recent ───────────
-    loadAllOrders()
-      .then((orders) => {
-        setAllOrders(orders);
-        ordersReadyRef.current = true;
-        setLoading(false);
-        setLastSync(new Date());
-
-        console.log(`[Orders] ${orders.length} loaded`);
-
-        // Live listener for recent 100 orders
-        if (unsubOrdersRef.current) unsubOrdersRef.current();
-
-        const recentQ = storeId
-          ? query(
-              collection(db, 'orders'),
-              where('storeId', '==', storeId),
-              orderBy('createdAt', 'desc'),
-              limit(100)
-            )
-          : query(
-              collection(db, 'orders'),
-              orderBy('createdAt', 'desc'),
-              limit(100)
-            );
-
-        unsubOrdersRef.current = onSnapshot(
-          recentQ,
-          { includeMetadataChanges: true },
-          (snap) => {
-            if (!snap.metadata.fromCache) {
-              setAllOrders((prev) => {
-                const map = new Map(prev.map((o) => [o.id, o]));
-                snap.docs.forEach((d) => map.set(d.id, { id: d.id, ...d.data() }));
-                return [...map.values()];
-              });
-              setLastSync(new Date());
-            }
-          }
-        );
-      })
-      .catch((err) => {
-        console.error('[Orders load]', err);
-        setLoading(false);
-        setSyncing(false);
-      });
-  }, [loadAllOrders, storeId]);
+    try {
+      const scopeId = branchIds[0] || primaryStoreId || null;
+      const useSearch = q.length >= 3;
+      const { customers: rows, lastDoc, hasMore } = useSearch
+        ? await searchCustomers({
+          term: q,
+          storeIds: branchIds.length ? branchIds : null,
+          storeId: scopeId,
+          branchId: scopeId,
+          cursor,
+          pageSize: CUSTOMER_SEARCH_PAGE_SIZE,
+        })
+        : await browseCustomers({
+          storeIds: branchIds.length ? branchIds : null,
+          storeId: scopeId,
+          branchId: scopeId,
+          cursor,
+        });
+      setRawCustomers((prev) => (cursor ? [...prev, ...rows] : rows));
+      setSearchLastDoc(lastDoc);
+      setSearchHasMore(hasMore);
+      setDataSource('server');
+      setLastSync(new Date());
+    } catch (err) {
+      console.error('[Customers] search:', err);
+      toast.error(t('manager.customersPage.syncError', 'Customer search failed'));
+    } finally {
+      setSearchLoading(false);
+      setSyncing(false);
+      setLoading(false);
+    }
+  }, [branchIds, primaryStoreId, t]);
 
   useEffect(() => {
-    startSync();
+    if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+    searchTimerRef.current = setTimeout(() => {
+      void runCustomerSearch(search, null);
+    }, 300);
     return () => {
-      if (unsubCustRef.current)   unsubCustRef.current();
-      if (unsubOrdersRef.current) unsubOrdersRef.current();
+      if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
     };
-  }, [startSync]);
+  }, [search, branchIds, primaryStoreId, runCustomerSearch]);
 
-  // Rebuild whenever raw data changes
   useEffect(() => {
-    if (!ordersReadyRef.current) return;
-    setCustomers(buildMetrics(rawCustomers, allOrders));
-  }, [rawCustomers, allOrders, buildMetrics]);
+    let cancelled = false;
+    (async () => {
+      const scopeId = branchIds[0] || primaryStoreId || null;
+      const orders = await loadOrdersForCustomerMetrics({
+        storeId: scopeId,
+        storeIds: branchIds.length ? branchIds : null,
+      });
+      if (!cancelled) setOrderSnapshot(orders);
+    })();
+    return () => { cancelled = true; };
+  }, [branchIds, primaryStoreId]);
 
-  // ═══════════════════════════════════════════════════════
-  // FORCE REFRESH
-  // ═══════════════════════════════════════════════════════
-  const forceRefresh = useCallback(() => {
-    if (unsubCustRef.current)   unsubCustRef.current();
-    if (unsubOrdersRef.current) unsubOrdersRef.current();
-    startSync();
-    toast.success('Refreshing…');
-  }, [startSync]);
+  useEffect(() => {
+    setCustomers(buildMetrics(rawCustomers, orderSnapshot, storesMap));
+  }, [rawCustomers, orderSnapshot, buildMetrics, storesMap]);
+
+  const forceRefresh = useCallback(async () => {
+    const scopeId = branchIds[0] || primaryStoreId || null;
+    const orders = await loadOrdersForCustomerMetrics({
+      storeId: scopeId,
+      storeIds: branchIds.length ? branchIds : null,
+    });
+    setOrderSnapshot(orders);
+    void runCustomerSearch(search, null);
+    toast.success(t('manager.customersPage.refreshing', 'Refreshing…'));
+  }, [runCustomerSearch, search, t, branchIds, primaryStoreId]);
 
   // ═══════════════════════════════════════════════════════
   // FILTER + PAGINATE
   // ═══════════════════════════════════════════════════════
-  const filtered = useMemo(() => {
-    let list = [...customers];
+  const getManagerCustomerType = useCallback((c) => {
+    if (c.isWalkin) return 'walkin';
+    const name = (c.name || '').trim();
+    if (/^customer\s+\d+$/i.test(name) || c.isAutoNamed) return 'auto';
+    return 'registered';
+  }, []);
 
-    // Type filter
-    if (typeFilter === 'regular') list = list.filter((c) => !c.isWalkin);
-    if (typeFilter === 'walkin')  list = list.filter((c) => c.isWalkin);
-
-    // Search
-    if (search.trim()) {
-      const s  = search.toLowerCase().trim();
-      const ph = search.replace(/\D/g, '');
-      list = list.filter((c) =>
-        c.name?.toLowerCase().includes(s) ||
-        (ph.length >= 3 && normalizePhone(c.phone).includes(ph)) ||
-        c.email?.toLowerCase().includes(s) ||
-        c.city?.toLowerCase().includes(s)
-      );
-    }
-
-    // Sort: walk-in first, then by total spent
-    list.sort((a, b) => {
-      if (a.isWalkin && !b.isWalkin) return -1;
-      if (!a.isWalkin && b.isWalkin) return 1;
-      return (b.totalSpent || 0) - (a.totalSpent || 0);
+  const cities = useMemo(() => {
+    const set = new Set();
+    customers.forEach((c) => {
+      const city = (c.city || '').trim();
+      if (city) set.add(city);
     });
+    return [...set].sort((a, b) => a.localeCompare(b));
+  }, [customers]);
 
-    return list;
-  }, [customers, search, typeFilter]);
-
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
-  const paginated  = useMemo(
-    () => filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE),
-    [filtered, page]
+  const filterCounts = useMemo(
+    () => countCustomerFilters(customers, {}, { getCustomerType: getManagerCustomerType }),
+    [customers, getManagerCustomerType],
   );
 
-  useEffect(() => { setPage(1); }, [search, typeFilter]);
+  const filtered = useMemo(() => {
+    const list = applyCustomerFilters(customers, {
+      typeFilter: typeFilter === 'regular' ? 'registered' : typeFilter,
+      visitFilter,
+      personaFilter,
+      search,
+      cityFilter,
+      getCustomerType: getManagerCustomerType,
+      normalizePhone,
+    });
+
+    const sorted = [...list].sort((a, b) => {
+      if (a.isWalkin && !b.isWalkin) return -1;
+      if (!a.isWalkin && b.isWalkin) return 1;
+      let av = a[sortKey] ?? '';
+      let bv = b[sortKey] ?? '';
+      if (sortKey === 'lastOrderDate') {
+        av = getTimestamp(av);
+        bv = getTimestamp(bv);
+      } else if (typeof av === 'string') {
+        av = av.toLowerCase();
+        bv = String(bv).toLowerCase();
+      }
+      if (av < bv) return sortDir === 'asc' ? -1 : 1;
+      if (av > bv) return sortDir === 'asc' ? 1 : -1;
+      return 0;
+    });
+    return sorted;
+  }, [customers, search, cityFilter, typeFilter, visitFilter, personaFilter, sortKey, sortDir, getManagerCustomerType]);
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+  const paginated  = useMemo(
+    () => filtered.slice((page - 1) * pageSize, page * pageSize),
+    [filtered, page, pageSize]
+  );
+
+  useEffect(() => {
+    setPage(1);
+  }, [search, cityFilter, typeFilter, visitFilter, personaFilter, sortKey, sortDir, pageSize]);
 
   // Summary counts
   const counts = useMemo(() => ({
@@ -818,20 +800,28 @@ const Customers = () => {
   return (
     <div className="space-y-4">
 
+      {!hasBranchAccess && (
+        <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
+          {t('manager.customersPage.noBranchAccess', 'No branch assigned — contact Super Admin to link your account to A One or J1.')}
+        </div>
+      )}
+
       {/* ── HEADER ──────────────────────────────────────── */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
         <div>
           <h2 className="text-xl font-bold text-gray-100 flex items-center gap-2">
             <Users className="w-5 h-5 text-amber-500" />
-            Customers
+            {t('manager.customersPage.title', 'Customers')}
             <span className="text-xs font-normal text-gray-500">
               ({filtered.length})
             </span>
           </h2>
           {!loading && (
             <p className="text-[10px] text-gray-600 mt-0.5">
-              {counts.regular} registered • {counts.walkin} walk-in •{' '}
-              {allOrders.length.toLocaleString()} orders loaded
+              {t('manager.customersPage.summary', '{{regular}} registered • {{walkin}} walk-in', {
+                regular: counts.regular,
+                walkin: counts.walkin,
+              })}
             </p>
           )}
         </div>
@@ -842,14 +832,15 @@ const Customers = () => {
             dataSource={dataSource}
             syncing={syncing}
             lastSync={lastSync}
+            t={t}
           />
           <button
             onClick={forceRefresh}
             disabled={syncing || loading}
-            title="Refresh"
-            className="p-2 rounded-xl border border-[#2a1f0d] bg-[#1a1208] text-gray-400 hover:text-amber-400 disabled:opacity-40"
+            title={t('manager.common.refresh', 'Refresh')}
+            className={glassBtnGhost}
           >
-            <RefreshCw className={`w-3.5 h-3.5 ${syncing ? 'animate-spin' : ''}`} />
+            <RefreshCw className={cn('w-3.5 h-3.5', glassIcon(), syncing && 'animate-spin')} />
           </button>
           <ExportMenu
             data={filtered.map((c) => ({
@@ -866,104 +857,121 @@ const Customers = () => {
           />
           <button
             onClick={() => { setEditing(null); setFormOpen(true); }}
-            className="flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-amber-500 to-amber-600 px-3 py-2 text-xs font-semibold text-[#1a1208]"
+            className={glassBtnPrimary}
           >
-            <Plus className="w-3.5 h-3.5" /> Add Customer
+            <Plus className={cn('w-3.5 h-3.5', glassIcon())} /> {t('manager.customersPage.addCustomer', 'Add Customer')}
           </button>
         </div>
       </div>
 
-      {/* ── SEARCH + TYPE FILTER ────────────────────────── */}
-      <div className="flex flex-col sm:flex-row gap-2">
-        <div className="relative flex-1">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" />
-          <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search by name, phone, email, city…"
-            className="w-full rounded-xl border border-[#2a1f0d] bg-[#1a1208] pl-9 pr-9 py-2.5 text-sm text-gray-200 placeholder:text-gray-600 focus:outline-none focus:ring-2 focus:ring-amber-500/40"
-          />
-          {search && (
-            <button
-              onClick={() => setSearch('')}
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300"
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
-          )}
-        </div>
-
-        {/* Type tabs */}
-        <div className="flex gap-1 p-1 rounded-xl border border-[#2a1f0d] bg-[#1a1208]">
-          {[
-            { key: 'all',     label: `All (${counts.total})`,         icon: Users     },
-            { key: 'regular', label: `Regular (${counts.regular})`,   icon: UserCheck },
-            { key: 'walkin',  label: `Walk-in (${counts.walkin})`,    icon: UserX     },
-          ].map((t) => (
-            <button
-              key={t.key}
-              onClick={() => setTypeFilter(t.key)}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors
-                ${typeFilter === t.key
-                  ? 'bg-amber-500 text-[#1a1208]'
-                  : 'text-gray-500 hover:text-gray-300'}`}
-            >
-              <t.icon className="w-3 h-3" />
-              <span className="hidden sm:inline">{t.label}</span>
-              <span className="sm:hidden">{t.label.split(' ')[0]}</span>
-            </button>
-          ))}
-        </div>
-      </div>
+      {/* ── FILTERS — glass dropdowns ─────────────────── */}
+      <CustomerGlassFilterPanel
+        search={search}
+        onSearchChange={(v) => startTransition(() => setSearch(v))}
+        searchLoading={searchLoading}
+        showBranch={false}
+        cityFilter={cityFilter}
+        cities={cities}
+        onCityChange={(v) => startTransition(() => setCityFilter(v))}
+        showCity={cities.length > 0}
+        typeFilter={typeFilter === 'regular' ? 'registered' : typeFilter}
+        onTypeFilterChange={(k) => startTransition(() => setTypeFilter(k === 'registered' ? 'regular' : k))}
+        visitFilter={visitFilter}
+        onVisitFilterChange={(v) => startTransition(() => setVisitFilter(v))}
+        personaFilter={personaFilter}
+        onPersonaFilterChange={(v) => startTransition(() => setPersonaFilter(v))}
+        sortValue={`${sortKey}:${sortDir}`}
+        onSortChange={(v) => {
+          const [k, d] = v.split(':');
+          startTransition(() => {
+            setSortKey(k);
+            setSortDir(d);
+          });
+        }}
+        sortOptions={SORT_OPTIONS}
+        counts={{
+          ...filterCounts,
+          type: {
+            all: filterCounts.type?.all ?? counts.total,
+            walkin: counts.walkin,
+            registered: counts.regular,
+            auto: filterCounts.type?.auto ?? 0,
+          },
+        }}
+        hasActiveFilters={Boolean(
+          search || cityFilter || typeFilter !== 'all'
+          || visitFilter !== 'all' || personaFilter !== 'all',
+        )}
+        onClear={() => {
+          startTransition(() => {
+            setSearch('');
+            setCityFilter('');
+            setTypeFilter('all');
+            setVisitFilter('all');
+            setPersonaFilter('all');
+            setSortKey('totalSpent');
+            setSortDir('desc');
+          });
+        }}
+        filteredCount={filtered.length}
+        paginatedCount={paginated.length}
+        searchHasMore={searchHasMore}
+        onLoadMore={() => runCustomerSearch(search, searchLastDoc)}
+        isOnline={isOnline}
+      />
 
       {/* ── LOADING ─────────────────────────────────────── */}
-      {loading ? (
+      {loading || searchLoading ? (
         <div className="flex flex-col items-center justify-center py-16">
           <Loader2 className="w-8 h-8 animate-spin text-amber-500 mb-3" />
-          <p className="text-sm text-gray-500">Loading customers & orders…</p>
-          {allOrders.length > 0 && (
-            <p className="text-xs text-gray-600 mt-1">
-              {allOrders.length.toLocaleString()} orders loaded…
-            </p>
-          )}
+          <p className="text-sm text-gray-500">
+            {searchLoading
+              ? t('manager.customersPage.searching', 'Searching customers...')
+              : t('manager.customersPage.loading', 'Loading customers…')}
+          </p>
         </div>
 
       ) : filtered.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-16">
           <Users className="w-10 h-10 text-gray-700 mb-3" />
           <p className="text-sm text-gray-500">
-            {search
-              ? `No customers matching "${search}"`
-              : 'No customers found'}
+            {search.trim().length > 0 && search.trim().length < 3
+              ? t('manager.customersPage.minChars', 'No match in loaded list — type 3+ chars for full search')
+              : search
+                ? t('manager.customersPage.noMatch', 'No customers matching "{{query}}"', { query: search })
+                : t('manager.customersPage.searchHint', 'Customers load automatically when online')}
           </p>
         </div>
 
       ) : (
         <>
           {/* ── DESKTOP TABLE ────────────────────────────── */}
-          <div className="hidden md:block rounded-2xl border border-[#2a1f0d] bg-[#12100a] overflow-hidden">
-            <div className="overflow-x-auto">
+          <div className={cn(customersTableShell(true), 'hidden md:block')}>
+            <div className="overflow-x-auto max-h-[65vh] overflow-y-auto">
               <table className="w-full text-sm">
-                <thead className="bg-[#1a1208] text-gray-500 text-xs uppercase">
+                <thead className={cn('sticky top-0 z-10 backdrop-blur-xl', customersTableHead(true))}>
                   <tr>
-                    <th className="text-start px-4 py-3">Customer</th>
-                    <th className="text-start px-4 py-3">Phone</th>
-                    <th className="text-start px-4 py-3">Email</th>
-                    <th className="text-end   px-4 py-3">Last Bill</th>
-                    <th className="text-center px-4 py-3">Bills</th>
-                    <th className="text-end   px-4 py-3">Total Spent</th>
-                    <th className="text-end   px-4 py-3">Actions</th>
+                    <th className={customersTh(true)}>{t('manager.common.customer', 'Customer')}</th>
+                    <th className={cn(customersTh(true), 'hidden md:table-cell')}>{t('manager.common.branch', 'Branch')}</th>
+                    <th className={customersTh(true)}>{t('manager.common.phone', 'Phone')}</th>
+                    <th className={cn(customersTh(true), 'hidden lg:table-cell')}>{t('manager.common.email', 'Email')}</th>
+                    <th className={cn(customersTh(true), 'text-center')}>{t('manager.common.visits', 'Visits')}</th>
+                    <th className={cn(customersTh(true), 'text-end')}>{t('manager.common.lastBill', 'Last Bill')}</th>
+                    <th className={cn(customersTh(true), 'text-center')}>{t('manager.common.bills', 'Bills')}</th>
+                    <th className={cn(customersTh(true), 'text-end')}>{t('manager.common.totalSpent', 'Total Spent')}</th>
+                    <th className={cn(customersTh(true), 'text-end hidden xl:table-cell')}>{t('manager.common.firstVisit', 'First Visit')}</th>
+                    <th className={cn(customersTh(true), 'text-end')}>{t('manager.common.lastVisit', 'Last Visit')}</th>
+                    <th className={cn(customersTh(true), 'text-end')}>{t('manager.common.actions', 'Actions')}</th>
                   </tr>
                 </thead>
                 <tbody>
                   {paginated.map((c) => (
                     <tr
                       key={c.id}
-                      className={`border-t border-[#2a1f0d] hover:bg-[#1a1208]/50 transition-colors
-                        ${c.isWalkin ? 'bg-blue-500/3' : ''}`}
+                      className={customersTableRow(true, { walkin: c.isWalkin })}
                     >
                       {/* Customer */}
-                      <td className="px-4 py-3">
+                      <td className={customersTd(true)}>
                         <div className="flex items-center gap-2.5">
                           <div className={`h-8 w-8 rounded-lg flex items-center justify-center text-xs font-bold shrink-0
                             ${c.isWalkin
@@ -972,14 +980,23 @@ const Customers = () => {
                             {c.isWalkin ? 'W' : getInitials(c.name)}
                           </div>
                           <div className="min-w-0">
-                            <div className="flex items-center gap-1.5">
+                            <div className="flex items-center gap-1.5 flex-wrap">
                               <p className="text-sm font-medium text-gray-100 truncate">
-                                {truncate(c.name, 20)}
+                                {truncate(getCustomerDisplayName(c), 20)}
                               </p>
                               {c.isWalkin && (
                                 <span className="text-[8px] px-1 py-0.5 rounded bg-blue-500/15 text-blue-400 font-medium shrink-0">
-                                  WALK-IN
+                                  {t('manager.common.walkInBadge', 'WALK-IN')}
                                 </span>
+                              )}
+                              {c.vipStatus && (
+                                <span className="text-[8px] px-1 py-0.5 rounded bg-amber-500/15 text-amber-400 font-bold shrink-0">VIP</span>
+                              )}
+                              {c.isRepeatCustomer && !c.isWalkin && (
+                                <span className="text-[8px] px-1 py-0.5 rounded bg-sky-500/15 text-sky-400 font-bold shrink-0">REPEAT</span>
+                              )}
+                              {c.hasCredit && (
+                                <span className="text-[8px] px-1 py-0.5 rounded bg-orange-500/15 text-orange-400 font-bold shrink-0">CREDIT</span>
                               )}
                             </div>
                             <p className="text-[10px] text-gray-500">{c.city || '—'}</p>
@@ -987,20 +1004,35 @@ const Customers = () => {
                         </div>
                       </td>
 
+                      {/* Branch */}
+                      <td className={cn(customersTd(true), 'hidden md:table-cell')}>
+                        <span className="text-xs text-gray-500 flex items-center gap-1 max-w-[7rem] truncate" title={c.branchName || ''}>
+                          <MapPin className="w-3 h-3 shrink-0 text-stone-500" />
+                          {c.branchName || c.storeId || '—'}
+                        </span>
+                      </td>
+
                       {/* Phone */}
-                      <td className="px-4 py-3">
+                      <td className={customersTd(true)}>
                         <span className="text-xs text-gray-400">{c.phone || '—'}</span>
                       </td>
 
                       {/* Email */}
-                      <td className="px-4 py-3">
+                      <td className={cn(customersTd(true), 'hidden lg:table-cell')}>
                         <span className="text-xs text-gray-400">
                           {truncate(c.email, 22) || '—'}
                         </span>
                       </td>
 
+                      {/* Visits */}
+                      <td className={cn(customersTd(true), 'text-center')}>
+                        <span className="inline-flex min-w-[2rem] justify-center px-2 py-0.5 rounded-lg text-xs font-bold bg-white/5 text-amber-300">
+                          {c.visitCount ?? c.purchaseCount ?? 0}
+                        </span>
+                      </td>
+
                       {/* Last Bill */}
-                      <td className="px-4 py-3 text-end">
+                      <td className={cn(customersTd(true), 'text-end')}>
                         {c.lastOrder ? (
                           <div>
                             <p className="text-xs font-medium text-gray-200">
@@ -1016,37 +1048,48 @@ const Customers = () => {
                       </td>
 
                       {/* Bills */}
-                      <td className="px-4 py-3 text-center">
+                      <td className={cn(customersTd(true), 'text-center')}>
                         <span className="text-xs text-gray-300">
                           {(c.purchaseCount || 0).toLocaleString()}
                         </span>
                       </td>
 
                       {/* Spent */}
-                      <td className="px-4 py-3 text-end">
+                      <td className={cn(customersTd(true), 'text-end')}>
                         <span className="text-xs font-semibold text-emerald-400">
                           {formatPKR(c.totalSpent || 0)}
                         </span>
                       </td>
 
+                      {/* First Visit */}
+                      <td className={cn(customersTd(true), 'text-end text-xs text-gray-500 hidden xl:table-cell')}>
+                        {fmtDate(c.firstVisit || c.createdAt)}
+                      </td>
+
+                      {/* Last Visit */}
+                      <td className={cn(customersTd(true), 'text-end text-xs text-gray-500')}>
+                        {fmtDate(c.lastVisit || c.lastOrderDate)}
+                      </td>
+
                       {/* Actions */}
-                      <td className="px-4 py-3">
+                      <td className={customersTd(true)}>
                         <div className="flex justify-end gap-1">
                           <button
+                            type="button"
                             onClick={() => setHistoryFor(c)}
-                            className="p-1.5 rounded-lg text-blue-400 hover:bg-blue-500/10"
-                            title="View history"
+                            className={glassActionBtn('view')}
+                            title={t('manager.common.viewHistory', 'View history')}
                           >
-                            <History className="w-3.5 h-3.5" />
+                            <History className={cn('w-3.5 h-3.5', glassIcon())} />
                           </button>
-                          {/* Only allow editing non-walk-in customers */}
                           {!c.isWalkin && (
                             <button
+                              type="button"
                               onClick={() => { setEditing(c); setFormOpen(true); }}
-                              className="p-1.5 rounded-lg text-amber-500 hover:bg-amber-500/10"
-                              title="Edit"
+                              className={glassActionBtn('edit')}
+                              title={t('manager.common.edit', 'Edit')}
                             >
-                              <Edit3 className="w-3.5 h-3.5" />
+                              <Edit3 className={cn('w-3.5 h-3.5', glassIcon())} />
                             </button>
                           )}
                         </div>
@@ -1056,10 +1099,19 @@ const Customers = () => {
                 </tbody>
               </table>
             </div>
-            <div className="p-3 text-center text-[10px] text-gray-600 border-t border-[#2a1f0d]">
-              {filtered.length} customers • {allOrders.length.toLocaleString()} orders
-              {!isOnline && ' • Offline'}
-            </div>
+            <PaginationBar
+              page={page}
+              totalPages={totalPages}
+              totalItems={filtered.length}
+              pageSize={pageSize}
+              onPageChange={setPage}
+              pageSizeOptions={[10, 20, 50]}
+              onPageSizeChange={(n) => {
+                setPageSize(n);
+                setPage(1);
+              }}
+              variant="glass"
+            />
           </div>
 
           {/* ── MOBILE CARDS ─────────────────────────────── */}
@@ -1079,51 +1131,61 @@ const Customers = () => {
                   </div>
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-1.5">
-                      <p className="text-sm font-bold text-gray-100 truncate">{c.name}</p>
+                      <p className="text-sm font-bold text-gray-100 truncate">{getCustomerDisplayName(c)}</p>
                       {c.isWalkin && (
                         <span className="text-[8px] px-1 py-0.5 rounded bg-blue-500/15 text-blue-400 font-medium shrink-0">
-                          WALK-IN
+                          {t('manager.common.walkInBadge', 'WALK-IN')}
                         </span>
                       )}
                     </div>
-                    <p className="text-xs text-gray-500">{c.phone || '—'}</p>
+                    <p className="text-xs text-gray-500 truncate">
+                      {[c.branchName, c.phone || '—'].filter(Boolean).join(' · ')}
+                    </p>
                   </div>
                 </div>
 
-                <div className="grid grid-cols-3 gap-2 mb-2.5">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-2.5">
                   <div className="rounded-lg bg-[#0a0805] p-2 text-center">
-                    <p className="text-[9px] text-gray-500 uppercase">Bills</p>
+                    <p className="text-[9px] text-gray-500 uppercase">{t('manager.common.visits', 'Visits')}</p>
+                    <p className="text-sm font-bold text-amber-300/90">
+                      {c.visitCount ?? c.purchaseCount ?? 0}
+                    </p>
+                  </div>
+                  <div className="rounded-lg bg-[#0a0805] p-2 text-center">
+                    <p className="text-[9px] text-gray-500 uppercase">{t('manager.common.bills', 'Bills')}</p>
                     <p className="text-sm font-bold text-gray-200">
                       {(c.purchaseCount || 0).toLocaleString()}
                     </p>
                   </div>
                   <div className="rounded-lg bg-emerald-500/5 p-2 text-center">
-                    <p className="text-[9px] text-gray-500 uppercase">Spent</p>
+                    <p className="text-[9px] text-gray-500 uppercase">{t('manager.common.spent', 'Spent')}</p>
                     <p className="text-xs font-bold text-emerald-400">
                       {formatPKR(c.totalSpent || 0)}
                     </p>
                   </div>
                   <div className="rounded-lg bg-[#0a0805] p-2 text-center">
-                    <p className="text-[9px] text-gray-500 uppercase">Last</p>
+                    <p className="text-[9px] text-gray-500 uppercase">{t('manager.common.lastVisit', 'Last Visit')}</p>
                     <p className="text-xs text-gray-300">
-                      {fmtDate(c.lastOrderDate)}
+                      {fmtDate(c.lastVisit || c.lastOrderDate)}
                     </p>
                   </div>
                 </div>
 
                 <div className="flex gap-2">
                   <button
+                    type="button"
                     onClick={() => setHistoryFor(c)}
-                    className="flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-lg bg-blue-500/10 text-blue-400 text-xs"
+                    className={cn(glassActionBtn('view'), 'flex-1 gap-1.5 text-xs')}
                   >
-                    <History className="w-3.5 h-3.5" /> History
+                    <History className={cn('w-3.5 h-3.5', glassIcon())} /> {t('manager.common.history', 'History')}
                   </button>
                   {!c.isWalkin && (
                     <button
+                      type="button"
                       onClick={() => { setEditing(c); setFormOpen(true); }}
-                      className="flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-lg bg-amber-500/10 text-amber-400 text-xs"
+                      className={cn(glassActionBtn('edit'), 'flex-1 gap-1.5 text-xs')}
                     >
-                      <Edit3 className="w-3.5 h-3.5" /> Edit
+                      <Edit3 className={cn('w-3.5 h-3.5', glassIcon())} /> {t('manager.common.edit', 'Edit')}
                     </button>
                   )}
                 </div>
@@ -1131,41 +1193,17 @@ const Customers = () => {
             ))}
           </div>
 
-          {/* ── PAGINATION ───────────────────────────────── */}
           {totalPages > 1 && (
-            <div className="flex items-center justify-center gap-2 pt-2">
-              <button
-                disabled={page === 1}
-                onClick={() => setPage((p) => Math.max(1, p - 1))}
-                className="p-2 rounded-lg border border-[#2a1f0d] bg-[#1a1208] text-gray-400 disabled:opacity-40 hover:text-amber-400"
-              >
-                <ChevronLeft className="w-4 h-4" />
-              </button>
-              {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
-                let p;
-                if (totalPages <= 5)        p = i + 1;
-                else if (page <= 3)         p = i + 1;
-                else if (page >= totalPages - 2) p = totalPages - 4 + i;
-                else                        p = page - 2 + i;
-                return (
-                  <button key={p} onClick={() => setPage(p)}
-                    className={`w-8 h-8 rounded-lg text-xs font-medium transition-colors
-                      ${page === p
-                        ? 'bg-amber-500 text-[#1a1208]'
-                        : 'border border-[#2a1f0d] bg-[#1a1208] text-gray-400 hover:text-amber-400'}`}>
-                    {p}
-                  </button>
-                );
-              })}
-              <button
-                disabled={page === totalPages}
-                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                className="p-2 rounded-lg border border-[#2a1f0d] bg-[#1a1208] text-gray-400 disabled:opacity-40 hover:text-amber-400"
-              >
-                <ChevronRight className="w-4 h-4" />
-              </button>
-              <span className="text-xs text-gray-600">{page}/{totalPages}</span>
-            </div>
+            <PaginationBar
+              page={page}
+              totalPages={totalPages}
+              totalItems={filtered.length}
+              pageSize={pageSize}
+              onPageChange={setPage}
+              compact
+              variant="glass"
+              className="md:hidden rounded-2xl border border-white/[0.08]"
+            />
           )}
         </>
       )}
@@ -1176,11 +1214,12 @@ const Customers = () => {
         onClose={() => { setFormOpen(false); setEditing(null); }}
         customer={editing}
         isOnline={isOnline}
+        storeId={primaryStoreId}
       />
       <HistoryModal
         customer={historyFor}
         onClose={() => setHistoryFor(null)}
-        allOrders={allOrders}
+        branchIds={branchIds}
       />
     </div>
   );

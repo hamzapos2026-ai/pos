@@ -3,8 +3,9 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   RefreshCw, CheckCircle, AlertCircle, Clock,
-  Wifi, Database, Trash2, Upload, WifiOff,
+  Wifi, Database, Trash2, Upload, WifiOff, RotateCcw,
 } from 'lucide-react';
+import { retryDeadLetter } from '../../services/syncWorker';
 import {
   collection, getDocs, query, orderBy, limit,
 } from '../../services/firebase';
@@ -15,7 +16,8 @@ import {
 import { cn } from '../../utils/cn';
 import { useTheme } from '../../context/ThemeContext';
 import { useNetwork } from '../../context/NetworkContext';
-import toast from 'react-hot-toast';
+import { useLanguage } from '../../hooks/useLanguage';
+import { toast } from 'react-hot-toast';
 import Button from '../../components/ui/Button';
 import Badge from '../../components/ui/Badge';
 import PageHeader from '../../components/admin/PageHeader';
@@ -32,12 +34,14 @@ const toDate = (v) => {
 const SyncMonitor = () => {
   const { isDark }   = useTheme();
   const { isOnline } = useNetwork();
+  const { t, isRTL } = useLanguage();
 
   const [pendingCount,  setPendingCount]  = useState(0);
   const [recentSynced,  setRecentSynced]  = useState([]);
   const [failedItems,   setFailedItems]   = useState([]);
   const [loading,       setLoading]       = useState(true);
   const [syncing,       setSyncing]       = useState(false);
+  const [retryingId,    setRetryingId]    = useState(null);
   const [lastSyncTime,  setLastSyncTime]  = useState(null);
 
   // ── Load data ──────────────────────────────────────────────
@@ -113,7 +117,7 @@ const SyncMonitor = () => {
   // ── Retry all ──────────────────────────────────────────────
   const handleRetryAll = async () => {
     if (!isOnline) {
-      toast.error('Cannot sync while offline');
+      toast.error(t('admin.syncPage.cannotSyncOffline', 'Cannot sync while offline'));
       return;
     }
     setSyncing(true);
@@ -121,17 +125,36 @@ const SyncMonitor = () => {
       const result = await syncOfflineOrders();
       const synced = result?.synced || 0;
       if (synced > 0) {
-        toast.success(`✅ ${synced} bill${synced > 1 ? 's' : ''} synced!`);
+        toast.success(t('admin.syncPage.syncedCount', `${synced} bill(s) synced!`, { count: synced }));
       } else {
-        toast.success('All bills already synced!');
+        toast.success(t('admin.syncPage.allAlreadySynced', 'All bills already synced!'));
       }
       setLastSyncTime(new Date());
       await loadData();
     } catch (e) {
       console.error(e);
-      toast.error('Sync failed: ' + (e.message || 'Unknown error'));
+      toast.error(t('admin.syncPage.syncFailed', 'Sync failed: {{msg}}', { msg: e.message || 'Unknown error' }));
     } finally {
       setSyncing(false);
+    }
+  };
+
+  const handleRetryFailed = async (item) => {
+    const qid = item.queueId || item.id;
+    if (!qid) return;
+    setRetryingId(qid);
+    try {
+      const ok = await retryDeadLetter(String(qid));
+      if (ok) {
+        toast.success(t('admin.syncPage.retryQueued', 'Bill re-queued for sync'));
+        await loadData();
+      } else {
+        toast.error(t('admin.syncPage.retryFailed', 'Could not retry — item missing'));
+      }
+    } catch (e) {
+      toast.error(e?.message || 'Retry failed');
+    } finally {
+      setRetryingId(null);
     }
   };
 
@@ -147,19 +170,27 @@ const SyncMonitor = () => {
       : 'Not yet',
   }), [pendingCount, recentSynced, failedItems, lastSyncTime]);
 
+  const tableHeaders = [
+    t('admin.syncPage.colSerial', 'Serial'),
+    t('admin.syncPage.colCustomer', 'Customer'),
+    t('admin.syncPage.colAmount', 'Amount'),
+    t('admin.syncPage.colSyncedAt', 'Synced At'),
+    t('common.status', 'Status'),
+  ];
+
   return (
-    <div className="p-4 sm:p-6 max-w-[1600px] mx-auto space-y-6">
+    <div dir={isRTL ? 'rtl' : 'ltr'} className="p-4 sm:p-6 max-w-[1600px] mx-auto space-y-6">
 
       <PageHeader
         icon={RefreshCw}
-        title="Sync Monitor"
-        description="Track offline queue, sync status & retry failed orders"
+        title={t('admin.syncPage.title', 'Sync Monitor')}
+        description={t('admin.syncPage.subtitle', 'Track offline queue, sync status & retry failed orders')}
         actions={
           <div className="flex gap-2">
             <Button variant="ghost"
               leftIcon={<RefreshCw className={cn('w-4 h-4', loading && 'animate-spin')} />}
               onClick={loadData} disabled={loading}>
-              Refresh
+              {t('common.refresh', 'Refresh')}
             </Button>
             <Button variant="primary"
               leftIcon={syncing
@@ -167,7 +198,7 @@ const SyncMonitor = () => {
                 : <Upload className="w-4 h-4" />}
               onClick={handleRetryAll}
               disabled={syncing || !isOnline}>
-              {syncing ? 'Syncing...' : 'Retry All'}
+              {syncing ? t('network.syncing', 'Syncing...') : t('admin.syncPage.retryFailed', 'Retry All')}
             </Button>
           </div>
         }
@@ -185,16 +216,16 @@ const SyncMonitor = () => {
             : 'bg-rose-50 border-rose-200 text-rose-700',
       )}>
         {isOnline
-          ? <><Wifi className="w-4 h-4" /> Online — Firebase connected</>
-          : <><WifiOff className="w-4 h-4" /> Offline — data saving locally</>}
+          ? <><Wifi className="w-4 h-4" /> {t('admin.syncPage.onlineConnected', 'Online — Firebase connected')}</>
+          : <><WifiOff className="w-4 h-4" /> {t('admin.syncPage.offlineLocal', 'Offline — data saving locally')}</>}
       </div>
 
       {/* Stats */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
-        <StatCard label="Pending"   value={stats.pending}  icon={Clock}       color="amber" />
-        <StatCard label="Synced"    value={stats.synced}   icon={CheckCircle} color="green" />
-        <StatCard label="Failed"    value={stats.failed}   icon={AlertCircle} color="rose"  />
-        <StatCard label="Last Sync" value={stats.lastSync} icon={RefreshCw}   color="blue"  />
+        <StatCard label={t('admin.syncPage.pending', 'Pending')}   value={stats.pending}  icon={Clock}       color="amber" />
+        <StatCard label={t('admin.syncPage.synced', 'Synced')}    value={stats.synced}   icon={CheckCircle} color="green" />
+        <StatCard label={t('admin.syncPage.failed', 'Failed')}    value={stats.failed}   icon={AlertCircle} color="rose"  />
+        <StatCard label={t('admin.syncPage.lastSync', 'Last Sync')} value={stats.lastSync} icon={RefreshCw}   color="blue"  />
       </div>
 
       {/* Pending Queue */}
@@ -210,8 +241,8 @@ const SyncMonitor = () => {
         {pendingCount === 0 ? (
           <EmptyState
             icon={CheckCircle}
-            title="All synced!"
-            description="No pending items in the offline queue"
+            title={t('admin.syncPage.allSynced', 'All synced!')}
+            description={t('admin.syncPage.noPending', 'No pending items in the offline queue')}
           />
         ) : (
           <div className={cn(
@@ -239,7 +270,7 @@ const SyncMonitor = () => {
               leftIcon={syncing
                 ? <RefreshCw className="w-3.5 h-3.5 animate-spin" />
                 : <Upload className="w-3.5 h-3.5" />}>
-              {syncing ? 'Syncing...' : 'Sync Now'}
+              {syncing ? t('network.syncing', 'Syncing...') : t('admin.syncPage.syncNow', 'Sync Now')}
             </Button>
           </div>
         )}
@@ -257,8 +288,8 @@ const SyncMonitor = () => {
         </h3>
 
         {recentSynced.length === 0 ? (
-          <EmptyState icon={Wifi} title="No synced orders yet"
-            description="Orders will appear here after syncing" />
+          <EmptyState icon={Wifi} title={t('admin.syncPage.noSyncedYet', 'No synced orders yet')}
+            description={t('admin.syncPage.syncedAppear', 'Orders will appear here after syncing')} />
         ) : (
           <div className="overflow-x-auto max-h-[400px] overflow-y-auto">
             <table className="w-full text-xs">
@@ -267,7 +298,7 @@ const SyncMonitor = () => {
                 isDark ? 'bg-[#1a1208] text-gray-400' : 'bg-amber-50 text-gray-600',
               )}>
                 <tr>
-                  {['Serial', 'Customer', 'Amount', 'Synced At', 'Status'].map(h => (
+                  {tableHeaders.map(h => (
                     <th key={h} className="px-4 py-2.5 text-start font-semibold">
                       {h}
                     </th>
@@ -288,7 +319,7 @@ const SyncMonitor = () => {
                     </td>
                     <td className={cn('px-4 py-3',
                       isDark ? 'text-gray-300' : 'text-gray-700')}>
-                      {o.customer?.name || 'Walk-in'}
+                      {o.customer?.name || t('admin.customersPage.walkIn', 'Walk-in')}
                     </td>
                     <td className={cn('px-4 py-3 font-bold font-mono',
                       isDark ? 'text-emerald-400' : 'text-emerald-600')}>
@@ -300,7 +331,7 @@ const SyncMonitor = () => {
                     </td>
                     <td className="px-4 py-3">
                       <Badge variant="success" className="flex items-center gap-1 w-fit">
-                        <Wifi className="w-3 h-3" /> Synced
+                        <Wifi className="w-3 h-3" /> {t('admin.syncPage.synced', 'Synced')}
                       </Badge>
                     </td>
                   </tr>
@@ -324,7 +355,7 @@ const SyncMonitor = () => {
           <div className="space-y-2">
             {failedItems.slice(0, 10).map((item, i) => (
               <div key={item.id || i} className={cn(
-                'rounded-xl border p-3 flex items-center justify-between text-xs',
+                'rounded-xl border p-3 flex items-center justify-between gap-3 text-xs',
                 isDark ? 'bg-rose-500/5 border-rose-500/10' : 'bg-rose-50 border-rose-100',
               )}>
                 <div>
@@ -336,7 +367,20 @@ const SyncMonitor = () => {
                     Error: {item.error || item.lastError || 'Unknown'}
                   </p>
                 </div>
-                <Badge variant="destructive">Failed</Badge>
+                <div className="flex items-center gap-2 shrink-0">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => handleRetryFailed(item)}
+                    disabled={retryingId === (item.queueId || item.id) || !isOnline}
+                    leftIcon={retryingId === (item.queueId || item.id)
+                      ? <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      : <RotateCcw className="w-3.5 h-3.5" />}
+                  >
+                    {t('admin.syncPage.retry', 'Retry')}
+                  </Button>
+                  <Badge variant="destructive">{t('admin.syncPage.failed', 'Failed')}</Badge>
+                </div>
               </div>
             ))}
           </div>

@@ -187,6 +187,10 @@ export const dbGetAll = async (storeName) => {
 };
 
 export const dbDelete = async (storeName, key) => {
+  if (key === undefined || key === null || key === '') {
+    console.warn(`[IDB] dbDelete ${storeName}: skipped — invalid key`);
+    return false;
+  }
   try {
     const store = await _tx(storeName, "readwrite");
     return _promisify(store.delete(key));

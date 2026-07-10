@@ -29,6 +29,7 @@ export const BILL_STATUS = {
   returned: 'returned',
   cancelled: 'cancelled',
   manager_approved: 'manager_approved',
+  cashier_paid: 'cashier_paid',
   pending_superadmin: 'pending_superadmin',
 };
 
@@ -70,11 +71,11 @@ export const CASH_TX_TYPES = {
 // PAYMENT METHODS
 // ============================================
 export const PAYMENT_METHODS = [
-  { id: 'cash', name: 'Cash', label: 'Cash', icon: 'Banknote', enabled: true, order: 1, requiresVerification: false, fee: 0 },
-  { id: 'easypaisa', name: 'EasyPaisa', label: 'EasyPaisa', icon: 'Phone', enabled: true, order: 2, requiresVerification: true, fee: 0 },
-  { id: 'jazzcash', name: 'JazzCash', label: 'JazzCash', icon: 'Smartphone', enabled: true, order: 3, requiresVerification: true, fee: 0 },
-  { id: 'bank', name: 'Bank Transfer', label: 'Bank Transfer', icon: 'Landmark', enabled: true, order: 4, requiresVerification: true, fee: 0 },
-  { id: 'card', name: 'Debit/Credit Card', label: 'Card', icon: 'CreditCard', enabled: true, order: 5, requiresVerification: true, fee: 2.5 },
+  { id: 'cash', name: 'Cash', label: 'Cash', icon: 'Banknote', enabled: false, order: 1, requiresVerification: false, fee: 0 },
+  { id: 'easypaisa', name: 'EasyPaisa', label: 'EasyPaisa', icon: 'Phone', enabled: false, order: 2, requiresVerification: true, fee: 0 },
+  { id: 'jazzcash', name: 'JazzCash', label: 'JazzCash', icon: 'Smartphone', enabled: false, order: 3, requiresVerification: true, fee: 0 },
+  { id: 'bank', name: 'Bank Transfer', label: 'Bank Transfer', icon: 'Landmark', enabled: false, order: 4, requiresVerification: true, fee: 0 },
+  { id: 'card', name: 'Debit/Credit Card', label: 'Card', icon: 'CreditCard', enabled: false, order: 5, requiresVerification: true, fee: 0 },
 ];
 
 export const PAYMENT_METHOD_LABELS = PAYMENT_METHODS.reduce((acc, method) => {
@@ -127,6 +128,8 @@ export const COLLECTION_NAMES = {
   activityLogs: 'activityLogs',
   expenses: 'expenses',
   payments: 'payments',
+  paymentMatches: 'payment_matches',
+  fraudReviews: 'fraud_reviews',
   commissions: 'commissions',
   notifications: 'notifications',
 };
@@ -162,7 +165,7 @@ export const MANAGER_ROUTES = {
   reports: '/manager/reports',
   salespersons: '/manager/salespersons',
   shifts: '/manager/shifts',
-  activityLogs: '/manager/activity-logs',
+  activityLogs: '/manager/activity',
   approvals: '/manager/approvals',
   userMonitoring: '/manager/user-monitoring',
   staff: '/manager/staff',
@@ -577,7 +580,6 @@ export const HOTKEYS = {
     FOCUS_PRICE: 'F4',
     FOCUS_QTY: 'F5',
     FOCUS_DISCOUNT: 'F6',
-    CUSTOMER_DIALOG: 'F7',
     CHECKOUT: 'F8',
     SAVE_DRAFT: 'F9',
     HOLD_BILL: 'F10',

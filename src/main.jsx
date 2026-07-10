@@ -14,17 +14,28 @@ import './styles/index.css';
 
 import { AuthProvider }       from './context/AuthContext.jsx';
 import { SettingsProvider }   from './context/SettingsContext.jsx';
+import { LanguageProvider }   from './context/LanguageContext.jsx';
 
-// ── IndexedDB (non-blocking) ─────────────────────────────────
+// ── IndexedDB — MUST open Dexie before sync workers ──────────
+import('./db/index.js')
+  .then((m) => m.initDatabase())
+  .then((db) => {
+    if (!db) console.warn('[Dexie] opened with warnings — offline mode may retry');
+    else console.log('[Dexie] ✅ ready');
+  })
+  .catch((err) => console.warn('[Dexie] init failed:', err?.message || err));
+
 import('./services/indexedDBService.js')
   .then(m => m.openDB())
   .then(() => console.log('[IndexedDB] ✅ ready'))
   .catch(err => console.warn('[IndexedDB] init failed:', err));
 
-// ── Bill sync worker ─────────────────────────────────────────
-import('./services/syncWorker.js')
+// ── Bill sync worker (after Dexie init) ───────────────────────
+Promise.resolve()
+  .then(() => import('./db/index.js').then((m) => m.initDatabase()))
+  .then(() => import('./services/syncWorker.js'))
   .then(m => {
-    m.startSyncWorker(15_000);
+    m.startSyncWorker(5_000);
     console.log('[SyncWorker] ✅ started');
   })
   .catch(err => console.warn('[SyncWorker] failed:', err));
@@ -36,6 +47,29 @@ import('./services/cashierSyncWorker.js')
     console.log('[CashierSyncWorker] ✅ started');
   })
   .catch(err => console.warn('[CashierSyncWorker] failed:', err));
+
+// ── Settings sync: outbound (PC1 queue → Firestore) + inbound (Firestore → all PCs)
+import('./services/settingsSyncWorker.js')
+  .then(m => {
+    m.startSettingsSyncWorker();
+    console.log('[SettingsSyncWorker] ✅ outbound started');
+  })
+  .catch(err => console.warn('[SettingsSyncWorker] failed:', err));
+
+import('./services/settingsRemoteSync.js')
+  .then(m => {
+    m.startSettingsRemoteSync();
+    console.log('[SettingsRemoteSync] ✅ inbound started (all PCs)');
+  })
+  .catch(err => console.warn('[SettingsRemoteSync] failed:', err));
+
+// ── Scheduled backup runner (daily / weekly / monthly) ───────
+import('./services/backupService.js')
+  .then(m => {
+    m.initScheduledBackupRunner();
+    console.log('[BackupService] ✅ scheduled runner started');
+  })
+  .catch(err => console.warn('[BackupService] runner failed:', err));
 
 // ── PWA Service Worker ───────────────────────────────────────
 import { registerSW } from 'virtual:pwa-register';
@@ -92,9 +126,30 @@ if (!rootElement) {
   throw new Error('[AOne POS] #root element not found in index.html');
 }
 
-// Kick-start sync queue
+// Kick-start sync queue + preload settings SSoT (offline admin pages)
+import('./services/settingsStore.js')
+  .then(async (m) => {
+    await m.hydrateSettings?.();
+  })
+  .catch(() => {});
+
 import('./services/syncService.js')
   .then(m => m.processQueue?.())
+  .catch(() => {});
+
+// ── Speech: preload voices + prime on first user gesture (Chromebook / Chrome) ──
+import('./utils/countingSpeech.js')
+  .then((m) => {
+    m.ensureSpeechVoices?.().catch(() => {});
+    const primeOnce = () => {
+      m.ensureUrduVoicesReady?.().catch(() => {});
+      m.primeSpeechEngine?.();
+      window.removeEventListener('pointerdown', primeOnce, true);
+      window.removeEventListener('keydown', primeOnce, true);
+    };
+    window.addEventListener('pointerdown', primeOnce, true);
+    window.addEventListener('keydown', primeOnce, true);
+  })
   .catch(() => {});
 
 // ── Render ───────────────────────────────────────────────────
@@ -105,11 +160,13 @@ createRoot(rootElement).render(
       ✅ App.jsx does NOT have AuthProvider
     */}
     <AuthProvider>
-      <SettingsProvider>
-        <BrowserRouter>
-          <App />
-        </BrowserRouter>
-      </SettingsProvider>
+        <SettingsProvider>
+          <LanguageProvider>
+            <BrowserRouter>
+              <App />
+            </BrowserRouter>
+          </LanguageProvider>
+        </SettingsProvider>
     </AuthProvider>
   </StrictMode>,
 );

@@ -5,21 +5,10 @@ import { useState, useEffect } from 'react';
 import { Navigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import LoadingSpinner from '../components/ui/LoadingSpinner';
+import { resolveRoleHome } from '../utils/roleHome';
 
 const SetupRoute = ({ children }) => {
-  const { isSetupComplete, isAuthenticated, loading, initializing } = useAuth();
-
-  // Show loading while checking auth state
-  if (loading || initializing) {
-    return <LoadingSpinner fullScreen />;
-  }
-
-  // If already authenticated, redirect to dashboard
-  if (isAuthenticated) {
-    return <Navigate to="/dashboard" replace />;
-  }
-
-  // Check if setup is complete (localStorage + Firestore check)
+  const { isSetupComplete, isAuthenticated, loading, initializing, userData, activeRole, hasPermission } = useAuth();
   const [setupComplete, setSetupComplete] = useState(null);
 
   useEffect(() => {
@@ -29,6 +18,14 @@ const SetupRoute = ({ children }) => {
     };
     checkSetup();
   }, [isSetupComplete]);
+
+  if (loading || initializing) {
+    return <LoadingSpinner fullScreen />;
+  }
+
+  if (isAuthenticated && userData) {
+    return <Navigate to={resolveRoleHome({ userData, activeRole, hasPermission })} replace />;
+  }
 
   if (setupComplete === null) {
     return <LoadingSpinner fullScreen />;

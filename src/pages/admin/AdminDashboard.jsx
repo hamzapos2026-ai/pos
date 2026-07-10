@@ -1,94 +1,105 @@
 // File: src/pages/admin/AdminDashboard.jsx
 
 import { useState, lazy, Suspense } from 'react';
-import { Routes, Route, useLocation } from 'react-router-dom';
+import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { cn } from '../../utils/cn';
 import { useTheme } from '../../context/ThemeContext';
+import { useLanguage } from '../../hooks/useLanguage';
 import AdminSidebar from '../../components/admin/AdminSidebar';
 import AdminHeader  from '../../components/admin/AdminHeader';
+import AdminPageGuide from '../../components/admin/AdminPageGuide';
 
-// ═══════════════════════════════════════════════════════════════
-// LAZY IMPORTS
-// ═══════════════════════════════════════════════════════════════
 const DashboardHome      = lazy(() => import('./DashboardHome'));
 const UserManagement     = lazy(() => import('./UserManagement'));
 const BranchManagement   = lazy(() => import('./BranchManagement'));
 const ShopSettings       = lazy(() => import('./ShopSettings'));
 const PaymentMethods     = lazy(() => import('./PaymentMethods'));
 const DiscountSettings   = lazy(() => import('./DiscountSettings'));
-const FeatureToggles     = lazy(() => import('./FeatureToggles'));
 const RolePermissions    = lazy(() => import('./RolePermissions'));
 const BillsControl       = lazy(() => import('./BillsControl'));
 const CustomersControl   = lazy(() => import('./CustomersControl'));
 const CashFlowMonitor    = lazy(() => import('./CashFlowMonitor'));
 const CommissionSettings = lazy(() => import('./CommissionSettings'));
 const ReportsAnalytics   = lazy(() => import('./ReportsAnalytics'));
-const SalespersonReports = lazy(() => import('./SalespersonReports'));   // ⬅ NEW
+const SalespersonReports = lazy(() => import('./SalespersonReports'));
 const AuditLogs          = lazy(() => import('./AuditLogs'));
-const SuperApprovals     = lazy(() => import('./SuperApprovals'));
+const FirebaseAssistant   = lazy(() => import('./FirebaseAssistant'));
 const BackupExport       = lazy(() => import('./BackupExport'));
 const SyncMonitor        = lazy(() => import('./SyncMonitor'));
+const Reconciliation     = lazy(() => import('./Reconciliation'));
 const DeviceManagement   = lazy(() => import('./DeviceManagement'));
 const RoleSettings       = lazy(() => import('./RoleSettings'));
+const BillerSummaryDiscountSettings = lazy(() => import('./BillerSummaryDiscountSettings'));
+const CashierDiscountSettings = lazy(() => import('./CashierDiscountSettings'));
+const ProductCatalogSettings = lazy(() => import('./ProductCatalogSettings'));
 
-// ═══════════════════════════════════════════════════════════════
-// LOADER
-// ═══════════════════════════════════════════════════════════════
 const PageLoader = () => (
   <div className="flex items-center justify-center h-96">
     <div className="w-10 h-10 border-4 border-amber-500/30 border-t-amber-500 rounded-full animate-spin" />
   </div>
 );
 
-// ═══════════════════════════════════════════════════════════════
-// PAGE TITLE MAP
-// ═══════════════════════════════════════════════════════════════
-const titleMap = {
-  '/admin':                  { title: 'Dashboard',           subtitle: 'Overview & key metrics' },
-  '/admin/users':            { title: 'User Management',     subtitle: 'Create and manage system users' },
-  '/admin/branches':         { title: 'Branch Management',   subtitle: 'Manage store branches' },
-  '/admin/customers':        { title: 'Customer Database',   subtitle: 'Manage customer records' },
-  '/admin/bills':            { title: 'Bills Control',       subtitle: 'View, edit and restore bills' },
-  '/admin/cashflow':         { title: 'Cash Flow Monitor',   subtitle: 'Cashier registers & transfers' },
-  '/admin/commission':       { title: 'Commission Settings', subtitle: 'Salesperson agents & payout rules' },
-  '/admin/reports':          { title: 'Reports & Analytics', subtitle: 'System-wide reports' },
-  '/admin/sp-reports':       { title: 'Salesperson Reports', subtitle: 'Item-level commission tracking & payouts' }, // ⬅ NEW
-  '/admin/audit-logs':       { title: 'Audit Logs',          subtitle: 'Immutable activity history' },
-  '/admin/sync-monitor':     { title: 'Sync Monitor',        subtitle: 'Sync queue & failures' },
-  '/admin/devices':          { title: 'Device Management',   subtitle: 'Connected PWA devices' },
-  '/admin/shop-settings':    { title: 'Shop Settings',       subtitle: 'Brand, currency & receipts' },
-  '/admin/payment-methods':  { title: 'Payment Methods',     subtitle: 'Manage payment options' },
-  '/admin/discounts':        { title: 'Discount Settings',   subtitle: 'Limits & approvals' },
-  '/admin/features':         { title: 'Feature Toggles',     subtitle: 'Enable/disable modules' },
-  '/admin/permissions':      { title: 'Roles & Permissions', subtitle: 'Custom permission groups' },
-  '/admin/super-approvals':  { title: 'Super Approvals',     subtitle: 'Pending approval requests' },
-  '/admin/backup':           { title: 'Backup & Export',     subtitle: 'Data export & maintenance' },
+const PAGE_KEYS = {
+  '/admin':                  'dashboard',
+  '/admin/users':            'users',
+  '/admin/branches':         'branches',
+  '/admin/customers':        'customers',
+  '/admin/bills':            'bills',
+  '/admin/cashflow':         'cashflow',
+  '/admin/commission':       'commission',
+  '/admin/reports':          'reports',
+  '/admin/sp-reports':       'spReports',
+  '/admin/audit-logs':       'auditLogs',
+  '/admin/sync-monitor':     'syncMonitor',
+  '/admin/devices':          'devices',
+  '/admin/shop-settings':    'shopSettings',
+  '/admin/payment-methods':  'paymentMethods',
+  '/admin/discounts':        'discounts',
+  '/admin/biller-summary-discount': 'summaryDiscount',
+  '/admin/settings/product-catalog': 'productCatalog',
+  '/admin/permissions':      'permissions',
+  '/admin/cashier-discounts': 'cashierDiscounts',
+  '/admin/reconciliation': 'reconciliation',
+  '/admin/backup':           'backup',
+  '/admin/firebase-assistant': 'firebaseAssistant',
 };
 
-// ═══════════════════════════════════════════════════════════════
-// MAIN DASHBOARD
-// ═══════════════════════════════════════════════════════════════
 const AdminDashboard = () => {
-  const { isDark }                  = useTheme();
+  const { isDark } = useTheme();
+  const { t, isRTL } = useLanguage();
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const location                    = useLocation();
+  const location = useLocation();
 
   const getMeta = () => {
     const path = location.pathname.replace(/\/$/, '') || '/admin';
     if (path.startsWith('/admin/settings/')) {
-      const r = path.split('/').pop();
+      const role = path.split('/').pop() || '';
+      const roleKey = role === 'superAdmin' ? 'superAdmin' : role;
+      const roleLabel = role
+        ? t(`admin.roleNames.${roleKey}`, t(`roles.${roleKey}`, role))
+        : t('admin.roleSettingsPage.role', 'Role');
       return {
-        title:    `${r[0].toUpperCase()}${r.slice(1)} Settings`,
-        subtitle: 'Role configuration',
+        title: t('admin.pages.roleSettings.title', `${roleLabel} Settings`, { role: roleLabel }),
+        subtitle: t('admin.pages.roleSettings.subtitle', 'Role configuration'),
       };
     }
-    return titleMap[path] || { title: 'Admin', subtitle: '' };
+    const key = PAGE_KEYS[path];
+    if (key) {
+      return {
+        title: t(`admin.pages.${key}.title`, key),
+        subtitle: t(`admin.pages.${key}.subtitle`, ''),
+      };
+    }
+    return {
+      title: t('admin.pages.default.title', 'Admin'),
+      subtitle: t('admin.pages.default.subtitle', ''),
+    };
   };
 
   const meta = getMeta();
 
   return (
-    <div className={cn('min-h-screen', isDark ? 'bg-[#0a0805]' : 'bg-amber-50/30')}>
+    <div dir={isRTL ? 'rtl' : 'ltr'} className={cn('min-h-screen', isDark ? 'bg-[#0a0805]' : 'bg-amber-50/30')}>
       <AdminSidebar
         isOpen={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
@@ -101,43 +112,37 @@ const AdminDashboard = () => {
           title={meta.title}
           subtitle={meta.subtitle}
         />
+        <AdminPageGuide pathname={location.pathname} />
 
         <main>
           <Suspense fallback={<PageLoader />}>
             <Routes>
-              {/* Overview */}
               <Route index                       element={<DashboardHome />} />
-
-              {/* Management */}
               <Route path="users"                element={<UserManagement />} />
               <Route path="branches"             element={<BranchManagement />} />
-              <Route path="super-approvals"      element={<SuperApprovals />} />
               <Route path="customers"            element={<CustomersControl />} />
               <Route path="bills"                element={<BillsControl />} />
-
-              {/* Finance */}
               <Route path="cashflow"             element={<CashFlowMonitor />} />
               <Route path="commission"           element={<CommissionSettings />} />
-
-              {/* Reports & Logs */}
               <Route path="reports"              element={<ReportsAnalytics />} />
-              <Route path="sp-reports"           element={<SalespersonReports />} />   {/* ⬅ NEW */}
+              <Route path="sp-reports"           element={<SalespersonReports />} />
               <Route path="audit-logs"           element={<AuditLogs />} />
               <Route path="sync-monitor"         element={<SyncMonitor />} />
+              <Route path="reconciliation"      element={<Reconciliation />} />
               <Route path="devices"              element={<DeviceManagement />} />
-
-              {/* Configuration */}
               <Route path="shop-settings"        element={<ShopSettings />} />
               <Route path="payment-methods"      element={<PaymentMethods />} />
               <Route path="discounts"            element={<DiscountSettings />} />
-              <Route path="features"             element={<FeatureToggles />} />
+              <Route path="cashier-discounts"   element={<CashierDiscountSettings />} />
+              <Route path="biller-summary-discount" element={<BillerSummaryDiscountSettings />} />
+              <Route path="settings/product-catalog" element={<ProductCatalogSettings />} />
+              <Route path="features"             element={<Navigate to="/admin/permissions" replace />} />
               <Route path="permissions"          element={<RolePermissions />} />
-
-              {/* Data */}
               <Route path="backup"               element={<BackupExport />} />
-
-              {/* Role Settings (dynamic) */}
+              <Route path="firebase-assistant" element={<FirebaseAssistant />} />
+              <Route path="super-approvals" element={<Navigate to="/admin" replace />} />
               <Route path="settings/:role"       element={<RoleSettings />} />
+              <Route path="*"                    element={<Navigate to="/admin" replace />} />
             </Routes>
           </Suspense>
         </main>

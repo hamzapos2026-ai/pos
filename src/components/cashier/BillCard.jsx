@@ -12,7 +12,11 @@ import { useTheme } from '../../context/ThemeContext';
 const fmt = (n) => Number(n || 0).toLocaleString('en-PK');
 const timeAgo = (ts) => {
   if (!ts) return '';
-  const d = ts?.toDate ? ts.toDate() : new Date(ts);
+  let d;
+  if (ts?.toDate) d = ts.toDate();
+  else if (typeof ts === 'object' && typeof ts.seconds === 'number') d = new Date(ts.seconds * 1000);
+  else d = new Date(ts);
+  if (isNaN(d.getTime())) return '';
   const m = Math.floor((Date.now() - d) / 60000);
   if (m < 1) return 'just now';
   if (m < 60) return `${m}m ago`;
@@ -73,7 +77,7 @@ const BillCard = memo(({ bill, onView, onPay, onCancel, onEdit, index = 0 }) => 
             </div>
             <div className="min-w-0">
               <div className="flex items-center gap-1.5 flex-wrap">
-                <span className={`text-sm font-bold font-mono ${txt}`}>{serial}</span>
+                <span className={`text-[11px] font-bold font-mono whitespace-nowrap ${txt}`}>{serial}</span>
                 <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold border ${cfg.badge}`}>
                   <Icon className="w-2.5 h-2.5" />
                   {status.toUpperCase()}

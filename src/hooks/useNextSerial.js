@@ -1,34 +1,39 @@
 // src/hooks/useNextSerial.js
-// ✅ PRODUCTION FINAL - Works with global serial v20
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import {
+  bootstrapNextSerial,
   subscribeNextSerial,
   syncSerialFromFirebase,
-  getCurrentNextSerial,
+  refreshOrdersMaxCache,
 } from "../services/serialService";
+import useStoresMap, { resolveSerialBranchHint } from "./useStoresMap";
 
-// Track synced sessions (per store+user combo)
-const _syncedSessions = new Set();
-
-export const useNextSerial = ({ storeId, user, enabled = true }) => {
-  const [state, setState] = useState({
-    serial: null,
+export const useNextSerial = ({ storeId, branchId = '', user, enabled = true, storesMap: storesMapProp = null }) => {
+  const storesMapInternal = useStoresMap();
+  const storesMap = storesMapProp || storesMapInternal;
+  const branchHint = useMemo(
+    () => resolveSerialBranchHint(branchId || storeId, storesMap, user),
+    [branchId, storeId, storesMap, user],
+  );
+  const [state, setState] = useState(() => ({
+    serial: enabled && storeId && user?.uid
+      ? bootstrapNextSerial(storeId, user, branchHint)
+      : null,
     counter: null,
-    ready: false,
-    loading: true,
+    ready: Boolean(enabled && storeId && user?.uid),
+    loading: false,
     storeCode: null,
     pendingOffline: 0,
-  });
-  
+  }));
+
   const mountedRef = useRef(true);
-  
+
   const uid = user?.uid;
-  const userKey = uid ? `${storeId}_${uid}` : null;
-  
+
   useEffect(() => {
     mountedRef.current = true;
-    
+
     if (!enabled || !storeId || !uid) {
       setState({
         serial: null,
@@ -40,37 +45,40 @@ export const useNextSerial = ({ storeId, user, enabled = true }) => {
       });
       return () => { mountedRef.current = false; };
     }
-    
-    // Subscribe to live updates (instant)
+
+    const instant = bootstrapNextSerial(storeId, user, branchHint);
+    if (instant) {
+      setState((prev) => ({
+        ...prev,
+        serial: instant,
+        ready: true,
+        loading: false,
+      }));
+    }
+
     const unsub = subscribeNextSerial((data) => {
       if (!mountedRef.current) return;
       setState({
         serial: data.serial,
         counter: data.counter,
-        ready: data.ready,
-        loading: !data.ready,
+        ready: data.ready || Boolean(data.serial),
+        loading: !data.serial && !data.ready,
         storeCode: data.storeCode,
         pendingOffline: data.pendingOffline || 0,
       });
     });
-    
-    // Sync from Firebase once per session
-    if (userKey && !_syncedSessions.has(userKey)) {
-      _syncedSessions.add(userKey);
-      
-      syncSerialFromFirebase(storeId, user)
-        .catch((err) => {
-          console.warn("[useNextSerial] Sync failed:", err?.message);
-          _syncedSessions.delete(userKey); // Allow retry
-        });
-    }
-    
+
+    syncSerialFromFirebase(storeId, user, branchHint).catch((err) => {
+      console.warn("[useNextSerial] Sync failed:", err?.message);
+    });
+    refreshOrdersMaxCache(storeId).catch(() => {});
+
     return () => {
       mountedRef.current = false;
       unsub();
     };
-  }, [storeId, uid, enabled]);
-  
+  }, [storeId, branchHint, uid, enabled, user]);
+
   return state;
 };
 

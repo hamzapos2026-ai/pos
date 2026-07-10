@@ -9,6 +9,8 @@ import {
   auth,
 } from './firebase';
 import { getCachedSetting, setCachedSetting } from './indexedDBService';
+import { DEFAULT_TENANT_ID } from '../utils/tenantScope';
+import { getDeviceId } from '../utils/billIdGenerator';
 
 const LS_KEY_ENC = 'aone_setup_complete_enc';
 const IDB_KEY = 'system_setup_done_enc';
@@ -16,7 +18,7 @@ const PBKDF_SALT = 'aone_setup_salt_v1';
 const PBKDF_ITER = 100000;
 
 const _getDeviceId = () => {
-  try { return localStorage.getItem('aone_device_id') || 'unknown_device'; } catch { return 'unknown_device'; }
+  try { return getDeviceId() || 'unknown_device'; } catch { return 'unknown_device'; }
 };
 
 const _bufToB64 = (buf) => {
@@ -35,6 +37,7 @@ const _b64ToBuf = (b64) => {
 };
 
 const deriveKey = async (deviceId) => {
+  if (typeof crypto === 'undefined' || !crypto.subtle) return null;
   const enc = new TextEncoder();
   const pass = enc.encode(deviceId || 'unknown_device');
   const salt = enc.encode(PBKDF_SALT);
@@ -54,6 +57,9 @@ const encryptJSON = async (obj) => {
   try {
     const deviceId = _getDeviceId();
     const key = await deriveKey(deviceId);
+    if (!key) {
+      try { return `PLAIN:${btoa(JSON.stringify(obj))}`; } catch { return null; }
+    }
     const iv = crypto.getRandomValues(new Uint8Array(12));
     const plain = new TextEncoder().encode(JSON.stringify(obj));
     const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, plain);
@@ -67,12 +73,16 @@ const encryptJSON = async (obj) => {
 const decryptJSON = async (payload) => {
   try {
     if (!payload || typeof payload !== 'string') return null;
+    if (payload.startsWith('PLAIN:')) {
+      try { return JSON.parse(atob(payload.slice(6))); } catch { return null; }
+    }
     const parts = payload.split(':');
     if (parts.length !== 2) return null;
     const iv = _b64ToBuf(parts[0]);
     const ct = _b64ToBuf(parts[1]);
     const deviceId = _getDeviceId();
     const key = await deriveKey(deviceId);
+    if (!key) return null;
     const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: new Uint8Array(iv) }, key, ct);
     const txt = new TextDecoder().decode(plain);
     return JSON.parse(txt);
@@ -81,19 +91,50 @@ const decryptJSON = async (payload) => {
   }
 };
 
+export const reconcileSetupFlagsFromServer = async () => {
+  try {
+    if (!isFirebaseReady() || !navigator.onLine || !firebaseDb) return false;
+    const snap = await getDoc(doc(firebaseDb, 'settings', 'setup'));
+    if (!snap.exists() || snap.data()?.setupComplete !== true) return false;
+
+    const payload = {
+      done: true,
+      completedAt: snap.data()?.completedAt?.toDate?.()?.toISOString?.() || new Date().toISOString(),
+      completedBy: 'server_reconcile',
+    };
+    const enc = await encryptJSON(payload);
+    if (enc) {
+      try { await setCachedSetting(IDB_KEY, enc); } catch { /* ignore */ }
+      try { localStorage.setItem(LS_KEY_ENC, enc); } catch { /* ignore */ }
+    }
+    try {
+      localStorage.setItem('aone-setup-complete', 'true');
+      localStorage.setItem('aone_setup_permanent_lock', 'true');
+    } catch { /* ignore */ }
+    return true;
+  } catch {
+    return false;
+  }
+};
+
 export const checkSetupStatus = async () => {
-  // 1) Try server
+  // 1) Server is authoritative when online
   try {
     if (isFirebaseReady() && navigator.onLine && firebaseDb) {
       const snap = await getDoc(doc(firebaseDb, 'settings', 'setup'));
-      if (snap.exists() && snap.data()?.setupComplete === true) return true;
+      if (snap.exists() && snap.data()?.setupComplete === true) {
+        await reconcileSetupFlagsFromServer();
+        return true;
+      }
+      // Super Admin factory reset — setup doc removed or incomplete
+      return false;
     }
   } catch (err) {
     // If permission denied, treat as complete to avoid re-run
     if (err && (err.code === 'permission-denied' || (err.message || '').includes('permission'))) return true;
   }
 
-  // 2) Try IndexedDB encrypted flag
+  // 2) Offline fallback — IndexedDB encrypted flag
   try {
     const raw = await getCachedSetting(IDB_KEY);
     if (raw) {
@@ -136,6 +177,7 @@ export const setSetupCompleteFlag = async ({ completedBy = 'client' } = {}) => {
       await setDoc(doc(firebaseDb, 'settings', 'setup'), {
         setupComplete: true,
         permanent: true,
+        tenantId: DEFAULT_TENANT_ID,
         completedAt: serverTimestamp(),
         completedBy: auth?.currentUser?.uid || completedBy,
         completedByEmail: auth?.currentUser?.email || null,
@@ -157,4 +199,5 @@ export default {
   checkSetupStatus,
   setSetupCompleteFlag,
   clearSetupFlag,
+  reconcileSetupFlagsFromServer,
 };

@@ -3,7 +3,7 @@
 // Runs every 15s when online, processes sync_queue items
 
 import {
-  collection, addDoc, doc, updateDoc, getDoc, serverTimestamp,
+  collection, addDoc, doc, serverTimestamp,
 } from "firebase/firestore";
 import { db } from "./firebase";
 import {
@@ -12,8 +12,9 @@ import {
   incrementRetry,
   moveToManualReview,
 } from "./offlinePaymentService";
+import { reconcilePayment } from "./paymentReconciliationService";
 import { logCashierAction } from "./cashierAuditService";
-
+import { toFirebaseCashierPaymentPatch } from "./billPaymentWriteService";
 const SYNC_INTERVAL_MS = 15000; // 15 seconds
 let syncTimer = null;
 let isSyncing = false;
@@ -24,7 +25,7 @@ let lastSyncAt = 0;
 // ══════════════════════════════════════════════════════════════
 const getPaymentRecord = async (localId) => {
   try {
-    const dbReq = indexedDB.open("cashier_offline_payments", 2);
+    const dbReq = indexedDB.open("cashier_offline_payments", 3);
     return new Promise((resolve) => {
       dbReq.onsuccess = (e) => {
         const idb = e.target.result;
@@ -50,104 +51,46 @@ const syncPaymentItem = async (queueItem) => {
     return { success: false, error: "Record not found" };
   }
 
+  if (payment.status === 'manual_review' || payment.cashierEscalated === true) {
+    return { success: false, needsReview: true, alreadyReviewed: true };
+  }
+
+  if (payment.status === 'synced') {
+    return { success: true, alreadySynced: true };
+  }
+
   try {
-    // 1. Check if bill exists in Firebase
-    const billSnap = await getDoc(doc(db, "orders", payment.billId));
+    const result = await reconcilePayment(payment);
 
-    if (!billSnap.exists()) {
-      // Bill not in Firebase — move to manual review
-      await moveToManualReview(payment.localId, "Bill not found in Firebase");
-      return { success: false, error: "Bill not found", needsReview: true };
+    if (result.success) {
+      console.log(`[SyncWorker] ✅ Reconciled payment: ${payment.billSerial}`);
+      return { success: true };
     }
 
-    const bill = billSnap.data();
-    const actualAmount = bill.totalAmount || 0;
-
-    // 2. Verify amount matches
-    if (Number(payment.enteredAmount) !== actualAmount) {
-      await moveToManualReview(
-        payment.localId,
-        `Amount mismatch: offline=${payment.enteredAmount}, actual=${actualAmount}`
-      );
-      return { success: false, error: "Amount mismatch", needsReview: true };
+    if (result.needsRetry) {
+      console.log(`[SyncWorker] ⏳ Payment pending bill sync: ${payment.billSerial}`);
+      return { success: false, needsRetry: true, error: result.reason };
     }
 
-    // 3. Update bill to paid
-    await updateDoc(doc(db, "orders", payment.billId), {
-      status: "paid",
-      paymentType: payment.paymentMethod,
-      paidAt: serverTimestamp(),
-      paidBy: payment.cashierId,
-      paidByName: payment.cashierName,
-      amountReceived: actualAmount,
-      changeGiven: 0,
-      isOfflineSync: true,
-      offlineSavedAt: payment.savedAt,
-      offlineDeviceId: payment.deviceId,
-      cashierHandover: true,
-    });
+    if (result.needsReview) {
+      try {
+        const { findBillForPayment } = await import('./paymentReconciliationService');
+        const { isCashierCollected } = await import('../utils/cashierOrderUtils');
+        const bill = await findBillForPayment(payment);
+        if (bill?.instantPayTrusted || isCashierCollected(bill)) {
+          console.log(`[SyncWorker] ✅ Already paid (trusted) — skip review: ${payment.billSerial}`);
+          return { success: true, trustedSkip: true };
+        }
+      } catch { /* ignore */ }
 
-    // 4. Add to payments collection (parallel)
-    await addDoc(collection(db, "payments"), {
-      billId: payment.billId,
-      billSerial: payment.billSerial,
-      amount: actualAmount,
-      paymentMethod: payment.paymentMethod,
-      cashierId: payment.cashierId,
-      cashierName: payment.cashierName,
-      branchId: payment.storeId,
-      storeId: payment.storeId,
-      userId: payment.cashierId,
-      customer: payment.customer || {},
-      isOffline: true,
-      offlineSavedAt: payment.savedAt,
-      syncedAt: serverTimestamp(),
-      deviceId: payment.deviceId,
-      timestamp: serverTimestamp(),
-    });
+      const reviewMsg = result.details
+        ? `${result.reason || 'review'}: ${result.details}`
+        : (result.reason || 'Reconciliation failed');
+      await moveToManualReview(payment.localId, reviewMsg);
+      return { success: false, error: result.reason, needsReview: true };
+    }
 
-    // 5. Add to cashierActions collection
-    await addDoc(collection(db, "cashierActions"), {
-      actionType: "PAID_OFFLINE_SYNC",
-      orderId: payment.billId,
-      billSerial: payment.billSerial,
-      serialNo: payment.billSerial,
-      storeId: payment.storeId,
-      branchId: payment.storeId,
-      cashierId: payment.cashierId,
-      cashierName: payment.cashierName,
-      userId: payment.cashierId,
-      totalAmount: actualAmount,
-      paymentType: payment.paymentMethod,
-      customer: payment.customer || {},
-      items: payment.items || [],
-      offlineSavedAt: payment.savedAt,
-      isOfflineSync: true,
-      deviceId: payment.deviceId,
-      timestamp: serverTimestamp(),
-    });
-
-    // 6. Audit log
-    await logCashierAction({
-      action: "OFFLINE_PAYMENT_SYNCED",
-      orderId: payment.billId,
-      billSerial: payment.billSerial,
-      userId: payment.cashierId,
-      userName: payment.cashierName,
-      storeId: payment.storeId,
-      amount: actualAmount,
-      paymentType: payment.paymentMethod,
-      metadata: {
-        localId: payment.localId,
-        queueId: queueItem.queueId,
-        deviceId: payment.deviceId,
-        offlineSavedAt: payment.savedAt,
-        syncDurationMs: Date.now() - new Date(payment.savedAt).getTime(),
-      },
-    });
-
-    console.log(`[SyncWorker] ✅ Synced payment: ${payment.billSerial}`);
-    return { success: true };
+    return { success: false, error: result.error || "Sync failed" };
   } catch (err) {
     console.error(`[SyncWorker] Sync error for ${payment.billSerial}:`, err);
     return { success: false, error: err.message };
@@ -175,13 +118,14 @@ const syncManualBillItem = async (queueItem) => {
       subtotal: bill.enteredAmount,
       totalDiscount: 0,
       totalQty: (bill.items || []).reduce((s, i) => s + (i.qty || 1), 0),
-      status: "paid",
-      paymentType: bill.paymentMethod,
+      ...toFirebaseCashierPaymentPatch({
+        amount: bill.enteredAmount,
+        paymentType: bill.paymentMethod,
+        cashierId: bill.cashierId,
+        cashierName: bill.cashierName,
+      }),
       paidAt: serverTimestamp(),
-      paidBy: bill.cashierId,
-      paidByName: bill.cashierName,
-      amountReceived: bill.enteredAmount,
-      changeGiven: 0,
+      cashierPaidAt: serverTimestamp(),
       branchId: bill.storeId,
       storeId: bill.storeId,
       userId: bill.cashierId,
@@ -191,7 +135,6 @@ const syncManualBillItem = async (queueItem) => {
       offlineSavedAt: bill.savedAt,
       offlineDeviceId: bill.deviceId,
       createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
       timestamp: serverTimestamp(),
     });
 
@@ -247,9 +190,7 @@ export const runSync = async () => {
     console.log("[SyncWorker] Already syncing, skip");
     return;
   }
-  if (!navigator.onLine) {
-    return;
-  }
+  // Always process — Dexie bills match on same PC even when biller is offline
 
   isSyncing = true;
   lastSyncAt = Date.now();
@@ -283,8 +224,13 @@ export const runSync = async () => {
           await markSynced(item.queueId, item.targetLocalId);
           synced++;
         } else if (result.needsReview) {
-          await markSynced(item.queueId, null); // Remove from queue
+          await markSynced(item.queueId, null);
           reviewed++;
+        } else if (result.alreadyReviewed) {
+          await markSynced(item.queueId, null);
+        } else if (result.needsRetry) {
+          // Bill not synced yet — keep in queue, no retry penalty
+          console.log(`[SyncWorker] Waiting for bill: ${item.targetLocalId}`);
         } else {
           await incrementRetry(item.queueId, result.error);
           failed++;
@@ -299,6 +245,19 @@ export const runSync = async () => {
     console.log(
       `[SyncWorker] ✅ Done: ${synced} synced, ${failed} failed, ${reviewed} need review`
     );
+
+    if (synced > 0) {
+      try {
+        const { reconcilePaidBillsAcrossDevices } = await import('./paidBillIndexService');
+        let storeId = null;
+        for (const item of pending) {
+          const payment = await getPaymentRecord(item.targetLocalId);
+          storeId = payment?.storeId || payment?.branchId || null;
+          if (storeId) break;
+        }
+        if (storeId) await reconcilePaidBillsAcrossDevices(storeId);
+      } catch { /* non-critical */ }
+    }
 
     // Dispatch event for UI to update
     window.dispatchEvent(

@@ -37,16 +37,56 @@ export const ensureUniqueLineItemIds = (items) => {
 /**
  * Get device ID (cached in localStorage)
  */
+const _normalizeDeviceId = (value) => String(value || '')
+  .trim()
+  .toUpperCase()
+  .replace(/[^A-Z0-9]/g, '');
+
+const _stableDeviceHash = (input) => {
+  let hash = 0;
+  const text = String(input || '');
+  for (let i = 0; i < text.length; i += 1) {
+    hash = ((hash << 5) - hash) + text.charCodeAt(i);
+    hash |= 0;
+  }
+  const positive = Math.abs(hash) || 1;
+  return positive.toString(36).slice(-6).toUpperCase().padStart(6, '0');
+};
+
 export const getDeviceId = () => {
   try {
-    let id = localStorage.getItem("aone_device_id");
-    if (!id) {
-      id = Math.random().toString(36).slice(2, 10).toUpperCase();
-      localStorage.setItem("aone_device_id", id);
+    const existingId = _normalizeDeviceId(localStorage.getItem('aone_device_id'));
+    if (existingId) {
+      return existingId;
     }
+
+    const deviceParts = [];
+    if (typeof navigator !== 'undefined') {
+      deviceParts.push(navigator.userAgent || '');
+      deviceParts.push(navigator.platform || '');
+      deviceParts.push(navigator.vendor || '');
+      deviceParts.push(navigator.language || '');
+      if (typeof screen !== 'undefined') {
+        deviceParts.push(String(screen.width || ''));
+        deviceParts.push(String(screen.height || ''));
+        deviceParts.push(String(screen.colorDepth || ''));
+      }
+      try {
+        const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+        if (tz) deviceParts.push(tz);
+      } catch (err) {
+        /* ignore */
+      }
+    }
+
+    const raw = deviceParts.filter(Boolean).join('|');
+    const suffix = raw ? _stableDeviceHash(raw) : Math.random().toString(36).slice(2, 8).toUpperCase();
+    const id = _normalizeDeviceId(`DEV${suffix}`);
+
+    localStorage.setItem('aone_device_id', id);
     return id;
   } catch {
-    return "UNKNOWN";
+    return 'UNKNOWN';
   }
 };
 

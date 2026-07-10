@@ -111,7 +111,7 @@ export const verifyAmountMatch = (qrAmount, billAmount) => {
  */
 export const parseQRCode = (qrString) => {
   if (!qrString) return null;
-  const trimmed = String(qrString).trim();
+  const trimmed = String(qrString).trim().replace(/^#+/, '');
 
   const decoded = decodeAndVerifyQR(trimmed);
 

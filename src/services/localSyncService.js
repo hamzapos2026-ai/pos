@@ -16,7 +16,8 @@ import {
   getDocs, serverTimestamp, runTransaction, doc, setDoc, deleteDoc, limit, getDoc,
 } from "firebase/firestore";
 import { db as firebaseDb } from "./firebase";
-import { db, initDatabase } from "../db/index";
+import { db, initDatabase, ensureDbReady } from "../db/index";
+import { getHasInternet } from "../utils/networkReachability";
 
 // ── Configuration ──────────────────────────────────────────
 const MAX_BATCH_SIZE = 50;
@@ -34,6 +35,7 @@ const _retryKey = (localId) => `retry_${localId}`;
 
 const getOfflineOrdersForSync = async () => {
   try {
+    await ensureDbReady();
     return await db.orders
       .filter((order) =>
         !order.firebaseId &&      // not yet synced to Firebase
@@ -129,13 +131,15 @@ try {
   }
 } catch {}
 
-// ── Auto-cleanup: delete local record after confirmed sync ──
+// Keep synced orders locally for Recent Orders UI (mark only — do not delete)
 const _cleanupSyncedOrder = async (localId) => {
   try {
-    // Only delete if record is confirmed synced (has firebaseId)
     const record = await db.orders.where('localId').equals(localId).first();
-    if (record?.firebaseId) {
-      await db.orders.where('localId').equals(localId).delete();
+    if (record?.firebaseId || record?.syncStatus === 'synced') {
+      await db.orders.where('localId').equals(localId).modify({
+        synced: true,
+        syncStatus: 'synced',
+      });
     }
   } catch { /* non-critical */ }
 };
@@ -149,11 +153,12 @@ export const syncOfflineOrders = async () => {
     return { synced: 0, failed: 0, errors: [], skipped: true };
   }
 
-  if (!navigator.onLine) {
+  if (!getHasInternet()) {
     console.warn("[localSync] Offline, skipping sync");
     return { synced: 0, failed: 0, errors: [], offline: true };
   }
 
+  await ensureDbReady();
   isSyncing = true;
 
   try {
@@ -222,6 +227,44 @@ export const syncOfflineOrders = async () => {
           } catch (err) {
             console.warn(`[localSync] localId check failed (non-critical):`, err?.message);
             // Continue with billId check — don't fail the sync
+          }
+        }
+
+        // Step 0b — Same serial already on Firebase? Link local row, never create duplicate doc.
+        if (billSerial && billSerial !== 'OFFLINE') {
+          try {
+            let existingBySerial = null;
+            for (const field of ['billSerial', 'serialNo']) {
+              const serialSnap = await getDocs(query(
+                collection(firebaseDb, 'orders'),
+                where(field, '==', billSerial),
+                limit(5),
+              ));
+              existingBySerial = serialSnap.docs.find((d) => {
+                if (d.id === localId) return false;
+                const data = d.data();
+                return !data?.isDeleted && !data?.deleted;
+              });
+              if (existingBySerial) break;
+            }
+            if (existingBySerial) {
+              console.log(`[localSync] ℹ️ Serial already on Firebase: ${billSerial} → ${existingBySerial.id}`);
+              await db.orders.where('localId').equals(localId).modify({
+                firebaseId: existingBySerial.id,
+                synced: true,
+                syncedAt: new Date().toISOString(),
+                syncStatus: 'synced',
+                duplicateResolved: true,
+                linkedToFirebaseId: existingBySerial.id,
+              });
+              results.synced++;
+              results.syncedSerials.push(billSerial);
+              delete syncRetries[_retryKey(localId)];
+              await _cleanupSyncedOrder(localId);
+              continue;
+            }
+          } catch (err) {
+            console.warn(`[localSync] serial duplicate check failed for ${billSerial}:`, err?.message);
           }
         }
 
@@ -312,7 +355,8 @@ export const syncOfflineOrders = async () => {
           // ✅ Cleanup local after confirmed sync
           await _cleanupSyncedOrder(localId);
 
-          // ✅ Broadcast per-bill success for immediate UI toast
+          // ✅ Broadcast per-bill success for immediate UI update
+          const syncedRecord = await db.orders.where('localId').equals(localId).first();
           _broadcast({
             type: 'SYNC_COMPLETE',
             billSerial,
@@ -320,7 +364,35 @@ export const syncOfflineOrders = async () => {
             firebaseId,
             verified: true,
             syncedAt: new Date().toISOString(),
+            order: syncedRecord || order,
           });
+
+          // Auto-match pending payments (Scenario 1: biller offline, cashier online)
+          try {
+            const { reconcileAfterBillSync } = await import('./paymentReconciliationService.js');
+            const { runSync } = await import('./cashierSyncWorker.js');
+            reconcileAfterBillSync({
+              billId: firebaseId,
+              billSerial,
+              storeId: order.storeId,
+              localId,
+            }).then(async (r) => {
+              if (r?.matched > 0) {
+                console.log(`[localSync] 🔗 Auto-matched ${r.matched} payment(s) for ${billSerial}`);
+                try {
+                  const { notifyBillerCashierPayment } = await import('./paymentReconciliationService.js');
+                  await notifyBillerCashierPayment({
+                    billSerial,
+                    amount: order.totalAmount || order.grandTotal || order.finalTotal,
+                    cashierName: 'Cashier',
+                    localId,
+                    storeId: order.storeId,
+                  });
+                } catch { /* toast via broadcast */ }
+              }
+              runSync().catch(() => {});
+            }).catch(() => {});
+          } catch { /* non-critical */ }
 
         } catch (fbErr) {
           console.error(`[localSync] Firebase write failed for ${billSerial}:`, fbErr?.code || fbErr?.message || fbErr);
@@ -429,6 +501,11 @@ export const syncOfflineOrders = async () => {
     }
 
     console.log(`[localSync] 📊 Sync complete: ${results.synced} synced, ${results.failed} failed`);
+    if (results.synced > 0 && typeof window !== 'undefined') {
+      try {
+        window.dispatchEvent(new CustomEvent('aone:bills-cloud-updated'));
+      } catch { /* ignore */ }
+    }
     return results;
 
   } catch (err) {
@@ -443,7 +520,7 @@ export const syncOfflineOrders = async () => {
 // ── ADVANCED SYNC QUEUE WORKER ──────────────────────────────
 export const processSyncQueue = async () => {
   if (isSyncing) return;
-  if (!navigator.onLine) return;
+  if (!getHasInternet()) return;
   isSyncing = true;
 
   try {
@@ -539,7 +616,7 @@ export const clearSyncedOrders = async () => {
  */
 export const setupAutoSync = (onSyncComplete) => {
   const runSyncPass = async () => {
-    if (!navigator.onLine) return;
+    if (!getHasInternet()) return;
 
     await processSyncQueue();
 
@@ -552,15 +629,19 @@ export const setupAutoSync = (onSyncComplete) => {
   };
 
   const handleOnline = () => {
-    console.log("[localSync] 📡 Going online, starting sync...");
+    console.log("[localSync] 📡 Going online, starting instant sync...");
     runSyncPass().catch((err) => console.error('[localSync] handleOnline sync failed:', err));
+    // Second pass after 2s catches any race from DB recovery
+    setTimeout(() => {
+      runSyncPass().catch(() => {});
+    }, 2000);
   };
 
   // Trigger on coming online
   window.addEventListener("online", handleOnline);
 
   // Run an initial sync pass immediately when the app starts online
-  if (navigator.onLine) {
+  if (getHasInternet()) {
     console.log("[localSync] 📡 App started online, running initial sync...");
     runSyncPass().catch((err) => console.error('[localSync] initial sync failed:', err));
   }

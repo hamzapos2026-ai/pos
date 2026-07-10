@@ -1,24 +1,32 @@
 // File: src/pages/manager/PaymentModal.jsx
 // Purpose: Modern payment collection dialog with method selection
 
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, DollarSign, Loader2, Banknote, CreditCard, Smartphone, Landmark, AlertCircle } from 'lucide-react';
-import toast from 'react-hot-toast';
+import { toast } from 'react-hot-toast';
 import managerService from '../../services/managerService';
 import { formatPKR } from '../../utils/managerHelpers';
+import { useSettings } from '../../context/SettingsContext';
+import { getEnabledPaymentMethods } from '../../utils/paymentMethodsUtils';
 
-const METHODS = [
-  { id: 'cash', label: 'Cash', icon: Banknote },
-  { id: 'easypaisa', label: 'EasyPaisa', icon: Smartphone },
-  { id: 'jazzcash', label: 'JazzCash', icon: Smartphone },
-  { id: 'bank', label: 'Bank', icon: Landmark },
-  { id: 'card', label: 'Card', icon: CreditCard },
+const ALL_METHODS = [
+  { id: 'cash', label: 'Cash', icon: Banknote, keys: ['cash'] },
+  { id: 'easypaisa', label: 'EasyPaisa', icon: Smartphone, keys: ['easypaisa'] },
+  { id: 'jazzcash', label: 'JazzCash', icon: Smartphone, keys: ['jazzcash'] },
+  { id: 'bank', label: 'Bank', icon: Landmark, keys: ['bankTransfer', 'bank'] },
+  { id: 'card', label: 'Card', icon: CreditCard, keys: ['creditCard', 'card'] },
 ];
 
 const PaymentModal = ({ localId, total, outstanding, onClose, onSaved }) => {
+  const { settings } = useSettings();
+  const methods = useMemo(() => {
+    const enabled = new Set(getEnabledPaymentMethods(settings).flatMap((m) => [m.key, ...m.aliases]));
+    return ALL_METHODS.filter((m) => m.keys.some((k) => enabled.has(k)));
+  }, [settings?.paymentMethods]);
+  const defaultMethod = methods[0]?.id || 'cash';
   const [amount, setAmount] = useState(outstanding || 0);
-  const [method, setMethod] = useState('cash');
+  const [method, setMethod] = useState(defaultMethod);
   const [reference, setReference] = useState('');
   const [note, setNote] = useState('');
   const [loading, setLoading] = useState(false);
@@ -128,7 +136,7 @@ const PaymentModal = ({ localId, total, outstanding, onClose, onSaved }) => {
             <div>
               <label className="text-xs text-gray-400 mb-1.5 block">Payment Method</label>
               <div className="grid grid-cols-5 gap-1.5">
-                {METHODS.map(m => {
+                {methods.map(m => {
                   const Icon = m.icon;
                   const active = method === m.id;
                   return (

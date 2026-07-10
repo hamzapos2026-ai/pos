@@ -5,6 +5,7 @@
 // ✅ FIXED: isDeleted always set
 // ✅ FIXED: Race condition with _saving flag respected
 
+import { getHasInternet } from '../utils/networkReachability';
 import {
   collection,
   doc,
@@ -58,6 +59,26 @@ const _broadcast = (channel, payload) => {
     ch.postMessage(payload);
     ch.close();
   } catch {}
+};
+
+const _archiveDeadLetter = async (idb, item, errMsg = '') => {
+  try {
+    if (!idb?.failedSync) return;
+    const data = item.data || {};
+    await idb.failedSync.put({
+      queueId: item.queueId || String(item.id),
+      type: item.type || 'orders',
+      localId: data.localId || item.localId,
+      billSerial: data.billSerial || data.serialNo || data.serial,
+      status: 'dead_letter',
+      failedAt: new Date().toISOString(),
+      lastError: errMsg,
+      data,
+      attempts: item.attempts || MAX_RETRIES,
+    });
+  } catch (e) {
+    _log('WARN', 'failedSync archive failed', { error: e?.message });
+  }
 };
 
 // ══════════════════════════════════════════════════════════════
@@ -187,6 +208,22 @@ const _processQueueItem = async (item, idb) => {
         }
         success = true;
       }
+    } else if (operation === "merge" && type === "customers") {
+      const docId = data.docId || localId;
+      await setDoc(
+        doc(db, "customers", docId),
+        { ...data.merged, syncedAt: serverTimestamp(), updatedAt: serverTimestamp() },
+        { merge: true },
+      );
+      success = true;
+    } else if (operation === "update" && type === "customers") {
+      const docId = data.docId || localId;
+      await setDoc(
+        doc(db, "customers", docId),
+        { ...data.merged, syncedAt: serverTimestamp(), updatedAt: serverTimestamp() },
+        { merge: true },
+      );
+      success = true;
     } else if (operation === "delete") {
       await deleteDoc(doc(db, type, data.id || data.docId || localId));
       success = true;
@@ -245,12 +282,16 @@ const _processQueueItem = async (item, idb) => {
         attempts,
         lastError: err?.message,
       });
+      await _archiveDeadLetter(idb, item, err?.message);
       _log("ERROR", `Dead letter: ${id}`, { attempts });
       
       _broadcast(SYNC_CHANNEL, {
         type: "SYNC_FAILED",
         docId: localId,
+        billSerial: data?.billSerial || data?.serialNo || data?.serial,
+        localId,
         error: err?.message,
+        deadLetter: true,
       });
     } else {
       await idb.sync_queue.update(id, {
@@ -275,7 +316,7 @@ const _processQueue = async () => {
     return;
   }
   
-  if (!navigator.onLine) return;
+  if (!getHasInternet()) return;
   
   _isProcessing = true;
   
@@ -336,8 +377,11 @@ export const startSyncWorker = (intervalMs = SYNC_INTERVAL_MS) => {
   }
   
   _log("INFO", "Starting sync worker", { intervalMs });
-  
-  setTimeout(_processQueue, 3000);
+
+  setTimeout(_processQueue, 0);
+  if (getHasInternet()) {
+    queueMicrotask(() => { _processQueue().catch(() => {}); });
+  }
   _workerInterval = setInterval(_processQueue, intervalMs);
   
   if (typeof window !== "undefined") {
@@ -361,6 +405,37 @@ export const stopSyncWorker = () => {
 
 export const triggerSync = () => _processQueue();
 
+/** Re-queue a dead-letter item and trigger sync (Sync Monitor manual retry). */
+export const retryDeadLetter = async (queueId) => {
+  const idb = await _getDB();
+  if (!idb?.failedSync) return false;
+  const row = await idb.failedSync.where('queueId').equals(String(queueId)).first();
+  if (!row?.data) return false;
+  await idb.sync_queue.add({
+    queueId: row.queueId,
+    type: row.type || 'orders',
+    operation: 'add',
+    data: row.data,
+    priority: 2,
+    attempts: 0,
+    status: 'pending',
+    createdAt: new Date().toISOString(),
+  });
+  if (row.id) await idb.failedSync.delete(row.id);
+  await _processQueue();
+  return true;
+};
+
+export const getFailedSyncItems = async () => {
+  const idb = await _getDB();
+  if (!idb?.failedSync) return [];
+  try {
+    return await idb.failedSync.orderBy('failedAt').reverse().limit(50).toArray();
+  } catch {
+    return [];
+  }
+};
+
 export const getPendingCount = async () => {
   const idb = await _getDB();
   if (!idb) return 0;
@@ -379,4 +454,6 @@ export default {
   stopSyncWorker,
   triggerSync,
   getPendingCount,
+  retryDeadLetter,
+  getFailedSyncItems,
 };

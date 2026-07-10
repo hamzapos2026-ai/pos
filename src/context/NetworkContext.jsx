@@ -1,10 +1,5 @@
 /**
- * NetworkContext.jsx — A One Jewelry POS
- * ✅ FIXED: No more false offline alerts
- * ✅ FIXED: Removed /favicon.ico periodic check (caused false offline in dev)
- * ✅ FIXED: Uses navigator.onLine + window online/offline events only
- * ✅ FIXED: pendingCount exported (BillerLayout uses it)
- * ✅ FIXED: Sync debounce 600ms on reconnect
+ * NetworkContext — real internet status (not just WiFi / navigator.onLine).
  */
 
 import React, {
@@ -12,21 +7,26 @@ import React, {
   useEffect, useCallback, useMemo, useRef,
 } from 'react';
 import { toast } from 'react-hot-toast';
+import {
+  getHasInternet,
+  probeInternet,
+  startInternetMonitor,
+  subscribeInternet,
+} from '../utils/networkReachability';
 
 const NetworkContext = createContext(null);
 
 export const NetworkProvider = ({ children }) => {
-  const [isOnline, setIsOnline]         = useState(() => navigator.onLine);
-  const [isSyncing, setIsSyncing]       = useState(false);
+  const [isOnline, setIsOnline] = useState(() => getHasInternet());
+  const [isSyncing, setIsSyncing] = useState(false);
   const [lastSyncTime, setLastSyncTime] = useState(null);
-  const [syncError, setSyncError]       = useState(null);
+  const [syncError, setSyncError] = useState(null);
   const [pendingCount, setPendingCount] = useState(0);
 
-  const syncQueueRef  = useRef([]);
-  const syncTimerRef  = useRef(null);
-  const prevOnlineRef = useRef(navigator.onLine);
+  const syncQueueRef = useRef([]);
+  const syncTimerRef = useRef(null);
+  const prevOnlineRef = useRef(isOnline);
 
-  // ── Process sync queue ──────────────────────────────────────
   const processSyncQueue = useCallback(async () => {
     if (syncQueueRef.current.length === 0) return;
     setIsSyncing(true);
@@ -49,55 +49,46 @@ export const NetworkProvider = ({ children }) => {
     }
   }, []);
 
-  // ── Online handler ──────────────────────────────────────────
-  const handleOnline = useCallback(() => {
-    if (prevOnlineRef.current === true) return; // Already online — no-op
-    prevOnlineRef.current = true;
-    setIsOnline(true);
-    setSyncError(null);
-
-    // Debounce sync 600ms
-    clearTimeout(syncTimerRef.current);
-    syncTimerRef.current = setTimeout(() => {
-      processSyncQueue();
-    }, 600);
-  }, [processSyncQueue]);
-
-  // ── Offline handler ─────────────────────────────────────────
-  const handleOffline = useCallback(() => {
-    if (prevOnlineRef.current === false) return; // Already offline — no-op
-    prevOnlineRef.current = false;
-    setIsOnline(false);
-    clearTimeout(syncTimerRef.current);
-  }, []);
-
-  // ── Event listeners ─────────────────────────────────────────
-  useEffect(() => {
-    // Set initial state correctly
-    const online = navigator.onLine;
-    prevOnlineRef.current = online;
+  const handleReachabilityChange = useCallback((online) => {
     setIsOnline(online);
 
-    window.addEventListener('online',  handleOnline);
-    window.addEventListener('offline', handleOffline);
+    if (prevOnlineRef.current === false && online === true) {
+      setSyncError(null);
+      clearTimeout(syncTimerRef.current);
+      syncTimerRef.current = setTimeout(() => {
+        processSyncQueue();
+      }, 600);
+    }
+
+    if (!online) {
+      clearTimeout(syncTimerRef.current);
+    }
+
+    prevOnlineRef.current = online;
+  }, [processSyncQueue]);
+
+  useEffect(() => {
+    const unsubReach = subscribeInternet(handleReachabilityChange);
+    const stopMonitor = startInternetMonitor({ intervalMs: 10000 });
+    probeInternet().catch(() => {});
+
     return () => {
-      window.removeEventListener('online',  handleOnline);
-      window.removeEventListener('offline', handleOffline);
+      unsubReach();
+      stopMonitor();
       clearTimeout(syncTimerRef.current);
     };
-  }, [handleOnline, handleOffline]);
+  }, [handleReachabilityChange]);
 
-  // ── Queue management ────────────────────────────────────────
   const addToQueue = useCallback((item) => {
     const entry = {
       ...item,
-      id:       `q-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+      id: `q-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
       queuedAt: Date.now(),
     };
     syncQueueRef.current = [...syncQueueRef.current, entry];
     setPendingCount(syncQueueRef.current.length);
 
-    if (navigator.onLine) {
+    if (getHasInternet()) {
       clearTimeout(syncTimerRef.current);
       syncTimerRef.current = setTimeout(processSyncQueue, 1000);
     }
@@ -108,10 +99,9 @@ export const NetworkProvider = ({ children }) => {
     setPendingCount(0);
   }, []);
 
-  // ── Legacy sync helpers ─────────────────────────────────────
-  const startSync    = useCallback(() => { setIsSyncing(true);  setSyncError(null); }, []);
+  const startSync = useCallback(() => { setIsSyncing(true); setSyncError(null); }, []);
   const completeSync = useCallback(() => { setIsSyncing(false); setLastSyncTime(new Date()); setSyncError(null); }, []);
-  const failSync     = useCallback((err) => { setIsSyncing(false); setSyncError(err?.message || 'Sync failed'); }, []);
+  const failSync = useCallback((err) => { setIsSyncing(false); setSyncError(err?.message || 'Sync failed'); }, []);
   const updateSyncQueueLength = useCallback((n) => setPendingCount(n), []);
 
   const value = useMemo(() => ({
@@ -127,6 +117,7 @@ export const NetworkProvider = ({ children }) => {
     completeSync,
     failSync,
     updateSyncQueueLength,
+    probeInternet,
   }), [
     isOnline, isSyncing, lastSyncTime, syncError, pendingCount,
     addToQueue, clearQueue,

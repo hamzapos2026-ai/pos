@@ -14,7 +14,7 @@
 import { useState, useCallback, useEffect, useRef, memo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Tag, ChevronDown, Percent, DollarSign } from "lucide-react";
-import toast from "react-hot-toast";
+import { toast } from "react-hot-toast";
 import { cn } from "../../utils/cn";
 
 // ── Animation variants ─────────────────────────────────────────
@@ -71,15 +71,41 @@ const BillDiscount = memo(({
   useEffect(() => {
     if (disabled) return;
     const handle = (e) => {
+      if (document.body.dataset.billerModalOpen === 'true') return;
       if (e.ctrlKey && e.shiftKey && (e.key === "d" || e.key === "D")) {
         e.preventDefault();
         e.stopPropagation();
+        if (!subtotal || subtotal <= 0) {
+          toast(
+            (t) => (
+              <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                <span style={{ fontSize: "20px" }}>🛒</span>
+                <div>
+                  <p style={{ margin: 0, fontWeight: 700, fontSize: "13px" }}>No Items in Bill</p>
+                  <p style={{ margin: 0, fontSize: "11px", opacity: 0.75 }}>Pehle item add karein, phir discount lagayein.</p>
+                </div>
+              </div>
+            ),
+            {
+              duration: 2500,
+              style: {
+                background: "#1a1208",
+                color: "#f59e0b",
+                border: "1px solid rgba(245,158,11,0.3)",
+                borderRadius: "12px",
+                padding: "10px 14px",
+              },
+              icon: null,
+            },
+          );
+          return;
+        }
         setIsOpen((v) => !v);
       }
     };
     window.addEventListener("keydown", handle, { capture: true });
     return () => window.removeEventListener("keydown", handle, { capture: true });
-  }, [disabled]);
+  }, [disabled, subtotal]);
 
   // ── Compute discount amount ─────────────────────────────────
   const rawVal = parseFloat(inputVal) || 0;
@@ -179,7 +205,35 @@ const BillDiscount = memo(({
       {/* ── HEADER ────────────────────────────────────────────── */}
       <button
         type="button"
-        onClick={() => !disabled && setIsOpen((v) => !v)}
+        onClick={() => {
+          if (disabled) return;
+          if (!subtotal || subtotal <= 0) {
+            toast(
+              (t) => (
+                <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                  <span style={{ fontSize: "20px" }}>🛒</span>
+                  <div>
+                    <p style={{ margin: 0, fontWeight: 700, fontSize: "13px" }}>No Items in Bill</p>
+                    <p style={{ margin: 0, fontSize: "11px", opacity: 0.75 }}>Pehle item add karein, phir discount lagayein.</p>
+                  </div>
+                </div>
+              ),
+              {
+                duration: 2500,
+                style: {
+                  background: "#1a1208",
+                  color: "#f59e0b",
+                  border: "1px solid rgba(245,158,11,0.3)",
+                  borderRadius: "12px",
+                  padding: "10px 14px",
+                },
+                icon: null,
+              },
+            );
+            return;
+          }
+          setIsOpen((v) => !v);
+        }}
         disabled={disabled}
         className={headerCls}
       >

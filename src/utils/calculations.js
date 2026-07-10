@@ -122,7 +122,7 @@ export const formatSerial = (n) =>
   String(Math.max(1, Number(n) || 1)).padStart(5, "0");
 
 export const formatItemSerial = (n) =>
-  String(Math.max(1, Number(n) || 1)).padStart(2, "0");
+  String(Math.max(1, Number(n) || 1));
 
 // Number to words (for invoice)
 const ONES = ["","One","Two","Three","Four","Five","Six","Seven","Eight","Nine",

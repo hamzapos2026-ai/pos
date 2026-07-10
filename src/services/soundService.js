@@ -252,4 +252,3 @@ export const speakCounterUpdate = (serial, lang = "en-US") => {
 export const speakNumber = (num, lang = "en-US") => {
   speak(num.toString(), lang);
 };
-

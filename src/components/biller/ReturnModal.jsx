@@ -8,7 +8,7 @@ import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { X, Search, PackageX } from "lucide-react";
 import { searchBillForReturn, processReturn } from "../../services/returnService";
-import toast from "react-hot-toast";
+import { toast } from "react-hot-toast";
 import { cn } from "../../utils/cn";
 
 export const ReturnModal = ({

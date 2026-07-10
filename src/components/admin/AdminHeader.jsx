@@ -1,25 +1,29 @@
 import { useNavigate } from 'react-router-dom';
 import { LogOut, Menu, Bell } from 'lucide-react';
-import toast from 'react-hot-toast';
+import { toast } from 'react-hot-toast';
 import { cn } from '../../utils/cn';
 import { useAuth } from '../../context/AuthContext';
 import { useTheme } from '../../context/ThemeContext';
 import ThemeToggle from '../shared/ThemeToggle';
 import LanguageSwitcher from '../shared/LanguageSwitcher';
+import { useLanguage } from '../../hooks/useLanguage';
+import useShopBrand from '../../hooks/useShopBrand';
 
 const AdminHeader = ({ onMenuClick, title, subtitle }) => {
   const { isDark } = useTheme();
   const { user, signOut } = useAuth();
+  const { t, isRTL } = useLanguage();
+  const { name: shopName, logo: shopLogo } = useShopBrand();
   const navigate = useNavigate();
 
   const handleSignOut = async () => {
     await signOut();
     navigate('/login');
-    toast.success('Signed out successfully');
+    toast.success(t('auth.signedOut', 'Signed out successfully'));
   };
 
   return (
-    <header className={cn(
+    <header dir={isRTL ? 'rtl' : 'ltr'} className={cn(
       'sticky top-0 z-30 px-4 sm:px-6 py-3.5 border-b backdrop-blur-xl',
       isDark ? 'bg-[#0f0a05]/80 border-[#2a1f0d]' : 'bg-white/80 border-amber-200'
     )}>
@@ -31,9 +35,21 @@ const AdminHeader = ({ onMenuClick, title, subtitle }) => {
           >
             <Menu className="w-5 h-5" />
           </button>
-          <div className="min-w-0">
-            <h1 className={cn('text-lg sm:text-xl font-bold truncate', isDark ? 'text-white' : 'text-gray-900')}>{title}</h1>
-            {subtitle && <p className={cn('text-xs hidden sm:block', isDark ? 'text-gray-400' : 'text-gray-500')}>{subtitle}</p>}
+          <div className="min-w-0 flex items-center gap-3">
+            {shopLogo && (
+              <img
+                src={shopLogo}
+                alt={shopName}
+                className={cn(
+                  'h-9 w-9 rounded-xl object-contain border p-0.5 shrink-0 hidden sm:block',
+                  isDark ? 'bg-black/30 border-[#2a1f0d]' : 'bg-white border-amber-100',
+                )}
+              />
+            )}
+            <div className="min-w-0">
+              <h1 className={cn('text-lg sm:text-xl font-bold truncate', isDark ? 'text-white' : 'text-gray-900')}>{title}</h1>
+              {subtitle && <p className={cn('text-xs hidden sm:block truncate', isDark ? 'text-gray-400' : 'text-gray-500')}>{subtitle}</p>}
+            </div>
           </div>
         </div>
 
@@ -58,7 +74,7 @@ const AdminHeader = ({ onMenuClick, title, subtitle }) => {
             </div>
             <button
               onClick={handleSignOut}
-              title="Sign out"
+              title={t('admin.signOut', 'Sign out')}
               className={cn('p-2 rounded-xl', isDark ? 'hover:bg-red-500/20 text-red-400' : 'hover:bg-red-50 text-red-600')}
             >
               <LogOut className="w-5 h-5" />

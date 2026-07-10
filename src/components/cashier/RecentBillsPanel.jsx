@@ -9,7 +9,7 @@ import { Clock, CheckCircle, XCircle, TrendingUp } from 'lucide-react';
 import { clsx } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import { useTheme } from '../../context/ThemeContext';
-import toast from 'react-hot-toast';
+import { toast } from 'react-hot-toast';
 
 function cn(...i) { return twMerge(clsx(i)); }
 
@@ -79,7 +79,7 @@ const BillRow = ({ bill, onPayment, onView, index }) => {
         <div className="min-w-0">
           <div className="flex items-center gap-1.5">
             <span className={cn(
-              'text-xs font-mono font-bold truncate',
+              'text-[10px] font-mono font-bold whitespace-nowrap',
               isDark ? 'text-[#f5f5f4]' : 'text-[#1c1917]',
             )}>
               {serial}

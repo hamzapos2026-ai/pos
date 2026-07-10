@@ -1,45 +1,50 @@
 // src/components/cashier/CancelBillModal.jsx
-// ✅ MERGED: 14 reasons + custom + audit logs + deletedBills + Framer Motion
-// ✨ NEW: Reversible logging, immutable audit, animated transitions
+// Instant cancel with mandatory reason + activity logging
 
 import React, { useState, useCallback, useEffect } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion } from "framer-motion";
 import {
   doc, updateDoc, addDoc, collection, serverTimestamp,
 } from "firebase/firestore";
 import { db } from "../../services/firebase";
 import {
-  X, XCircle, AlertTriangle, ChevronDown, Edit3, Loader2,
+  X, XCircle, AlertTriangle, Edit3, Loader2,
   UserX, Copy, ShoppingCart, DollarSign, UserMinus, CreditCard,
   PhoneOff, PackageX, Wrench, AlertCircle, Clock, Briefcase,
   Scale, RotateCcw,
 } from "lucide-react";
+import { showFieldAlert, showValidationAlert } from "../../utils/fieldAlert";
 import { toast } from "react-hot-toast";
 import { logCancellation } from "../../services/cashierAuditService";
+import { logBillCancelled } from "../../services/activityLogger";
+import { markBillCancelledLocally } from "../../services/localBillService";
+import { buildCashierCancelPatch } from "../../utils/cashierOrderUtils";
+import { recordOptimisticCancelledBill, recordVisibleCancelledBill } from "../../utils/cashierCancelledIndex";
+import { resolveFirestoreOrderId } from "../../utils/cancelledBillDisplayUtils";
+import { useLanguage } from "../../hooks/useLanguage";
 
-// 14 reasons with Lucide icons
 const CANCEL_REASONS = [
-  { label: "Customer changed mind", icon: UserX },
-  { label: "Duplicate bill", icon: Copy },
-  { label: "Wrong items entered", icon: ShoppingCart },
-  { label: "Wrong price entered", icon: DollarSign },
-  { label: "Wrong customer selected", icon: UserMinus },
-  { label: "Payment issue", icon: CreditCard },
-  { label: "Customer request", icon: AlertCircle },
-  { label: "Item out of stock", icon: PackageX },
-  { label: "System error / test bill", icon: Wrench },
-  { label: "Biller mistake", icon: AlertTriangle },
-  { label: "Customer not available", icon: PhoneOff },
-  { label: "Manager request", icon: Briefcase },
-  { label: "Price dispute", icon: Scale },
-  { label: "Returned goods", icon: RotateCcw },
+  { key: 'customerChangedMind', label: "Customer changed mind", icon: UserX },
+  { key: 'duplicateBill', label: "Duplicate bill", icon: Copy },
+  { key: 'wrongItems', label: "Wrong items entered", icon: ShoppingCart },
+  { key: 'wrongPrice', label: "Wrong price entered", icon: DollarSign },
+  { key: 'wrongCustomer', label: "Wrong customer selected", icon: UserMinus },
+  { key: 'paymentIssue', label: "Payment issue", icon: CreditCard },
+  { key: 'customerRequest', label: "Customer request", icon: AlertCircle },
+  { key: 'outOfStock', label: "Item out of stock", icon: PackageX },
+  { key: 'systemError', label: "System error / test bill", icon: Wrench },
+  { key: 'billerMistake', label: "Biller mistake", icon: AlertTriangle },
+  { key: 'customerUnavailable', label: "Customer not available", icon: PhoneOff },
+  { key: 'managerRequest', label: "Manager request", icon: Briefcase },
+  { key: 'priceDispute', label: "Price dispute", icon: Scale },
+  { key: 'returnedGoods', label: "Returned goods", icon: RotateCcw },
 ];
 
-const CancelModal = ({ order, isDark, userData, onClose }) => {
-  const [mode, setMode] = useState("select"); // "select" or "custom"
+const CancelModal = ({ order, isDark, userData, onClose, onCancelled }) => {
+  const { t } = useLanguage();
+  const [mode, setMode] = useState("select");
   const [selectedReason, setSelectedReason] = useState("");
   const [customReason, setCustomReason] = useState("");
-  const [dropdownOpen, setDropdownOpen] = useState(false);
   const [loading, setLoading] = useState(false);
 
   const finalReason = mode === "custom" ? customReason.trim() : selectedReason;
@@ -51,9 +56,7 @@ const CancelModal = ({ order, isDark, userData, onClose }) => {
   const inputBg = isDark
     ? "bg-[#120d06] border-[#2a1f0f] text-gray-100"
     : "bg-gray-50 border-gray-200 text-gray-900";
-  const dropBg = isDark ? "bg-[#1a1208]" : "bg-white";
 
-  // ESC close
   useEffect(() => {
     const h = (e) => {
       if (e.key === "Escape") { e.preventDefault(); onClose(); }
@@ -64,8 +67,8 @@ const CancelModal = ({ order, isDark, userData, onClose }) => {
 
   const handleCancel = useCallback(async () => {
     if (!finalReason) {
-      toast.error("Please provide a reason!", {
-        icon: <AlertTriangle className="w-4 h-4 text-red-500" />,
+      showFieldAlert("cancelReason", {
+        message: t("cashier.reasonRequired", "Please select or type a cancel reason"),
       });
       return;
     }
@@ -73,86 +76,96 @@ const CancelModal = ({ order, isDark, userData, onClose }) => {
 
     const storeId = userData?.storeId || order.storeId || "default";
     const cashierName = userData?.displayName || userData?.name || "Cashier";
+    const cashierId = userData?.uid || "";
+    const role = userData?.role || userData?.primaryRole || "cashier";
+    const billSerial = order.billSerial || order.serialNo || "—";
     const now = new Date();
+    const cancelPatch = buildCashierCancelPatch({
+      reason: finalReason,
+      userId: cashierId,
+      userName: cashierName,
+      role,
+    });
 
-    try {
-      await Promise.all([
-        // 1. Update order status to pending_cancel and hide from active dashboard
-        updateDoc(doc(db, "orders", order.id), {
-          status: "pending_cancel",
-          isDeleted: false, // Remains false until final Super Admin clearance
-          isActiveOrder: false, // Immediately clears from Cashier's dashboard view
-          cashierCancelReason: finalReason,
-          cashierCancelledBy: cashierName,
-          cashierCancelledUserId: userData?.uid || "",
-          cashierCancelledAt: serverTimestamp(),
-          cancelReason: finalReason,
-          cancelledBy: cashierName,
-          cancelledAt: serverTimestamp(),
-        }),
+    const cancelledOrder = { ...order, ...cancelPatch, id: order.id };
 
-        // 2. Create approval request for manager
-        addDoc(collection(db, "approvalRequests"), {
-          type: "cancellation",
-          billId: order.id,
-          localBillId: order.localId || order.id,
-          status: "pending",
-          requestedBy: userData?.uid || "",
-          requestedByName: cashierName,
-          requestedByRole: "cashier",
-          storeId,
-          cashierCancelReason: finalReason,
-          reason: finalReason, // compat
-          billSnapshot: { ...order },
-          createdAt: serverTimestamp(),
-        }),
+    recordOptimisticCancelledBill({
+      serial: billSerial,
+      billId: resolveFirestoreOrderId(order),
+      localId: order.localId,
+      storeId,
+    });
+    recordVisibleCancelledBill(cancelledOrder);
 
-        // 3. Save to cashierActions
-        addDoc(collection(db, "cashierActions"), {
-          actionType: "CANCELLED_REQUEST",
-          orderId: order.id,
-          billSerial: order.billSerial || order.serialNo || "—",
-          serialNo: order.serialNo || order.billSerial || "—",
-          storeId,
-          cashierId: userData?.uid || "",
-          cashierName,
-          reason: finalReason,
-          totalAmount: order.totalAmount || 0,
-          totalDiscount: order.totalDiscount || 0,
-          totalQty: order.totalQty || 0,
-          customer: order.customer || {},
-          items: order.items || [],
-          billerName: order.billerName || "",
-          billerId: order.billerId || "",
-          billStartTime: order.billStartTime || null,
-          date: now.toISOString().split("T")[0],
-          time: now.toLocaleTimeString("en-PK"),
-          timestamp: serverTimestamp(),
-        }),
+    onCancelled?.(cancelledOrder);
 
-        // 4. Immutable audit log
-        logCancellation(
-          { uid: userData?.uid || "", displayName: cashierName },
-          storeId,
-          { id: order.id, serialNo: order.serialNo || order.billSerial, totalAmount: order.totalAmount || 0 },
-          finalReason,
-        ),
-      ]);
+    toast.success(t('cashier.billCancelled', 'Bill #{serial} cancelled').replace('{serial}', billSerial), {
+      icon: <XCircle className="w-4 h-4 text-red-500" />,
+      duration: 2500,
+    });
+    onClose();
+    setLoading(false);
 
-      toast.success(`Cancellation request sent for Bill #${order.billSerial || order.serialNo}`, {
-        icon: <Clock className="w-4 h-4 text-amber-500" />,
-      });
-      onClose();
-    } catch (err) {
-      console.error(err);
-      toast.error("Request failed!");
-    } finally {
-      setLoading(false);
+    const firestoreOrderId = resolveFirestoreOrderId(order);
+    if (!firestoreOrderId) {
+      toast.error(t('cashier.cancelSyncPending', 'Saved locally — cloud sync when online'));
+      return;
     }
-  }, [finalReason, order, userData, onClose, mode]);
+
+    void (async () => {
+      try {
+        await Promise.all([
+          updateDoc(doc(db, "orders", firestoreOrderId), {
+            ...cancelPatch,
+            cancelledAt: serverTimestamp(),
+            cashierCancelledAt: serverTimestamp(),
+          }),
+
+          addDoc(collection(db, "cashierActions"), {
+            actionType: "BILL_CANCELLED",
+            orderId: firestoreOrderId,
+            billSerial,
+            serialNo: order.serialNo || billSerial,
+            storeId,
+            cashierId,
+            cashierName,
+            role,
+            reason: finalReason,
+            totalAmount: order.totalAmount || 0,
+            customer: order.customer || {},
+            date: now.toISOString().split("T")[0],
+            time: now.toLocaleTimeString("en-PK"),
+            timestamp: serverTimestamp(),
+          }),
+
+          logCancellation(
+            { uid: cashierId, displayName: cashierName },
+            storeId,
+            { id: firestoreOrderId, serialNo: billSerial, totalAmount: order.totalAmount || 0 },
+            finalReason,
+          ),
+
+          logBillCancelled(
+            cashierId,
+            storeId,
+            cashierName,
+            order.billerName || "",
+            billSerial,
+            order.totalAmount || 0,
+            finalReason,
+          ),
+        ]);
+
+        await markBillCancelledLocally(order, cancelPatch).catch(() => {});
+      } catch (err) {
+        console.error(err);
+        toast.error(t('cashier.cancelFailed', 'Cloud sync failed — bill stays in Cancelled tab'));
+      }
+    })();
+  }, [finalReason, order, userData, onClose, onCancelled, t]);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" data-modal-open="true">
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4" data-modal-open="true">
       <motion.div
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
@@ -165,10 +178,9 @@ const CancelModal = ({ order, isDark, userData, onClose }) => {
         animate={{ scale: 1, opacity: 1, y: 0 }}
         exit={{ scale: 0.95, opacity: 0, y: 20 }}
         transition={{ type: "spring", damping: 25, stiffness: 300 }}
-        className={`relative w-full max-w-sm ${cardBg} rounded-2xl border ${border} shadow-2xl flex flex-col`}
-        style={{ maxHeight: "90vh" }}
+        className={`relative w-full max-w-md ${cardBg} rounded-2xl border ${border} shadow-2xl flex flex-col max-h-[min(92vh,640px)]`}
+        onClick={(e) => e.stopPropagation()}
       >
-        {/* Header */}
         <div className={`flex items-center justify-between px-5 py-4 border-b ${border} flex-shrink-0`}>
           <div className="flex items-center gap-3">
             <motion.div
@@ -179,7 +191,7 @@ const CancelModal = ({ order, isDark, userData, onClose }) => {
               <XCircle className="text-red-500 w-5 h-5" />
             </motion.div>
             <div>
-              <h2 className={`font-bold text-base ${text}`}>Cancel Bill</h2>
+              <h2 className={`font-bold text-base ${text}`}>{t('cashier.cancelBill', 'Cancel Bill')}</h2>
               <p className={`text-xs ${subText}`}>#{order.billSerial || order.serialNo}</p>
             </div>
           </div>
@@ -193,14 +205,13 @@ const CancelModal = ({ order, isDark, userData, onClose }) => {
           </motion.button>
         </div>
 
-        <div className="flex-1 overflow-y-auto p-5 space-y-4">
-          {/* Warning */}
+        <div className="flex-1 min-h-0 overflow-y-auto p-5 space-y-4">
           <div className={`flex items-start gap-3 p-3 rounded-xl ${
             isDark ? "bg-red-900/20 border border-red-800" : "bg-red-50 border border-red-200"
           }`}>
             <AlertTriangle className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" />
             <div>
-              <p className="text-sm font-medium text-red-500">Cannot be undone</p>
+              <p className="text-sm font-medium text-red-500">{t('cashier.cannotUndo', 'Cannot be undone')}</p>
               <p className={`text-xs ${subText} mt-0.5`}>
                 #{order.billSerial || order.serialNo} · Rs. {(order.totalAmount || 0).toLocaleString()}
                 {order.customer?.name ? ` · ${order.customer.name}` : ""}
@@ -208,7 +219,6 @@ const CancelModal = ({ order, isDark, userData, onClose }) => {
             </div>
           </div>
 
-          {/* Mode toggle */}
           <div className="flex gap-2">
             <motion.button
               whileTap={{ scale: 0.97 }}
@@ -219,113 +229,88 @@ const CancelModal = ({ order, isDark, userData, onClose }) => {
                   : `${border} ${subText}`
               }`}
             >
-              Select Reason
+              {t('cashier.selectReason', 'Select Reason')}
             </motion.button>
             <motion.button
               whileTap={{ scale: 0.97 }}
-              onClick={() => { setMode("custom"); setSelectedReason(""); setDropdownOpen(false); }}
+              onClick={() => { setMode("custom"); setSelectedReason(""); }}
               className={`flex-1 py-2 rounded-xl text-xs font-bold border transition-all flex items-center justify-center gap-1 ${
                 mode === "custom"
                   ? "border-red-500 bg-red-500/10 text-red-500"
                   : `${border} ${subText}`
               }`}
             >
-              <Edit3 className="w-3 h-3" /> Type Custom
+              <Edit3 className="w-3 h-3" /> {t('cashier.typeCustom', 'Type Custom')}
             </motion.button>
           </div>
 
-          {/* Select dropdown */}
           {mode === "select" && (
             <div>
               <label className={`block text-xs font-semibold ${subText} mb-2`}>
-                Reason <span className="text-red-500">*</span>
+                {t('cashier.reason', 'Reason')} <span className="text-red-500">*</span>
               </label>
-              <div className="relative">
-                <button
-                  onClick={() => setDropdownOpen((v) => !v)}
-                  className={`w-full flex items-center justify-between px-4 py-3
-                    rounded-xl border text-sm font-medium transition-all ${
-                    selectedReason
-                      ? "border-red-500 bg-red-500/5 text-red-500"
-                      : `${inputBg} ${isDark ? "text-gray-400" : "text-gray-500"}`
-                  }`}
-                >
-                  <span className="truncate flex items-center gap-2">
-                    {selectedReason && (() => {
-                      const r = CANCEL_REASONS.find(x => x.label === selectedReason);
-                      const Icon = r?.icon;
-                      return Icon ? <Icon className="w-4 h-4" /> : null;
-                    })()}
-                    {selectedReason || "Select a reason..."}
-                  </span>
-                  <motion.div animate={{ rotate: dropdownOpen ? 180 : 0 }}>
-                    <ChevronDown className="w-4 h-4 shrink-0" />
-                  </motion.div>
-                </button>
-
-                <AnimatePresence>
-                  {dropdownOpen && (
-                    <motion.div
-                      data-dropdown-open="true"
-                      initial={{ opacity: 0, y: -8 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      exit={{ opacity: 0, y: -8 }}
-                      className={`absolute top-full left-0 right-0 mt-1 z-50
-                        rounded-xl border ${border} ${dropBg} shadow-xl max-h-60
-                        overflow-y-auto`}
-                    >
-                      {CANCEL_REASONS.map((r) => {
-                        const Icon = r.icon;
-                        return (
-                          <button
-                            key={r.label}
-                            onClick={() => { setSelectedReason(r.label); setDropdownOpen(false); }}
-                            className={`w-full text-left px-4 py-2.5 text-sm border-b
-                              last:border-0 transition-colors flex items-center gap-2 ${
-                              isDark ? "border-[#2a1f0f] hover:bg-red-900/20" : "border-gray-100 hover:bg-red-50"
-                            } ${selectedReason === r.label ? "text-red-500 font-bold bg-red-500/10" : text}`}
-                          >
-                            <Icon className="w-4 h-4 flex-shrink-0" />
-                            {selectedReason === r.label && <span>✓</span>}
-                            {r.label}
-                          </button>
-                        );
-                      })}
-                    </motion.div>
-                  )}
-                </AnimatePresence>
+              <div
+                className={`rounded-xl border ${border} overflow-hidden`}
+                style={{ maxHeight: "min(280px, 42vh)" }}
+              >
+                <div className="overflow-y-auto overscroll-contain max-h-[inherit] p-1.5 space-y-1">
+                  {CANCEL_REASONS.map((r) => {
+                    const Icon = r.icon;
+                    const displayLabel = t(`cashier.cancelReason.${r.key}`, r.label);
+                    const picked = selectedReason === r.label;
+                    return (
+                      <button
+                        type="button"
+                        key={r.key}
+                        onClick={() => setSelectedReason(r.label)}
+                        className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-left text-sm transition-all ${
+                          picked
+                            ? isDark
+                              ? "bg-red-500/20 border border-red-500/50 text-red-400 shadow-sm"
+                              : "bg-red-50 border border-red-300 text-red-700 shadow-sm"
+                            : isDark
+                              ? "hover:bg-white/5 text-gray-200 border border-transparent"
+                              : "hover:bg-gray-50 text-gray-800 border border-transparent"
+                        }`}
+                      >
+                        <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${
+                          picked ? "bg-red-500/30" : isDark ? "bg-white/5" : "bg-gray-100"
+                        }`}>
+                          <Icon className="w-4 h-4" />
+                        </span>
+                        <span className="flex-1 font-medium leading-snug">{displayLabel}</span>
+                        {picked && (
+                          <span className="shrink-0 text-red-500 font-bold text-xs">✓</span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
             </div>
           )}
 
-          {/* Custom type */}
           {mode === "custom" && (
             <motion.div
               initial={{ opacity: 0, y: -10 }}
               animate={{ opacity: 1, y: 0 }}
             >
               <label className={`block text-xs font-semibold ${subText} mb-2`}>
-                Type your reason <span className="text-red-500">*</span>
+                {t('cashier.typeYourReason', 'Type your reason')} <span className="text-red-500">*</span>
               </label>
               <textarea
                 value={customReason}
                 onChange={(e) => setCustomReason(e.target.value)}
                 rows={3}
                 autoFocus
-                placeholder="Describe the cancel reason..."
+                placeholder={t('cashier.cancelReasonPh', 'Describe the cancel reason...')}
                 className={`w-full px-3 py-2.5 rounded-xl border text-sm ${inputBg}
                   focus:outline-none focus:border-red-500 resize-none transition-all`}
               />
-              {customReason.trim() && (
-                <p className={`text-[10px] ${subText} mt-1`}>
-                  {customReason.trim().length} characters
-                </p>
-              )}
             </motion.div>
           )}
         </div>
 
-        {/* Footer */}
         <div className={`px-5 py-4 border-t ${border} flex items-center gap-3 flex-shrink-0`}>
           <motion.button
             whileTap={{ scale: 0.97 }}
@@ -333,7 +318,7 @@ const CancelModal = ({ order, isDark, userData, onClose }) => {
             disabled={loading}
             className={`flex-1 py-2.5 rounded-xl border ${border} text-sm font-medium ${subText} hover:bg-gray-500/5 transition-colors`}
           >
-            Back
+            {t('back', 'Back')}
           </motion.button>
           <motion.button
             whileHover={{ scale: 1.02 }}
@@ -346,7 +331,7 @@ const CancelModal = ({ order, isDark, userData, onClose }) => {
             {loading
               ? <Loader2 className="w-4 h-4 animate-spin" />
               : <XCircle className="w-4 h-4" />}
-            {loading ? "Cancelling..." : "Cancel Bill"}
+            {loading ? t('cashier.cancelling', 'Cancelling...') : t('cashier.cancelBill', 'Cancel Bill')}
           </motion.button>
         </div>
       </motion.div>

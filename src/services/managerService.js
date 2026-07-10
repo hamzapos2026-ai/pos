@@ -4,12 +4,11 @@
 // Author: A One Jewelry POS — Manager Module v3.0
 
 import {
-  collection, doc, getDocs, getDoc, addDoc, updateDoc,
+  collection, doc, getDocs, getDoc, addDoc, setDoc, updateDoc,
   query, where, orderBy, limit, serverTimestamp,
-  writeBatch, Timestamp,
+  writeBatch, Timestamp, onSnapshot,
 } from './firebase';
 import * as firebaseSvc from './firebase';
-const firestore = (firebaseSvc && (firebaseSvc.db || (firebaseSvc.default && firebaseSvc.default.db))) || {};
 const isFirebaseReadyFn = () => {
   try {
     const fn = firebaseSvc && firebaseSvc.isFirebaseReady;
@@ -26,13 +25,79 @@ const isFirebaseReadyFn = () => {
 const isFirebaseReady = () => {
   try { return !!isFirebaseReadyFn(); } catch { return false; }
 };
+
+/** Lazy Firestore instance — avoid capturing `{}` at module load before init completes. */
+const getFirestoreDb = () => {
+  const db = firebaseSvc?.db ?? firebaseSvc?.default?.db ?? null;
+  return db && typeof db === 'object' ? db : null;
+};
+
+/** Firestore doc()/collection() path segments must be strings — never Dexie numbers or objects. */
+const firestorePathId = (value) => {
+  if (value == null) return null;
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return String(value);
+  }
+  return null;
+};
+
+const mapFirestoreDoc = (d) => {
+  const data = typeof d.data === 'function' ? d.data() : (d.data || {});
+  const docId = firestorePathId(d.id);
+  return { ...data, firestoreId: docId, id: docId };
+};
+
+const orderDocRef = (orderId) => {
+  const id = firestorePathId(orderId);
+  const db = getFirestoreDb();
+  if (!id || !db) return null;
+  return doc(db, COLLECTION_NAMES.orders, id);
+};
+
+const resolveApprovalOrderId = (request = {}) =>
+  firestorePathId(request.billId)
+  || firestorePathId(request.localBillId)
+  || firestorePathId(request.billSnapshot?.billId)
+  || firestorePathId(request.billSnapshot?.orderId);
+
 import { db as localDB } from '../db/index';
+import { fetchOrdersFallback, subscribeOrdersHybrid, DEFAULT_FETCH_ORDERS_LIMIT, CASH_FLOW_ORDERS_LIMIT } from '../utils/ordersQueryUtils';
+import {
+  ACTIVITY_LOGS_DOC_LIMIT,
+  MANAGER_COLLECTION_FETCH_LIMIT,
+  MANAGER_CASH_TX_LIMIT,
+  MANAGER_REPORTS_ORDERS_LIMIT,
+} from '../utils/firebaseQuotaConfig';
+import { getSetting, hydrateSettings } from './settingsStore';
+import { calcOrderItemCommission, buildAgentMap } from './commissionService';
 import {
   COLLECTION_NAMES, SHIFT_STATUS, CASH_TX_TYPES,
   APPROVAL_STATUS, APPROVAL_TYPES, BILL_STATUS, SYNC_STATUS,
   PAYMENT_STATUS,
 } from '../utils/constants';
 import * as authService from './authService';
+import {
+  MANAGER_ACTIVITY_SOURCES,
+  normalizeManagerActivityLog,
+  activityLogMatchesBranch,
+} from '../utils/activityLogNormalizer';
+import {
+  resolveUserBranchIds,
+  resolveUserPrimaryBranch,
+  getBranchScopeFromContext,
+  filterByBranchScope,
+  itemMatchesBranchScope,
+  userMatchesBranchScope,
+  expandBranchIds,
+} from '../utils/branchAccess';
+import { isSuperAdminUser } from '../utils/superAdminUtils';
+import { loadStoresMapFromCache } from '../hooks/useStoresMap';
+import { isReportPaidBill, isManagerSettled, isCashierOrderCancelled } from '../utils/cashierOrderUtils';
+import { buildCustomerDocId } from '../utils/customerHelpers';
 
 // ============================================================
 // HELPERS
@@ -73,10 +138,25 @@ const normalizeOrder = (order) => {
     order.total || order.subtotal || 0
   );
 
-  let paidAmount = Number(order.paidAmount || order.amountReceived || 0);
-  if (paidAmount === 0 && total > 0) {
-    const ps = String(order.paymentStatus || '').toLowerCase();
-    if (['paid', 'completed', 'fully_paid'].includes(ps)) paidAmount = total;
+  const rawPs = String(order.paymentStatus || '').toLowerCase();
+  const awaitingCashier = rawPs === 'pending_payment' || rawPs === 'pending_approval';
+  const statusLower = String(order.status || '').toLowerCase();
+  const cashierConfirmed =
+    ['paid', 'completed', 'settled', 'cashier_paid'].includes(statusLower) ||
+    rawPs === 'paid' ||
+    rawPs === 'cashier_paid' ||
+    (order.paidAt && order.isActiveOrder === false && rawPs !== 'pending_payment' && rawPs !== 'pending_approval');
+
+  // Never treat biller-side amountReceived as cashier payment while pending
+  let paidAmount = Number(order.paidAmount || 0);
+  if (paidAmount === 0 && !awaitingCashier && cashierConfirmed) {
+    paidAmount = Number(order.amountReceived || 0);
+  }
+  if (paidAmount === 0 && !awaitingCashier && total > 0) {
+    if (['paid', 'completed', 'fully_paid', 'cashier_paid'].includes(rawPs)) paidAmount = total;
+    else if (['paid', 'completed', 'settled', 'cashier_paid', 'manager_approved'].includes(statusLower)) {
+      paidAmount = total;
+    }
   }
 
   let paymentMethod = order.paymentMethod || order.paymentType || 'cash';
@@ -95,9 +175,23 @@ const normalizeOrder = (order) => {
   const savedAt  = toISOStr(order.savedAt  || order.billEndTime   || order.createdAt);
   const createdAt = toISOStr(order.createdAt || order.savedAt || order.billStartTime);
 
-  const computedPaymentStatus = order.paymentStatus ||
-    (paidAmount >= total && total > 0 ? 'paid'
-      : paidAmount > 0 ? 'partial' : 'unpaid');
+  const managerSettled =
+    order.managerConfirmed === true ||
+    statusLower === 'manager_approved' ||
+    order.managerPaid === true ||
+    (statusLower === 'paid' && rawPs === 'paid' && !order.paidBy);
+
+  const computedPaymentStatus = managerSettled
+    ? 'paid'
+    : (statusLower === 'cashier_paid' || rawPs === 'cashier_paid'
+      ? 'cashier_paid'
+      : (cashierConfirmed && order.paidBy
+        ? 'cashier_paid'
+        : (awaitingCashier
+          ? order.paymentStatus
+          : (order.paymentStatus ||
+            (paidAmount >= total && total > 0 ? 'paid'
+              : paidAmount > 0 ? 'partial' : 'unpaid')))));
 
   return {
     ...order,
@@ -161,31 +255,48 @@ const logActivity = async (action, details = {}) => {
 // ============================================================
 // MANAGER CONTEXT
 // ============================================================
+/** Build manager scope from context — alias-expanded branch ids + stores map. */
+const buildScope = (ctx, filterBranchId = null) => {
+  const storesMap = ctx?.storesMap || {};
+  const scope = getBranchScopeFromContext(ctx, filterBranchId);
+  return { ...scope, storesMap };
+};
+
 const getManagerContext = async () => {
   const auth = authService && authService.getCurrentUserData ? authService : (authService && authService.default ? authService.default : authService);
   const user = auth && auth.getCurrentUserData ? await auth.getCurrentUserData() : null;
+  const storesMap = await loadStoresMapFromCache();
   if (!user) {
     return {
       uid: 'unknown', name: 'Unknown',
       branchIds: [], primaryBranch: null,
       isSuperAdmin: false, isAdmin: false,
+      restrictBranches: true,
+      storesMap,
     };
   }
-  const branchIds =
-    user.storeIds?.length > 0
-      ? user.storeIds
-      : user.primaryStore ? [user.primaryStore] : [];
+  const primary = resolveUserPrimaryBranch(user);
+  const rawBranchIds = resolveUserBranchIds(user);
+  const branchIds = expandBranchIds(
+    [...new Set([primary, ...rawBranchIds].filter(Boolean))],
+    storesMap,
+  );
+  const isSuperAdmin = isSuperAdminUser(user);
+  const isAdmin =
+    user.roles?.includes('admin') || user.role === 'admin';
 
   return {
     uid: user.uid,
     name: user.name || user.displayName || user.email,
     email: user.email,
     branchIds,
-    primaryBranch: user.primaryStore || branchIds[0] || null,
-    isSuperAdmin:
-      user.roles?.includes('superAdmin') || user.role === 'superAdmin',
-    isAdmin:
-      user.roles?.includes('admin') || user.role === 'admin',
+    primaryBranch: primary,
+    role: user.role || user.roles?.[0] || '',
+    primaryRole: user.roles?.[0] || user.role || '',
+    isSuperAdmin,
+    isAdmin,
+    restrictBranches: !isSuperAdmin && !isAdmin,
+    storesMap,
   };
 };
 
@@ -193,19 +304,26 @@ const getManagerContext = async () => {
 // FETCH ALL ORDERS — HYBRID
 // ============================================================
 const fetchAllOrders = async (options = {}) => {
-  const { lim = 10000, useCache = true } = options;
+  const { lim = DEFAULT_FETCH_ORDERS_LIMIT, useCache = true, branchId: filterBranchId } = options;
+  const ctx = await getManagerContext();
+  const scope = buildScope(ctx, filterBranchId);
+  const branchIds = scope.restrict ? (scope.branchIds || []) : null;
+  const singleStore = branchIds?.length === 1 ? branchIds[0] : null;
+  const multiStore = branchIds?.length > 1 ? branchIds : null;
 
   if (isFirebaseReadyFn() && isOnline()) {
     try {
-      const q = query(
-        collection(firestore, COLLECTION_NAMES.orders),
-        orderBy('createdAt', 'desc'),
-        limit(lim)
-      );
-      const snap = await getDocs(q);
-      const orders = snap.docs.map(d =>
-        normalizeOrder({ id: d.id, ...d.data() })
-      );
+      let orders = (await fetchOrdersFallback({
+        storeId: singleStore,
+        storeIds: multiStore,
+        limitCount: lim,
+        normalizer: (raw) => normalizeOrder(raw),
+      })).filter(Boolean);
+
+      if (scope.restrict) {
+        orders = filterByBranchScope(orders, scope);
+      }
+
       if (useCache && orders.length > 0) {
         try {
           await localDB.orders.bulkPut(
@@ -217,12 +335,11 @@ const fetchAllOrders = async (options = {}) => {
             }))
           );
         } catch { }
-        // Cleanup: remove local orders that were previously synced but
-        // no longer exist on the server (deleted remotely).
         try {
           const remoteIds = new Set(orders.map(o => o.id || o.localId).filter(Boolean));
           const localOrders = await localDB.orders.toArray();
           for (const lo of localOrders) {
+            if (scope.restrict && !itemMatchesBranchScope(scope, lo.storeId)) continue;
             const localKey = lo.localId || lo.id || lo.billId;
             const wasSynced = lo.synced === 1 || lo.syncStatus === 'synced' || lo.synced === true;
             if (wasSynced && localKey && !remoteIds.has(localKey)) {
@@ -238,7 +355,10 @@ const fetchAllOrders = async (options = {}) => {
   }
 
   try {
-    const idbOrders = await localDB.orders.toArray();
+    let idbOrders = await localDB.orders.toArray();
+    if (scope.restrict) {
+      idbOrders = filterByBranchScope(idbOrders, scope);
+    }
     return idbOrders.map(normalizeOrder).filter(Boolean);
   } catch { return []; }
 };
@@ -247,17 +367,65 @@ const fetchAllOrders = async (options = {}) => {
 // FETCH COLLECTION — HYBRID
 // ============================================================
 const fetchCollection = async (collectionName, idbStoreName, options = {}) => {
-  const { lim = 1000, orderField = 'createdAt' } = options;
+  const { lim = MANAGER_COLLECTION_FETCH_LIMIT, orderField = 'createdAt', scope = null } = options;
+
+  const applyScope = (items) => {
+    if (!scope?.restrict || !items?.length) return items || [];
+    return filterByBranchScope(items, scope, { storesMap: scope.storesMap });
+  };
+
+  const fetchScopedFromFirebase = async () => {
+    const ids = (scope?.branchIds || []).slice(0, 10);
+    const merged = new Map();
+    const dbRef = getFirestoreDb();
+    if (!dbRef) return [];
+
+    for (const sid of ids) {
+      try {
+        const snap = await getDocs(query(
+          collection(dbRef, collectionName),
+          where('storeId', '==', sid),
+          orderBy(orderField, 'desc'),
+          limit(lim),
+        ));
+        snap.docs.forEach((d) => {
+          const row = mapFirestoreDoc(d);
+          const key = row.id || row.localId;
+          if (key) merged.set(key, row);
+        });
+      } catch {
+        try {
+          const snap = await getDocs(query(
+            collection(dbRef, collectionName),
+            where('storeId', '==', sid),
+            limit(lim),
+          ));
+          snap.docs.forEach((d) => {
+            const row = mapFirestoreDoc(d);
+            const key = row.id || row.localId;
+            if (key) merged.set(key, row);
+          });
+        } catch { /* index may be missing */ }
+      }
+    }
+    return [...merged.values()];
+  };
 
   if (isFirebaseReadyFn() && isOnline()) {
     try {
-      const q = query(
-        collection(firestore, collectionName),
-        orderBy(orderField, 'desc'),
-        limit(lim)
-      );
-      const snap = await getDocs(q);
-      const items = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      let items = [];
+      if (scope?.restrict && scope.branchIds?.length) {
+        items = await fetchScopedFromFirebase();
+      } else {
+        const q = query(
+          collection(getFirestoreDb(), collectionName),
+          orderBy(orderField, 'desc'),
+          limit(lim),
+        );
+        const snap = await getDocs(q);
+        items = snap.docs.map((d) => mapFirestoreDoc(d));
+      }
+      items = applyScope(items);
       try {
         if (items.length > 0 && idbStoreName && localDB[idbStoreName]) {
           await localDB[idbStoreName].bulkPut(items);
@@ -294,8 +462,9 @@ const fetchCollection = async (collectionName, idbStoreName, options = {}) => {
   }
 
   try {
-    if (idbStoreName && localDB[idbStoreName])
-      return await localDB[idbStoreName].toArray();
+    if (idbStoreName && localDB[idbStoreName]) {
+      return applyScope(await localDB[idbStoreName].toArray());
+    }
     return [];
   } catch { return []; }
 };
@@ -306,11 +475,7 @@ const fetchCollection = async (collectionName, idbStoreName, options = {}) => {
 export const getDashboardSummary = async (filters = {}) => {
   try {
     const ctx = await getManagerContext();
-    const restrictBranches =
-      !ctx.isSuperAdmin && !ctx.isAdmin && ctx.branchIds.length > 0;
-    const branchIds = filters.branchId
-      ? [filters.branchId]
-      : restrictBranches ? ctx.branchIds : [];
+    const scope = buildScope(ctx, filters.branchId);
 
     const today = todayKey();
     const fromDateStr = filters.from || today;
@@ -319,22 +484,19 @@ export const getDashboardSummary = async (filters = {}) => {
     const toTs   = new Date(toDateStr).getTime() + 86400000 - 1;
 
     const [allOrders, allExpenses, allReturns, allCash] = await Promise.all([
-      fetchAllOrders({ lim: 10000 }),
-      fetchCollection('expenses', 'expenses'),
-      fetchCollection(COLLECTION_NAMES.returns, 'returns'),
+      fetchAllOrders({ lim: DEFAULT_FETCH_ORDERS_LIMIT, branchId: filters.branchId }),
+      fetchCollection('expenses', 'expenses', { scope }),
+      fetchCollection(COLLECTION_NAMES.returns, 'returns', { scope }),
       fetchCollection(
         COLLECTION_NAMES.cashTransactions, 'cash_transactions',
-        { orderField: 'timestamp' }
+        { orderField: 'timestamp', scope }
       ),
     ]);
 
     const filterByBranchDate = (items, dateField) =>
       items.filter(item => {
         if (!item || item.deleted || item.isDeleted) return false;
-        if (
-          branchIds.length &&
-          !branchIds.includes(item.storeId || item.branchId)
-        ) return false;
+        if (!itemMatchesBranchScope(scope, item.storeId || item.branchId)) return false;
         const ts = parseDate(
           item[dateField] || item.createdAt || item.savedAt
         ).getTime();
@@ -357,7 +519,11 @@ export const getDashboardSummary = async (filters = {}) => {
       let paid = Number(o.paidAmount || 0);
       if (paid === 0 && total > 0) {
         const ps = String(o.paymentStatus || '').toLowerCase();
-        if (['paid', 'completed', 'fully_paid'].includes(ps)) paid = total;
+        const st = String(o.status || '').toLowerCase();
+        if (['paid', 'completed', 'fully_paid', 'cashier_paid'].includes(ps)) paid = total;
+        else if (['paid', 'completed', 'settled', 'cashier_paid', 'manager_approved'].includes(st)) {
+          paid = total;
+        }
       }
       const outstanding = Math.max(0, total - paid);
       const discount    = Number(o.discountAmount || 0);
@@ -446,7 +612,7 @@ export const getDashboardSummary = async (filters = {}) => {
         topSalespersons: Object.values(salespersonStats)
           .sort((a, b) => b.totalSales - a.totalSales).slice(0, 5),
       },
-      branches: branchIds,
+      branches: scope.branchIds.length ? scope.branchIds : ctx.branchIds,
       dateRange: { from: fromDateStr, to: toDateStr },
     };
   } catch (err) {
@@ -461,39 +627,49 @@ export const getDashboardSummary = async (filters = {}) => {
 export const getBills = async (filters = {}) => {
   try {
     const ctx = await getManagerContext();
-    const restrict =
-      !ctx.isSuperAdmin && !ctx.isAdmin && ctx.branchIds.length > 0;
-    const branchIds = filters.branchId
-      ? [filters.branchId]
-      : restrict ? ctx.branchIds : [];
+    const scope = buildScope(ctx, filters.branchId);
 
-    let all = await fetchAllOrders({ lim: filters.limit || 10000 });
+    let all = await fetchAllOrders({ lim: filters.limit || DEFAULT_FETCH_ORDERS_LIMIT });
 
-    // Performance optimization: by default, hide processed/completed, paid, cancelled, and archived bills from active dashboard lists.
-    const hasActiveFilters = filters.status || filters.paymentStatus || filters.from || filters.to || filters.search || filters.customerId || filters.billerId;
+    try {
+      const { fetchAndApplyCloudPayments } = await import('./paymentReconciliationService');
+      const since = filters.from ? new Date(filters.from) : null;
+      all = await fetchAndApplyCloudPayments(all, {
+        storeIds: scope.branchIds || [],
+        since,
+      });
+    } catch { /* non-critical */ }
+
+    // Default view: active bills awaiting cashier or manager (not fully settled)
+    const hasActiveFilters = filters.status || filters.paymentStatus || filters.from || filters.to || filters.search || filters.customerId || filters.billerId || filters.showAll;
     if (!hasActiveFilters) {
       all = all.filter(o => {
-        const isPaid = o.status === 'paid' || o.paymentStatus === 'paid';
-        const isCancelled = o.status === 'cancelled';
-        return o.isActiveOrder !== false && !o.isArchived && !isPaid && !isCancelled;
+        if (o.isArchived || o.isDeleted || o.deleted) return false;
+        if (o.status === 'cancelled') return false;
+        if (isManagerSettled(o)) return false;
+        if (isCashierOrderCancelled(o)) return false;
+        return true;
       });
-    } else {
+    } else if (!filters.showAll) {
       all = all.filter(o => !o.isArchived);
     }
 
-    if (branchIds.length > 0)
-      all = all.filter(o => branchIds.includes(o.storeId));
+    all = filterByBranchScope(all, scope);
 
     if (filters.status && filters.status !== 'all')
       all = all.filter(o => o.status === filters.status);
 
     if (filters.paymentStatus) {
       all = all.filter(o => {
+        const rawPs = String(o.paymentStatus || '').toLowerCase();
+        if (filters.paymentStatus === 'pending_cashier') {
+          return rawPs === 'pending_payment' || rawPs === 'pending_approval';
+        }
         const total = Number(o.totalAmount || 0);
         const paid  = Number(o.paidAmount  || 0);
         const out   = total - paid;
         if (filters.paymentStatus === PAYMENT_STATUS.paid)
-          return out <= 0 && total > 0;
+          return out <= 0 && total > 0 && rawPs === 'paid';
         if (filters.paymentStatus === PAYMENT_STATUS.partial)
           return paid > 0 && out > 0;
         if (filters.paymentStatus === PAYMENT_STATUS.unpaid)
@@ -547,12 +723,138 @@ export const getBills = async (filters = {}) => {
   }
 };
 
+/** Real-time Firestore subscription — normalized orders for manager/admin bills UI */
+export const subscribeToOrdersLive = (callback, onError) => {
+  if (!isFirebaseReadyFn()) return () => {};
+  let innerUnsub = () => {};
+  let cancelled = false;
+
+  (async () => {
+    try {
+      const ctx = await getManagerContext();
+      if (cancelled) return;
+      const scope = buildScope(ctx);
+      const branchIds = scope.restrict ? (scope.branchIds || []) : null;
+      const singleStore = branchIds?.length === 1 ? branchIds[0] : null;
+      const multiStore = branchIds?.length > 1 ? branchIds : null;
+
+      innerUnsub = subscribeOrdersHybrid({
+        storeId: singleStore,
+        storeIds: multiStore,
+        limitCount: DEFAULT_FETCH_ORDERS_LIMIT,
+        normalizer: (raw) => normalizeOrder(raw),
+        onData: async (orders) => {
+          try {
+            const liveCtx = await getManagerContext();
+            const liveScope = buildScope(liveCtx);
+            callback(filterByBranchScope(orders.filter(Boolean), liveScope));
+          } catch {
+            callback(orders.filter(Boolean));
+          }
+        },
+        onError: onError || ((err) => console.warn('[subscribeToOrdersLive]', err)),
+      });
+    } catch (err) {
+      console.warn('[subscribeToOrdersLive] setup failed:', err);
+      onError?.(err);
+    }
+  })();
+
+  return () => {
+    cancelled = true;
+    try { innerUnsub(); } catch { /* ignore */ }
+  };
+};
+
+/** Apply getBills filters to a pre-fetched normalized order list */
+export const filterOrdersList = async (orders, filters = {}) => {
+  try {
+    const ctx = await getManagerContext();
+    const scope = buildScope(ctx, filters.branchId);
+
+    let all = (orders || []).map((o) =>
+      o.totalAmount !== undefined ? o : normalizeOrder(o)
+    ).filter(Boolean);
+
+    const hasActiveFilters = filters.status || filters.paymentStatus || filters.from || filters.to || filters.search || filters.customerId || filters.billerId || filters.showAll;
+    if (!hasActiveFilters) {
+      all = all.filter(o => {
+        if (o.isArchived || o.isDeleted || o.deleted) return false;
+        if (o.status === 'cancelled') return false;
+        if (isManagerSettled(o)) return false;
+        if (isCashierOrderCancelled(o)) return false;
+        return true;
+      });
+    } else if (!filters.showAll) {
+      all = all.filter(o => !o.isArchived);
+    }
+
+    all = filterByBranchScope(all, scope);
+
+    if (filters.status && filters.status !== 'all')
+      all = all.filter(o => o.status === filters.status);
+
+    if (filters.paymentStatus) {
+      all = all.filter(o => {
+        const rawPs = String(o.paymentStatus || '').toLowerCase();
+        if (filters.paymentStatus === 'pending_cashier') {
+          return rawPs === 'pending_payment' || rawPs === 'pending_approval';
+        }
+        const total = Number(o.totalAmount || 0);
+        const paid  = Number(o.paidAmount  || 0);
+        const out   = total - paid;
+        if (filters.paymentStatus === PAYMENT_STATUS.paid)
+          return out <= 0 && total > 0 && rawPs === 'paid';
+        if (filters.paymentStatus === PAYMENT_STATUS.partial)
+          return paid > 0 && out > 0;
+        if (filters.paymentStatus === PAYMENT_STATUS.unpaid)
+          return paid === 0 && total > 0;
+        return true;
+      });
+    }
+
+    if (filters.billerId)
+      all = all.filter(o => o.billerId === filters.billerId);
+    if (filters.customerId)
+      all = all.filter(o => o.customerId === filters.customerId);
+
+    if (filters.from) {
+      const ts = new Date(filters.from).getTime();
+      all = all.filter(o => parseDate(o.savedAt || o.createdAt).getTime() >= ts);
+    }
+    if (filters.to) {
+      const ts = new Date(filters.to).getTime() + 86400000 - 1;
+      all = all.filter(o => parseDate(o.savedAt || o.createdAt).getTime() <= ts);
+    }
+
+    if (filters.search) {
+      const q = filters.search.toLowerCase();
+      all = all.filter(o =>
+        (o.serialNo || '').toString().toLowerCase().includes(q) ||
+        (o.billSerial || '').toString().toLowerCase().includes(q) ||
+        (o.localId || o.id || '').toLowerCase().includes(q) ||
+        (o.customerName || '').toLowerCase().includes(q) ||
+        (o.customerPhone || '').includes(q)
+      );
+    }
+
+    all.sort((a, b) =>
+      parseDate(b.savedAt || b.createdAt).getTime() -
+      parseDate(a.savedAt || a.createdAt).getTime()
+    );
+
+    return { success: true, items: all, total: all.length, hasMore: false };
+  } catch (err) {
+    return { success: false, items: [], total: 0, error: err.message };
+  }
+};
+
 export const getBillDetails = async (idOrLocalId) => {
   try {
     if (isFirebaseReadyFn() && isOnline()) {
       try {
         const snap = await getDoc(
-          doc(firestore, COLLECTION_NAMES.orders, idOrLocalId)
+          doc(getFirestoreDb(), COLLECTION_NAMES.orders, idOrLocalId)
         );
         if (snap.exists()) {
           const bill = normalizeOrder({ id: snap.id, ...snap.data() });
@@ -582,7 +884,7 @@ const getBillPayments = async (billId) => {
   try {
     if (isFirebaseReadyFn() && isOnline()) {
       const snap = await getDocs(
-        query(collection(firestore, 'payments'), where('billId', '==', billId))
+        query(collection(getFirestoreDb(), 'payments'), where('billId', '==', billId))
       );
       return snap.docs.map(d => ({ id: d.id, ...d.data() }));
     }
@@ -609,8 +911,8 @@ export const updateBill = async (localId, updates) => {
 
     const finalStatus = updates.status || bill.status;
     const finalPayment = updates.paymentStatus || bill.paymentStatus;
-    const isFinished = ['paid', 'completed', 'cancelled'].includes(String(finalStatus).toLowerCase()) ||
-                       ['paid'].includes(String(finalPayment).toLowerCase());
+    const isFinished = ['paid', 'completed', 'cancelled', 'manager_approved', 'cashier_paid'].includes(String(finalStatus).toLowerCase()) ||
+                       ['paid', 'cashier_paid'].includes(String(finalPayment).toLowerCase());
                        
     const statusUpdates = {
       ...updates,
@@ -625,7 +927,7 @@ export const updateBill = async (localId, updates) => {
     if (isFirebaseReadyFn() && isOnline()) {
       try {
         await updateDoc(
-          doc(firestore, COLLECTION_NAMES.orders, bill.id || bill.localId),
+          doc(getFirestoreDb(), COLLECTION_NAMES.orders, bill.id || bill.localId),
           { ...statusUpdates, updatedAt: serverTimestamp(), updatedBy: ctx.uid }
         );
       } catch {
@@ -664,7 +966,7 @@ export const collectPayment = async ({
     if (!bill && isFirebaseReady() && isOnline()) {
       try {
         const snap = await getDoc(
-          doc(firestore, COLLECTION_NAMES.orders, localBillId)
+          doc(getFirestoreDb(), COLLECTION_NAMES.orders, localBillId)
         );
         if (snap.exists()) bill = { id: snap.id, ...snap.data() };
       } catch { }
@@ -697,7 +999,7 @@ export const collectPayment = async ({
     if (isFirebaseReadyFn() && isOnline()) {
       try {
         await updateDoc(
-          doc(firestore, COLLECTION_NAMES.orders, bill.id || bill.localId),
+          doc(getFirestoreDb(), COLLECTION_NAMES.orders, bill.id || bill.localId),
           { ...updates, updatedAt: serverTimestamp() }
         );
       } catch {
@@ -724,8 +1026,8 @@ export const collectPayment = async ({
     try {
       // Respect admin toggle: if salesperson commission disabled, skip recording
       try {
-        const spRow = await localDB.settings.get('salesperson');
-        const spConfig = spRow ? (spRow.value || spRow) : {};
+        await hydrateSettings();
+        const spConfig = getSetting('salesperson', {}) || {};
         if (spConfig.enableCommission === false) {
           // Commission disabled by admin; skip any commission bookkeeping
           // continue with payment flow
@@ -734,30 +1036,16 @@ export const collectPayment = async ({
           
           const items = bill.items || bill.bill_items || [];
           const totalBill = Number(bill.totalAmount || bill.grandTotal || 0) || 0;
-          const agentTotals = {}; // salespersonId -> total commission for full bill
+          const agentTotals = {};
+          const agentRegistry = buildAgentMap(spConfig.agents || []);
 
           items.forEach((it) => {
             try {
-              const unit = Number(it.price || 0);
-              const qty = Number(it.qty || 1) || 1;
-              const disc = Number(it.discount || 0);
-              const discType = it.discountType || 'percent';
-              const discAmt = discType === 'percent' ? Math.round((unit * Math.min(100, Math.max(0, disc))) / 100) : Math.min(unit, disc);
-              const lineTotal = Math.max(0, (unit - discAmt) * qty);
-
               const spId = it.salespersonId || null;
               if (!spId) return;
-
-              let commission = 0;
-              if (String(it.commissionType || '').toLowerCase() === 'fixed') {
-                commission = Number(it.commissionFixed || 0) * qty;
-              } else {
-                const pct = Number(it.commissionPercent ?? bill.commissionPercent ?? bill.commission ?? 0) || 0;
-                commission = Math.round((lineTotal * Math.max(0, Math.min(100, pct))) / 100);
-              }
-
+              const { rawComm } = calcOrderItemCommission(it, agentRegistry);
               if (!agentTotals[spId]) agentTotals[spId] = 0;
-              agentTotals[spId] += commission;
+              agentTotals[spId] += rawComm;
             } catch (e) { /* ignore per-item errors */ }
           });
 
@@ -795,6 +1083,21 @@ export const collectPayment = async ({
                   await localDB.logs.add({ logId: generateId('log'), action: 'commission_recorded', amount: earned, userId: spId, timestamp: nowISO() });
                 }
               } catch { /* ignore */ }
+
+              try {
+                const { recordCommissionTransaction } = await import('./commissionService');
+                const spItem = (bill.items || []).find((i) => i.salespersonId === spId);
+                await recordCommissionTransaction({
+                  orderId: bill.firebaseId || bill.billId,
+                  localOrderId: bill.localId || bill.billId,
+                  salespersonId: spId,
+                  salespersonName: spItem?.salespersonName || bill.salespersonName || '',
+                  saleAmount: Number(amount),
+                  commissionPercent: Number(spItem?.commissionPercent || bill.commissionPercent || 0),
+                  commissionAmount: earned,
+                  storeId: bill.storeId,
+                });
+              } catch { /* ignore ledger errors */ }
             } catch (e) { /* ignore per-agent errors */ }
           }
 
@@ -808,30 +1111,14 @@ export const collectPayment = async ({
 
         items.forEach((it) => {
           try {
-            const unit = Number(it.price || 0);
-            const qty = Number(it.qty || 1) || 1;
-            const disc = Number(it.discount || 0);
-            const discType = it.discountType || 'percent';
-            const discAmt = discType === 'percent' ? Math.round((unit * Math.min(100, Math.max(0, disc))) / 100) : Math.min(unit, disc);
-            const lineTotal = Math.max(0, (unit - discAmt) * qty);
-
             const spId = it.salespersonId || null;
             if (!spId) return;
-
-            let commission = 0;
-            if (String(it.commissionType || '').toLowerCase() === 'fixed') {
-              commission = Number(it.commissionFixed || 0) * qty;
-            } else {
-              const pct = Number(it.commissionPercent ?? bill.commissionPercent ?? bill.commission ?? 0) || 0;
-              commission = Math.round((lineTotal * Math.max(0, Math.min(100, pct))) / 100);
-            }
-
+            const { rawComm } = calcOrderItemCommission(it, {});
             if (!agentTotals[spId]) agentTotals[spId] = 0;
-            agentTotals[spId] += commission;
+            agentTotals[spId] += rawComm;
           } catch (e) { /* ignore per-item errors */ }
         });
 
-        // If no agents found but legacy bill-level salesperson exists, keep backward-compatible behavior
         if (Object.keys(agentTotals).length === 0) {
           const spId = bill.salespersonId || bill.salesperson || null;
           const percent = Number(bill.commissionPercent || bill.commission || 0);
@@ -887,7 +1174,7 @@ export const collectPayment = async ({
       await localDB.cash_transactions.add(cashTx);
       if (isFirebaseReady() && isOnline()) {
         try {
-          await addDoc(collection(firestore, COLLECTION_NAMES.cashTransactions), {
+          await addDoc(collection(getFirestoreDb(), COLLECTION_NAMES.cashTransactions), {
             ...cashTx, timestamp: serverTimestamp(),
           });
         } catch {
@@ -901,6 +1188,22 @@ export const collectPayment = async ({
     await logActivity('PAYMENT_COLLECTED', {
       billId: bill.billId, amount, paymentMethod,
     });
+
+    void import('./customerPersonaService').then(({ applyPaymentTransaction }) =>
+      applyPaymentTransaction({
+        bill,
+        customer: bill.customer || { name: bill.customerName, phone: bill.customerPhone },
+        storeId: bill.storeId,
+        branchId: bill.branchId || bill.storeId,
+        paidAmount: Number(amount),
+        outstandingAfter: newOutstanding,
+        paymentMethod,
+        isCredit: String(paymentMethod || '').toLowerCase().includes('credit'),
+        userId: ctx.uid,
+        collectedBy: ctx.uid,
+      }),
+    );
+
     return { success: true, paymentId: payment.paymentId, newPaid, newOutstanding };
   } catch (err) {
     console.error('[ManagerService] markCommissionPaid error:', err);
@@ -914,15 +1217,10 @@ export const collectPayment = async ({
 export const searchCustomers = async (queryStr = '', branchId = null) => {
   try {
     const ctx = await getManagerContext();
-    const restrict =
-      !ctx.isSuperAdmin && !ctx.isAdmin && ctx.branchIds.length > 0;
-    const branchIds = branchId
-      ? [branchId]
-      : restrict ? ctx.branchIds : [];
+    const scope = buildScope(ctx, branchId);
 
-    let all = await fetchCollection(COLLECTION_NAMES.customers, 'customers');
-    if (branchIds.length > 0)
-      all = all.filter(c => !c.storeId || branchIds.includes(c.storeId));
+    let all = await fetchCollection(COLLECTION_NAMES.customers, 'customers', { scope });
+    all = filterByBranchScope(all, scope);
 
     if (queryStr) {
       const q = queryStr.toLowerCase().trim();
@@ -937,13 +1235,13 @@ export const searchCustomers = async (queryStr = '', branchId = null) => {
     // Augment customers with computed stats (purchaseCount, totalSpent)
     // so manager view matches aggregated totals (similar to super-admin).
     try {
-      const orders = await fetchAllOrders({ lim: 10000 });
+      const orders = await fetchAllOrders({ lim: DEFAULT_FETCH_ORDERS_LIMIT });
       const agg = {};
       const metricsByPhone = {};
       let walkin = { purchaseCount: 0, totalSpent: 0, lastOrder: null };
 
       orders.forEach(o => {
-        if (branchIds.length && o.storeId && !branchIds.includes(o.storeId)) return;
+        if (!itemMatchesBranchScope(scope, o.storeId)) return;
         const total = Number(o.totalAmount || o.total || 0);
         const cid = o.customerId || (o.customer && (o.customer.customerId || o.customer.id)) || null;
         const phoneRaw = o.customer?.phone || o.customerPhone || '';
@@ -1032,31 +1330,40 @@ export const searchCustomers = async (queryStr = '', branchId = null) => {
 export const addCustomer = async (data) => {
   try {
     const ctx = await getManagerContext();
+    const scope = {
+      tenantId: 'aone',
+      storeId: data.storeId || ctx.primaryBranch,
+      branchId: data.storeId || ctx.primaryBranch,
+      userId: ctx.uid,
+    };
+    const { mergeCustomerPersona } = await import('../repositories/customerRepository');
+    const { buildEmptyPersona } = await import('../utils/customerPersonaSchema');
+    const personaSeed = buildEmptyPersona(scope);
+    const result = await mergeCustomerPersona({
+      customer: data,
+      scope,
+      personaPatch: {
+        ...personaSeed,
+        email: data.email || '',
+        creditLimit: Number(data.creditLimit || 0),
+        address: data.address || '',
+      },
+    });
+
     const customer = {
-      customerId: generateId('cus'),
+      customerId: result?.customerId || generateId('cus'),
       name: data.name,
       nameLower: (data.name || '').toLowerCase(),
       phone: data.phone || '', email: data.email || '',
       city: data.city || '', address: data.address || '',
       creditLimit: Number(data.creditLimit || 0),
       outstandingBalance: 0, purchaseCount: 0, totalSpent: 0,
-      storeId: data.storeId || ctx.primaryBranch,
-      createdAt: nowISO(), updatedAt: nowISO(), synced: 0,
+      storeId: scope.storeId,
+      tenantId: scope.tenantId,
+      branchId: scope.branchId,
+      createdAt: nowISO(), updatedAt: nowISO(), synced: result?.offline ? 0 : 1,
     };
     await localDB.customers.add(customer);
-
-    if (isFirebaseReadyFn() && isOnline()) {
-      try {
-        await addDoc(collection(firestore, COLLECTION_NAMES.customers), {
-          ...customer,
-          createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
-        });
-      } catch {
-        await queueSync('customer', 'create', customer);
-      }
-    } else {
-      await queueSync('customer', 'create', customer);
-    }
 
     await logActivity('CUSTOMER_ADDED', {
       customerId: customer.customerId, name: customer.name,
@@ -1084,7 +1391,7 @@ export const updateCustomer = async (id, updates) => {
       try {
         const snap = await getDocs(
           query(
-            collection(firestore, COLLECTION_NAMES.customers),
+            collection(getFirestoreDb(), COLLECTION_NAMES.customers),
             where('customerId', '==', customer.customerId)
           )
         );
@@ -1110,7 +1417,7 @@ export const updateCustomer = async (id, updates) => {
 
 export const getCustomerHistory = async (customerId) => {
   try {
-    const all = await fetchAllOrders({ lim: 10000 });
+    const all = await fetchAllOrders({ lim: DEFAULT_FETCH_ORDERS_LIMIT });
     let customerBills = [];
 
     if (!customerId || customerId === 'virtual-walkin') {
@@ -1172,7 +1479,7 @@ export const addExpense = async (data) => {
 
     if (isFirebaseReadyFn() && isOnline()) {
       try {
-        await addDoc(collection(firestore, 'expenses'), {
+        await addDoc(collection(getFirestoreDb(), 'expenses'), {
           ...expense, createdAt: serverTimestamp(),
         });
       } catch {
@@ -1194,16 +1501,12 @@ export const addExpense = async (data) => {
 export const listExpenses = async (filters = {}) => {
   try {
     const ctx = await getManagerContext();
-    const restrict =
-      !ctx.isSuperAdmin && !ctx.isAdmin && ctx.branchIds.length > 0;
-    const branchIds = filters.branchId
-      ? [filters.branchId]
-      : restrict ? ctx.branchIds : [];
+    const scope = buildScope(ctx, filters.branchId);
 
-    let all = await fetchCollection('expenses', 'expenses');
+    let all = await fetchCollection('expenses', 'expenses', { scope });
 
-    if (branchIds.length > 0)
-      all = all.filter(e => branchIds.includes(e.storeId));
+    all = filterByBranchScope(all, scope);
+
     if (filters.status)
       all = all.filter(e => e.status === filters.status);
     if (filters.category)
@@ -1275,6 +1578,61 @@ export const rejectExpense = async (expenseId, reason = '') => {
 // SECTION 6: CASH FLOW — FULLY FIXED
 // ============================================================
 
+/** Shared cash-flow fetch — one orders + one cash_transactions read per page load. */
+const fetchCashFlowRaw = async (branchId = null) => {
+  const ctx = await getManagerContext();
+  const scope = buildScope(ctx, branchId);
+
+  const manual = filterByBranchScope(
+    await fetchCollection(
+      COLLECTION_NAMES.cashTransactions, 'cash_transactions',
+      { orderField: 'timestamp', scope, lim: MANAGER_CASH_TX_LIMIT },
+    ),
+    scope,
+  );
+
+  const allOrders = await fetchAllOrders({
+    lim: CASH_FLOW_ORDERS_LIMIT,
+    branchId: branchId || undefined,
+  });
+
+  const shifts = await localDB.shifts.toArray();
+  const activeShift = shifts.find(
+    (s) =>
+      s.status === SHIFT_STATUS.open
+      && itemMatchesBranchScope(scope, s.storeId, { allowMissing: !scope.restrict }),
+  );
+  const openingBalance = activeShift
+    ? Number(activeShift.openingBalance || 0)
+    : 0;
+
+  return { scope, manual, allOrders, activeShift, openingBalance };
+};
+
+const buildBillCashTransactions = (allOrders, scope) =>
+  allOrders
+    .filter((o) => {
+      if (o.deleted || o.isDeleted) return false;
+      const method = String(o.paymentMethod || 'cash').toLowerCase();
+      if (method !== 'cash') return false;
+      return itemMatchesBranchScope(scope, o.storeId);
+    })
+    .map((o) => ({
+      txId: `bill_${o.id || o.localId}`,
+      type: 'receive',
+      amount: Number(o.paidAmount || o.totalAmount || 0),
+      reason: `Bill #${o.serialNo || o.billSerial || o.id?.slice(0, 8)}`,
+      storeId: o.storeId,
+      billId: o.billId || o.id,
+      isFromBill: true,
+      userId: o.billerId || '',
+      userName: o.billerName || o.cashierName || 'Cashier',
+      createdAt: o.savedAt || o.createdAt,
+      timestamp: o.savedAt || o.createdAt,
+      reconciled: true,
+      synced: o.synced !== false,
+    }));
+
 /**
  * ✅ FIXED: listCashTransactions
  * - Bills ka cash bhi include hota hai (orders collection se)
@@ -1282,70 +1640,27 @@ export const rejectExpense = async (expenseId, reason = '') => {
  */
 export const listCashTransactions = async (branchId = null, filters = {}) => {
   try {
-    const ctx = await getManagerContext();
-    const restrict =
-      !ctx.isSuperAdmin && !ctx.isAdmin && ctx.branchIds.length > 0;
-    const branchIds = branchId
-      ? [branchId]
-      : restrict ? ctx.branchIds : [];
+    const { scope, manual, allOrders } = await fetchCashFlowRaw(branchId);
 
-    // ── Manual cash transactions ──────────────────────────
-    let manual = await fetchCollection(
-      COLLECTION_NAMES.cashTransactions, 'cash_transactions',
-      { orderField: 'timestamp' }
-    );
-
-    if (branchIds.length > 0)
-      manual = manual.filter(c => branchIds.includes(c.storeId));
+    let filteredManual = manual;
     if (filters.type)
-      manual = manual.filter(c => c.type === filters.type);
+      filteredManual = filteredManual.filter(c => c.type === filters.type);
 
-    // ── Bill-based cash (from orders) ──────────────────────
-    // Only include if type filter allows 'receive' or is not set
     let billBased = [];
     const typeOk = !filters.type || filters.type === 'receive';
-
     if (typeOk) {
-      const allOrders = await fetchAllOrders({ lim: 10000 });
-      billBased = allOrders
-        .filter(o => {
-          if (o.deleted || o.isDeleted) return false;
-          // Only cash orders
-          const method = String(o.paymentMethod || 'cash').toLowerCase();
-          if (method !== 'cash') return false;
-          // Branch filter
-          if (branchIds.length && !branchIds.includes(o.storeId)) return false;
-          return true;
-        })
-        .map(o => ({
-          txId: `bill_${o.id || o.localId}`,
-          type: 'receive',
-          amount: Number(o.paidAmount || o.totalAmount || 0),
-          reason: `Bill #${o.serialNo || o.billSerial || o.id?.slice(0, 8)}`,
-          storeId: o.storeId,
-          billId: o.billId || o.id,
-          isFromBill: true,
-          userId: o.billerId || '',
-          userName: o.billerName || o.cashierName || 'Cashier',
-          createdAt: o.savedAt || o.createdAt,
-          timestamp: o.savedAt || o.createdAt,
-          reconciled: true,
-          synced: o.synced !== false,
-        }));
+      billBased = buildBillCashTransactions(allOrders, scope);
     }
 
-    // ── Merge & dedup ──────────────────────────────────────
-    // Avoid double-counting: if a manual tx has billId, skip bill-based entry
     const manualBillIds = new Set(
-      manual.filter(m => m.billId).map(m => m.billId)
+      filteredManual.filter(m => m.billId).map(m => m.billId)
     );
     const filteredBillBased = billBased.filter(
       b => !manualBillIds.has(b.billId)
     );
 
-    let all = [...manual, ...filteredBillBased];
+    let all = [...filteredManual, ...filteredBillBased];
 
-    // ── Date filter ────────────────────────────────────────
     if (filters.from) {
       const ts = new Date(filters.from).getTime();
       all = all.filter(
@@ -1377,12 +1692,17 @@ export const listCashTransactions = async (branchId = null, filters = {}) => {
 export const addCashTransaction = async (data) => {
   try {
     const ctx = await getManagerContext();
+    const scope = buildScope(ctx);
+    const storeId = data.storeId || ctx.primaryBranch;
+    if (scope.restrict && storeId && !itemMatchesBranchScope(scope, storeId)) {
+      throw new Error('Cannot record cash for another branch');
+    }
     const tx = {
       txId: generateId('cash'),
       type: data.type || 'receive',
       amount: Number(data.amount || 0),
       reason: data.reason || '',
-      storeId: data.storeId || ctx.primaryBranch,
+      storeId: storeId || ctx.primaryBranch,
       toUserId: data.toUserId || null,          // for transfer
       toUserName: data.toUserName || null,
       userId: ctx.uid, userName: ctx.name,
@@ -1395,7 +1715,7 @@ export const addCashTransaction = async (data) => {
 
     if (isFirebaseReady() && isOnline()) {
       try {
-        await addDoc(collection(firestore, COLLECTION_NAMES.cashTransactions), {
+        await addDoc(collection(getFirestoreDb(), COLLECTION_NAMES.cashTransactions), {
           ...tx, timestamp: serverTimestamp(),
         });
       } catch {
@@ -1444,52 +1764,26 @@ export const markCashTransactionReconciled = async (txId) => {
  */
 export const getCashSummary = async (branchId = null, dateKey = null) => {
   try {
-    const ctx = await getManagerContext();
-    const restrict =
-      !ctx.isSuperAdmin && !ctx.isAdmin && ctx.branchIds.length > 0;
-    const branchIds = branchId
-      ? [branchId]
-      : restrict ? ctx.branchIds : [];
+    const { scope, manual, allOrders, activeShift, openingBalance } = await fetchCashFlowRaw(branchId);
 
-    // ✅ If no dateKey → All Time
     const fromTs = dateKey ? new Date(dateKey).getTime() : 0;
-    const toTs   = dateKey
+    const toTs = dateKey
       ? new Date(dateKey).getTime() + 86400000 - 1
       : Date.now() + 86400000;
 
-    // All manual cash transactions
-    const allCash = await fetchCollection(
-      COLLECTION_NAMES.cashTransactions, 'cash_transactions',
-      { orderField: 'timestamp' }
-    );
-
-    const filteredCash = allCash.filter(c => {
-      if (branchIds.length && !branchIds.includes(c.storeId)) return false;
+    const filteredCash = manual.filter((c) => {
       const ts = parseDate(c.createdAt || c.timestamp).getTime();
       return ts >= fromTs && ts <= toTs;
     });
 
-    // All cash bills
-    const allOrders = await fetchAllOrders({ lim: 10000 });
-    const cashBills = allOrders.filter(o => {
+    const cashBills = allOrders.filter((o) => {
       if (o.deleted || o.isDeleted) return false;
       const method = String(o.paymentMethod || 'cash').toLowerCase();
       if (method !== 'cash') return false;
-      if (branchIds.length && !branchIds.includes(o.storeId)) return false;
+      if (!itemMatchesBranchScope(scope, o.storeId)) return false;
       const ts = parseDate(o.savedAt || o.createdAt).getTime();
       return ts >= fromTs && ts <= toTs;
     });
-
-    // Active shift
-    const shifts = await localDB.shifts.toArray();
-    const activeShift = shifts.find(
-      s =>
-        s.status === SHIFT_STATUS.open &&
-        (branchIds.length === 0 || branchIds.includes(s.storeId))
-    );
-    const openingBalance = activeShift
-      ? Number(activeShift.openingBalance || 0)
-      : 0;
 
     // Calculate from manual transactions
     let received = 0, paid = 0, transferred = 0, expenses = 0;
@@ -1544,28 +1838,69 @@ export const getCashSummary = async (branchId = null, dateKey = null) => {
   }
 };
 
+/** Cash Flow page — single Firebase round-trip for transactions + shift meta. */
+export const listCashFlowPageData = async (branchId = null, filters = {}) => {
+  try {
+    const { scope, manual, allOrders, activeShift, openingBalance } = await fetchCashFlowRaw(branchId);
+
+    let filteredManual = manual;
+    if (filters.type)
+      filteredManual = filteredManual.filter((c) => c.type === filters.type);
+
+    let billBased = [];
+    const typeOk = !filters.type || filters.type === 'receive';
+    if (typeOk) {
+      billBased = buildBillCashTransactions(allOrders, scope);
+    }
+
+    const manualBillIds = new Set(
+      filteredManual.filter((m) => m.billId).map((m) => m.billId),
+    );
+    let all = [...filteredManual, ...billBased.filter((b) => !manualBillIds.has(b.billId))];
+
+    if (filters.from) {
+      const ts = new Date(filters.from).getTime();
+      all = all.filter((c) => parseDate(c.createdAt || c.timestamp).getTime() >= ts);
+    }
+    if (filters.to) {
+      const ts = new Date(filters.to).getTime() + 86400000 - 1;
+      all = all.filter((c) => parseDate(c.createdAt || c.timestamp).getTime() <= ts);
+    }
+
+    const transactions = all.sort(
+      (a, b) =>
+        parseDate(b.createdAt || b.timestamp).getTime()
+        - parseDate(a.createdAt || a.timestamp).getTime(),
+    );
+
+    return {
+      transactions,
+      openingBalance,
+      activeShift: activeShift || null,
+    };
+  } catch (err) {
+    console.error('[ManagerService] listCashFlowPageData:', err);
+    return { transactions: [], openingBalance: 0, activeShift: null };
+  }
+};
+
 // ============================================================
 // SECTION 7: SALESPERSONS
 // ============================================================
 export const getSalespersons = async () => {
   try {
     const ctx = await getManagerContext();
-    const all = await fetchCollection(COLLECTION_NAMES.users, 'users');
+    const { buildManagerSalespersonList } = await import('./commissionService');
+    const list = await buildManagerSalespersonList();
 
-    return all.filter(u => {
-      const isSP =
-        u.roles?.includes('salesperson') ||
-        u.role === 'salesperson' ||
-        Number(u.commissionEarned || 0) > 0 ||
-        Number(u.commissionPending || 0) > 0;
-      if (!isSP) return false;
-      if (ctx.isSuperAdmin || ctx.isAdmin) return true;
-      if (ctx.branchIds.length === 0) return true;
-      return (
-        ctx.branchIds.includes(u.storeId) ||
-        u.storeIds?.some(s => ctx.branchIds.includes(s))
-      );
-    });
+    if (!ctx.restrictBranches) {
+      return list;
+    }
+
+    return list.filter((u) => userMatchesBranchScope(
+      { restrict: true, branchIds: ctx.branchIds },
+      u,
+    ));
   } catch { return []; }
 };
 
@@ -1630,19 +1965,15 @@ export const markCommissionPaid = async (uid, amount, branchId, note = '') => {
 export const listReturns = async (filters = {}) => {
   try {
     const ctx = await getManagerContext();
-    const restrict =
-      !ctx.isSuperAdmin && !ctx.isAdmin && ctx.branchIds.length > 0;
-    const branchIds = filters.branchId
-      ? [filters.branchId]
-      : restrict ? ctx.branchIds : [];
+    const scope = buildScope(ctx, filters.branchId);
 
     let all = await fetchCollection(
       COLLECTION_NAMES.returns, 'returns',
-      { orderField: 'processedAt' }
+      { orderField: 'processedAt', scope }
     );
 
-    if (branchIds.length > 0)
-      all = all.filter(r => branchIds.includes(r.storeId));
+    all = filterByBranchScope(all, scope);
+
     if (filters.status)
       all = all.filter(r => r.status === filters.status);
 
@@ -1685,6 +2016,17 @@ export const approveReturn = async (returnId) => {
     await logActivity('RETURN_APPROVED', {
       returnId, refundAmount: ret.refundAmount,
     });
+
+    void import('./customerPersonaService').then(({ applyReturnTransaction }) =>
+      applyReturnTransaction({
+        customer: ret.customer,
+        storeId: ret.storeId,
+        branchId: ret.storeId,
+        refundAmount: ret.refundAmount,
+        userId: ctx.uid,
+      }),
+    );
+
     return { success: true };
   } catch (err) {
     return { success: false, error: err.message };
@@ -1750,7 +2092,7 @@ export const openShift = async ({
 
     if (isFirebaseReady() && isOnline()) {
       try {
-        await addDoc(collection(firestore, 'shifts'), {
+        await addDoc(collection(getFirestoreDb(), 'shifts'), {
           ...shift, openedAt: serverTimestamp(),
         });
       } catch {
@@ -1792,7 +2134,7 @@ export const closeShift = async (shiftId, closingBalance = 0) => {
     if (isFirebaseReady() && isOnline()) {
       try {
         const q   = query(
-          collection(firestore, 'shifts'),
+          collection(getFirestoreDb(), 'shifts'),
           where('shiftId', '==', shiftId)
         );
         const snap = await getDocs(q);
@@ -1825,29 +2167,28 @@ export const closeShift = async (shiftId, closingBalance = 0) => {
 export const generateReport = async (type, filters = {}) => {
   try {
     const ctx = await getManagerContext();
-    const restrict =
-      !ctx.isSuperAdmin && !ctx.isAdmin && ctx.branchIds.length > 0;
-    const branchIds = filters.branchId
-      ? [filters.branchId]
-      : restrict ? ctx.branchIds : [];
+    const scope = buildScope(ctx, filters.branchId);
 
     let data = [];
 
     switch (type) {
       case 'sales': {
-        let all = await fetchAllOrders();
-        if (branchIds.length)
-          all = all.filter(o => branchIds.includes(o.storeId));
+        let all = await fetchAllOrders({
+          branchId: filters.branchId,
+          lim: MANAGER_REPORTS_ORDERS_LIMIT,
+        });
+        all = filterByBranchScope(all, scope);
+        all = all.filter(isReportPaidBill);
         if (filters.from) {
           const ts = new Date(filters.from).getTime();
           all = all.filter(
-            o => parseDate(o.savedAt || o.createdAt).getTime() >= ts
+            o => parseDate(o.savedAt || o.createdAt || o.paidAt).getTime() >= ts
           );
         }
         if (filters.to) {
           const ts = new Date(filters.to).getTime() + 86400000 - 1;
           all = all.filter(
-            o => parseDate(o.savedAt || o.createdAt).getTime() <= ts
+            o => parseDate(o.savedAt || o.createdAt || o.paidAt).getTime() <= ts
           );
         }
         if (filters.billerId)
@@ -1862,9 +2203,11 @@ export const generateReport = async (type, filters = {}) => {
         data = await listCashTransactions(filters.branchId, filters);
         break;
       case 'credit': {
-        let all = await fetchAllOrders();
-        if (branchIds.length)
-          all = all.filter(o => branchIds.includes(o.storeId));
+        let all = await fetchAllOrders({
+          branchId: filters.branchId,
+          lim: MANAGER_REPORTS_ORDERS_LIMIT,
+        });
+        all = filterByBranchScope(all, scope);
         data = all.filter(
           o => Number(o.totalAmount || 0) - Number(o.paidAmount || 0) > 0
         );
@@ -1877,29 +2220,14 @@ export const generateReport = async (type, filters = {}) => {
         data = await getSalespersons();
         break;
       case 'discount': {
-        let all = await fetchAllOrders();
-        if (branchIds.length)
-          all = all.filter(o => branchIds.includes(o.storeId));
-        data = all.filter(o => Number(o.discountAmount || 0) > 0);
-        break;
-      }
-      case 'managerApproved': {
-        // fetch managerApprovedOrders collection
-        try {
-          const items = await fetchCollection('managerApprovedOrders', null, { lim: 2000 });
-          data = items.filter(i => {
-            if (branchIds.length && i.storeId && !branchIds.includes(i.storeId)) return false;
-            if (filters.from) {
-              const ts = new Date(filters.from).getTime();
-              if (parseDate(i.approvedAt || i.createdAt).getTime() < ts) return false;
-            }
-            if (filters.to) {
-              const ts = new Date(filters.to).getTime() + 86400000 - 1;
-              if (parseDate(i.approvedAt || i.createdAt).getTime() > ts) return false;
-            }
-            return true;
-          });
-        } catch { data = []; }
+        let all = await fetchAllOrders({
+          branchId: filters.branchId,
+          lim: MANAGER_REPORTS_ORDERS_LIMIT,
+        });
+        all = filterByBranchScope(all, scope);
+        data = all.filter(
+          (o) => Number(o.totalDiscount ?? o.discountAmount ?? o.billDiscount ?? 0) > 0,
+        );
         break;
       }
     }
@@ -1914,51 +2242,110 @@ export const generateReport = async (type, filters = {}) => {
 export const getActivityLogs = async (filters = {}) => {
   try {
     const ctx = await getManagerContext();
-    const restrict =
-      !ctx.isSuperAdmin && !ctx.isAdmin && ctx.branchIds.length > 0;
-    const branchIds = filters.branchId
-      ? [filters.branchId]
-      : restrict ? ctx.branchIds : [];
+    const scope = buildScope(ctx, filters.branchId);
 
-    let all = await localDB.activity_logs_local.toArray();
+    const seen = new Set();
+    const all = [];
 
-    if (isFirebaseReady() && isOnline()) {
-      try {
-        const q = query(
-          collection(firestore, COLLECTION_NAMES.activityLogs),
-          orderBy('timestamp', 'desc'),
-          limit(500)
-        );
-        const snap   = await getDocs(q);
-        const fbLogs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-        const seen   = new Set(all.map(l => l.logId));
-        fbLogs.forEach(l => { if (!seen.has(l.logId)) all.push(l); });
-      } catch { }
+    const pushLog = (log) => {
+      if (!log?.logId) return;
+      if (seen.has(log.logId)) return;
+      seen.add(log.logId);
+      all.push(log);
+    };
+
+    // Offline / local queue
+    try {
+      const localRows = await localDB.activity_logs_local.toArray();
+      localRows.forEach((row) => {
+        pushLog(normalizeManagerActivityLog(row, 'offline'));
+      });
+    } catch (e) {
+      console.warn('[ManagerService] local activity logs:', e?.message);
     }
 
-    if (branchIds.length > 0)
-      all = all.filter(l => !l.storeId || branchIds.includes(l.storeId));
+    // Firebase — same sources as admin Audit Logs (manager read allowed in rules)
+    if (isFirebaseReady() && isOnline()) {
+      const lim = filters.limit || ACTIVITY_LOGS_DOC_LIMIT;
+      await Promise.all(
+        MANAGER_ACTIVITY_SOURCES.map(async ({ key, collection: colName, orderField }) => {
+          try {
+            const q = query(
+              collection(getFirestoreDb(), colName),
+              orderBy(orderField, 'desc'),
+              limit(lim),
+            );
+            const snap = await getDocs(q);
+            snap.docs.forEach((docSnap) => {
+              pushLog(
+                normalizeManagerActivityLog(
+                  { _id: docSnap.id, ...docSnap.data() },
+                  key,
+                ),
+              );
+            });
+          } catch (e) {
+            console.warn(`[ManagerService] activity source ${key}:`, e?.message);
+          }
+        }),
+      );
+    }
+
+    // Resolve user names from local cache
+    let usersById = {};
+    try {
+      const users = await localDB.users.toArray();
+      users.forEach((u) => {
+        if (u.uid) {
+          usersById[u.uid] = u.name || u.displayName || u.email || u.uid;
+        }
+      });
+    } catch { /* ignore */ }
+
+    let filtered = all.map((log) => ({
+      ...log,
+      userName:
+        log.userName ||
+        usersById[log.userId] ||
+        log.userId ||
+        'Unknown',
+      timestamp: toISOStr(log.timestamp),
+    }));
+
+    if (scope.restrict && !scope.branchIds.length) {
+      return [];
+    }
+
+    filtered = filtered.filter((l) => activityLogMatchesBranch(l, scope.branchIds));
+
     if (filters.userId)
-      all = all.filter(l => l.userId === filters.userId);
+      filtered = filtered.filter((l) => l.userId === filters.userId);
     if (filters.action)
-      all = all.filter(l => l.action === filters.action);
+      filtered = filtered.filter((l) => l.action === filters.action);
     if (filters.from) {
       const ts = new Date(filters.from).getTime();
-      all = all.filter(l => parseDate(l.timestamp).getTime() >= ts);
+      filtered = filtered.filter(
+        (l) => parseDate(l.timestamp).getTime() >= ts,
+      );
     }
     if (filters.to) {
       const ts = new Date(filters.to).getTime() + 86400000 - 1;
-      all = all.filter(l => parseDate(l.timestamp).getTime() <= ts);
+      filtered = filtered.filter(
+        (l) => parseDate(l.timestamp).getTime() <= ts,
+      );
     }
 
-    return all
+    return filtered
       .sort(
         (a, b) =>
           parseDate(b.timestamp).getTime() -
-          parseDate(a.timestamp).getTime()
+          parseDate(a.timestamp).getTime(),
       )
       .slice(0, filters.limit || 500);
-  } catch { return []; }
+  } catch (e) {
+    console.error('[ManagerService] getActivityLogs:', e);
+    return [];
+  }
 };
 
 // ============================================================
@@ -1975,11 +2362,12 @@ export const submitBillForManagerApproval = async (localBillId, type = APPROVAL_
       requestId: generateId('apr'),
       billId: bill.billId || bill.id || localBillId,
       localBillId,
-      type,
+      type: type || APPROVAL_TYPES.largeBill,
       note: note || '',
       status: APPROVAL_STATUS.pending,
       requestedBy: ctx.uid,
       requestedByName: ctx.name,
+      requestedByRole: ctx.primaryRole || ctx.role || 'biller',
       storeId: bill.storeId || ctx.primaryBranch,
       billSnapshot: {
         serialNo: bill.serialNo || bill.id,
@@ -2002,7 +2390,7 @@ export const submitBillForManagerApproval = async (localBillId, type = APPROVAL_
 
     if (isFirebaseReady() && isOnline()) {
       try {
-        await addDoc(collection(firestore, COLLECTION_NAMES.approvalRequests), { ...request, createdAt: serverTimestamp() });
+        await addDoc(collection(getFirestoreDb(), COLLECTION_NAMES.approvalRequests), { ...request, createdAt: serverTimestamp() });
       } catch { /* keep queued */ }
     }
 
@@ -2014,13 +2402,75 @@ export const submitBillForManagerApproval = async (localBillId, type = APPROVAL_
 
 export const getApprovalRequests = async (filters = {}) => {
   try {
-    let items = await fetchCollection(COLLECTION_NAMES.approvalRequests, null, { lim: 1000 });
+    const ctx = await getManagerContext();
+    const scope = buildScope(ctx, filters.storeId || filters.branchId);
+    const statusFilter = filters.status || null;
+    const lim = 150;
+
+    if (scope.restrict && !scope.branchIds?.length) return [];
+
+    const sortItems = (rows) =>
+      (rows || []).sort(
+        (a, b) =>
+          parseDate(b.createdAt).getTime() - parseDate(a.createdAt).getTime(),
+      );
+
+    let items = [];
+
+    if (isFirebaseReadyFn() && isOnline()) {
+      try {
+        const col = collection(getFirestoreDb(), COLLECTION_NAMES.approvalRequests);
+        const mapSnap = (snap) => snap.docs.map(mapFirestoreDoc);
+
+        const fetchBranchPlain = async (branchIds) => {
+          const constraints =
+            branchIds.length === 1
+              ? [where('storeId', '==', branchIds[0])]
+              : [where('storeId', 'in', branchIds.slice(0, 10))];
+          const q = query(col, ...constraints, limit(lim * 4));
+          let rows = mapSnap(await getDocs(q));
+          if (statusFilter) rows = rows.filter((i) => i.status === statusFilter);
+          return sortItems(rows).slice(0, lim);
+        };
+
+        if (scope.restrict) {
+          items = await fetchBranchPlain(scope.branchIds);
+        } else {
+          items = await fetchCollection(
+            COLLECTION_NAMES.approvalRequests,
+            'approval_requests',
+            { lim, scope },
+          );
+        }
+
+        if (items.length > 0 && localDB.approval_requests) {
+          try {
+            await localDB.approval_requests.bulkPut(
+              items.map((i) => ({ ...i, synced: 1 })),
+            );
+          } catch { /* ignore cache */ }
+        }
+      } catch {
+        items = await fetchCollection(
+          COLLECTION_NAMES.approvalRequests,
+          'approval_requests',
+          { lim, scope },
+        );
+      }
+    } else {
+      items = await fetchCollection(
+        COLLECTION_NAMES.approvalRequests,
+        'approval_requests',
+        { lim, scope },
+      );
+    }
+
     if (!Array.isArray(items)) items = [];
-    if (filters.status) items = items.filter(i => i.status === filters.status);
-    if (filters.storeId) items = items.filter(i => i.storeId === filters.storeId);
-    if (filters.requestedBy) items = items.filter(i => i.requestedBy === filters.requestedBy);
-    return items.sort((a, b) => (a.createdAt || '').toString() < (b.createdAt || '').toString() ? 1 : -1);
-  } catch (err) {
+    if (statusFilter) items = items.filter((i) => i.status === statusFilter);
+    if (filters.requestedBy) items = items.filter((i) => i.requestedBy === filters.requestedBy);
+    items = filterByBranchScope(items, scope);
+    return sortItems(items);
+  } catch {
     return [];
   }
 };
@@ -2028,40 +2478,64 @@ export const getApprovalRequests = async (filters = {}) => {
 export const processApprovalRequest = async (requestDocIdOrRequestId, action = 'approve', reason = '') => {
   try {
     const ctx = await getManagerContext();
+    const lookupKey = firestorePathId(requestDocIdOrRequestId)
+      ?? (requestDocIdOrRequestId != null && typeof requestDocIdOrRequestId !== 'object'
+        ? String(requestDocIdOrRequestId).trim() || null
+        : null);
 
-    // Find request either by Firestore doc id or by requestId field
+    // Find request either by requestId field or Firestore doc id
     let request = null;
     if (isFirebaseReady() && isOnline()) {
-      try {
-        // try doc id
-        const snap = await getDoc(doc(firestore, COLLECTION_NAMES.approvalRequests, requestDocIdOrRequestId));
-        if (snap.exists()) request = { id: snap.id, ...snap.data() };
-      } catch { /* ignore */ }
-      if (!request) {
-        const q = query(collection(firestore, COLLECTION_NAMES.approvalRequests), where('requestId', '==', requestDocIdOrRequestId), limit(1));
+      if (lookupKey) {
         try {
+          const q = query(
+            collection(getFirestoreDb(), COLLECTION_NAMES.approvalRequests),
+            where('requestId', '==', lookupKey),
+            limit(1),
+          );
           const snap2 = await getDocs(q);
-          if (!snap2.empty) request = { id: snap2.docs[0].id, ...snap2.docs[0].data() };
+          if (!snap2.empty) request = mapFirestoreDoc(snap2.docs[0]);
+        } catch { /* ignore */ }
+      }
+      const docIdTry = firestorePathId(lookupKey);
+      if (!request && docIdTry) {
+        try {
+          const snap = await getDoc(doc(getFirestoreDb(), COLLECTION_NAMES.approvalRequests, docIdTry));
+          if (snap.exists()) request = mapFirestoreDoc(snap);
         } catch { /* ignore */ }
       }
     }
 
     // Fallback: try reading from local sync queue (best-effort)
-    if (!request) {
+    if (!request && lookupKey) {
       const qItems = await localDB.sync_queue.toArray().catch(() => []);
-      request = qItems.map(i => i.data).find(d => d && (d.requestId === requestDocIdOrRequestId || d.id === requestDocIdOrRequestId));
+      request = qItems.map(i => i.data).find(d => d && (d.requestId === lookupKey || d.id === lookupKey));
     }
 
     // Fallback: try local approval_requests store
     if (!request && localDB.approval_requests) {
       try {
-        const localReq = await localDB.approval_requests
-          .where('requestId').equals(requestDocIdOrRequestId).first();
-        if (localReq) request = localReq;
+        if (lookupKey) {
+          const localReq = await localDB.approval_requests
+            .where('requestId').equals(lookupKey).first();
+          if (localReq) request = localReq;
+        }
+        if (!request && typeof requestDocIdOrRequestId === 'number') {
+          const localReq = await localDB.approval_requests.get(requestDocIdOrRequestId);
+          if (localReq) request = localReq;
+        }
       } catch { /* ignore */ }
     }
 
     if (!request) throw new Error('Approval request not found');
+
+    const scope = buildScope(ctx);
+    if (scope.restrict) {
+      const reqBranch = request.storeId || request.branchId || '';
+      if (!reqBranch || !itemMatchesBranchScope(scope, reqBranch)) {
+        throw new Error('This approval belongs to another branch');
+      }
+    }
 
     const updates = {};
     if (action === 'approve') {
@@ -2087,14 +2561,37 @@ export const processApprovalRequest = async (requestDocIdOrRequestId, action = '
     }
 
     // Update Firestore request doc if possible
-    if (isFirebaseReady() && isOnline() && request.id) {
+    const firestoreDocId = firestorePathId(request.firestoreId) || firestorePathId(request.id);
+    const db = getFirestoreDb();
+    if (isFirebaseReady() && isOnline() && firestoreDocId && db) {
       try {
-        await updateDoc(doc(firestore, COLLECTION_NAMES.approvalRequests, request.id), { ...updates, updatedAt: serverTimestamp() });
-      } catch {
-        await queueSync('approval_request', 'update', { requestId: request.requestId || request.id, ...updates });
+        await updateDoc(
+          doc(db, COLLECTION_NAMES.approvalRequests, firestoreDocId),
+          { ...updates, updatedAt: serverTimestamp() },
+        );
+      } catch (err) {
+        await queueSync('approval_request', 'update', { requestId: request.requestId || firestoreDocId, ...updates });
+        const msg = String(err?.message || '');
+        if (msg.includes('indexOf') || msg.includes('Invalid document reference')) {
+          throw new Error('Invalid approval record — refresh the page and try again');
+        }
+        if (msg.includes('permission') || msg.includes('insufficient')) {
+          throw new Error('Permission denied — deploy Firestore rules (manager update on approvalRequests)');
+        }
+        throw new Error(msg || 'Could not update approval request');
       }
     } else {
-      await queueSync('approval_request', 'update', { requestId: request.requestId || request.id, ...updates });
+      await queueSync('approval_request', 'update', { requestId: request.requestId || firestoreDocId || lookupKey, ...updates });
+    }
+
+    if (localDB.approval_requests) {
+      try {
+        const localReq = await localDB.approval_requests
+          .where('requestId').equals(request.requestId || request.id).first();
+        if (localReq?.id) {
+          await localDB.approval_requests.update(localReq.id, { ...updates, synced: 1 });
+        }
+      } catch { /* ignore */ }
     }
 
     // Special handling for cancellation requests
@@ -2119,9 +2616,10 @@ export const processApprovalRequest = async (requestDocIdOrRequestId, action = '
         } catch { }
 
         // 2. Update Firestore order if online
-        if (isFirebaseReady() && isOnline() && request.billId) {
+        const orderRef = orderDocRef(resolveApprovalOrderId(request));
+        if (isFirebaseReady() && isOnline() && orderRef) {
           try {
-            await updateDoc(doc(firestore, COLLECTION_NAMES.orders, request.billId), {
+            await updateDoc(orderRef, {
               status: 'manager_cancelled',
               isActiveOrder: false,
               managerCancelReason: managerReason,
@@ -2160,7 +2658,7 @@ export const processApprovalRequest = async (requestDocIdOrRequestId, action = '
 
         if (isFirebaseReady() && isOnline()) {
           try {
-            await addDoc(collection(firestore, COLLECTION_NAMES.superApprovalRequests), {
+            await addDoc(collection(getFirestoreDb(), COLLECTION_NAMES.superApprovalRequests), {
               ...superReq,
               createdAt: serverTimestamp()
             });
@@ -2186,9 +2684,10 @@ export const processApprovalRequest = async (requestDocIdOrRequestId, action = '
           }
         } catch { }
 
-        if (isFirebaseReady() && isOnline() && request.billId) {
+        const rejectOrderRef = orderDocRef(resolveApprovalOrderId(request));
+        if (isFirebaseReady() && isOnline() && rejectOrderRef) {
           try {
-            await updateDoc(doc(firestore, COLLECTION_NAMES.orders, request.billId), {
+            await updateDoc(rejectOrderRef, {
               status: 'pending',
               isActiveOrder: true,
               managerRejectionReason: reason || 'Rejected by manager',
@@ -2262,13 +2761,16 @@ export const processApprovalRequest = async (requestDocIdOrRequestId, action = '
         // 4. Update Firestore order and add collections if online
         if (isFirebaseReady() && isOnline()) {
           try {
-            // Update original order status if exists
-            if (request.billId) {
-              const orderRef = doc(firestore, COLLECTION_NAMES.orders, request.billId);
-              await updateDoc(orderRef, { status: BILL_STATUS.pending_superadmin, managerApprovedBy: ctx.uid, managerApprovedAt: serverTimestamp() });
+            const approveOrderRef = orderDocRef(resolveApprovalOrderId(request));
+            if (approveOrderRef) {
+              await updateDoc(approveOrderRef, {
+                status: BILL_STATUS.pending_superadmin,
+                managerApprovedBy: ctx.uid,
+                managerApprovedAt: serverTimestamp(),
+              });
             }
             // Create a manager-specific copy for easy reporting
-            await addDoc(collection(firestore, 'managerApprovedOrders'), {
+            await addDoc(collection(getFirestoreDb(), 'managerApprovedOrders'), {
               ...managerApprovedData,
               approvedAt: serverTimestamp(),
             });
@@ -2277,7 +2779,7 @@ export const processApprovalRequest = async (requestDocIdOrRequestId, action = '
           }
 
           try {
-            await addDoc(collection(firestore, COLLECTION_NAMES.superApprovalRequests), { ...superReq, createdAt: serverTimestamp() });
+            await addDoc(collection(getFirestoreDb(), COLLECTION_NAMES.superApprovalRequests), { ...superReq, createdAt: serverTimestamp() });
           } catch {
             await queueSync('super_approval_request', 'create', superReq);
           }
@@ -2313,7 +2815,7 @@ export const processApprovalRequest = async (requestDocIdOrRequestId, action = '
         };
         if (isFirebaseReadyFn() && isOnline()) {
           try {
-            await addDoc(collection(firestore, COLLECTION_NAMES.managerCancelledOrders), { ...cancelledRecord, cancelledAt: serverTimestamp() });
+            await addDoc(collection(getFirestoreDb(), COLLECTION_NAMES.managerCancelledOrders), { ...cancelledRecord, cancelledAt: serverTimestamp() });
           } catch {
             await queueSync('manager_cancelled_order', 'create', cancelledRecord);
           }
@@ -2367,12 +2869,12 @@ export const processSuperApprovalRequest = async (requestIdOrDocId, action = 'ap
     let request = null;
     if (isFirebaseReadyFn() && isOnline()) {
       try {
-        const snap = await getDoc(doc(firestore, COLLECTION_NAMES.superApprovalRequests, requestIdOrDocId));
+        const snap = await getDoc(doc(getFirestoreDb(), COLLECTION_NAMES.superApprovalRequests, requestIdOrDocId));
         if (snap.exists()) request = { id: snap.id, ...snap.data() };
       } catch { }
       if (!request) {
         try {
-          const q = query(collection(firestore, COLLECTION_NAMES.superApprovalRequests), where('requestId', '==', requestIdOrDocId), limit(1));
+          const q = query(collection(getFirestoreDb(), COLLECTION_NAMES.superApprovalRequests), where('requestId', '==', requestIdOrDocId), limit(1));
           const snap2 = await getDocs(q);
           if (!snap2.empty) request = { id: snap2.docs[0].id, ...snap2.docs[0].data() };
         } catch { }
@@ -2397,7 +2899,7 @@ export const processSuperApprovalRequest = async (requestIdOrDocId, action = 'ap
     } else throw new Error('Unknown action');
 
     if (isFirebaseReadyFn() && isOnline() && request.id) {
-      try { await updateDoc(doc(firestore, COLLECTION_NAMES.superApprovalRequests, request.id), { ...updates, updatedAt: serverTimestamp() }); } catch { await queueSync('super_approval_request', 'update', { requestId: request.requestId || request.id, ...updates }); }
+      try { await updateDoc(doc(getFirestoreDb(), COLLECTION_NAMES.superApprovalRequests, request.id), { ...updates, updatedAt: serverTimestamp() }); } catch { await queueSync('super_approval_request', 'update', { requestId: request.requestId || request.id, ...updates }); }
     } else {
       await queueSync('super_approval_request', 'update', { requestId: request.requestId || request.id, ...updates });
     }
@@ -2431,7 +2933,7 @@ export const processSuperApprovalRequest = async (requestIdOrDocId, action = 'ap
         // 2. Update Firestore order if online
         if (isFirebaseReady() && isOnline() && request.billId) {
           try {
-            await updateDoc(doc(firestore, COLLECTION_NAMES.orders, request.billId), {
+            await updateDoc(doc(getFirestoreDb(), COLLECTION_NAMES.orders, request.billId), {
               status: 'cancelled',
               isDeleted: true,
               isActiveOrder: false,
@@ -2462,7 +2964,7 @@ export const processSuperApprovalRequest = async (requestIdOrDocId, action = 'ap
 
         if (isFirebaseReady() && isOnline()) {
           try {
-            await addDoc(collection(firestore, 'deletedBills'), {
+            await addDoc(collection(getFirestoreDb(), 'deletedBills'), {
               ...deletedRecord,
               cancelledAt: serverTimestamp()
             });
@@ -2499,7 +3001,7 @@ export const processSuperApprovalRequest = async (requestIdOrDocId, action = 'ap
 
         if (isFirebaseReady() && isOnline() && request.billId) {
           try {
-            await updateDoc(doc(firestore, COLLECTION_NAMES.orders, request.billId), {
+            await updateDoc(doc(getFirestoreDb(), COLLECTION_NAMES.orders, request.billId), {
               status: 'pending',
               isActiveOrder: true,
               superAdminRejectionReason: reason || 'Rejected by Super Admin',
@@ -2549,9 +3051,9 @@ export const processSuperApprovalRequest = async (requestIdOrDocId, action = 'ap
         if (isFirebaseReadyFn() && isOnline()) {
           try {
             if (request.billId) {
-              await updateDoc(doc(firestore, COLLECTION_NAMES.orders, request.billId), { status: BILL_STATUS.completed, superApprovedBy: ctx.uid, superApprovedAt: serverTimestamp() });
+              await updateDoc(doc(getFirestoreDb(), COLLECTION_NAMES.orders, request.billId), { status: BILL_STATUS.completed, superApprovedBy: ctx.uid, superApprovedAt: serverTimestamp() });
             }
-            await addDoc(collection(firestore, COLLECTION_NAMES.superAdminApprovedOrders), {
+            await addDoc(collection(getFirestoreDb(), COLLECTION_NAMES.superAdminApprovedOrders), {
               ...superApprovedRecord,
               approvedAt: serverTimestamp(),
             });
@@ -2599,9 +3101,9 @@ export const processSuperApprovalRequest = async (requestIdOrDocId, action = 'ap
         if (isFirebaseReadyFn() && isOnline()) {
           try {
             if (request.billId) {
-              await updateDoc(doc(firestore, COLLECTION_NAMES.orders, request.billId), { status: BILL_STATUS.cancelled, superCancelledBy: ctx.uid, superCancelledAt: serverTimestamp(), cancelReason: updates.cancelReason });
+              await updateDoc(doc(getFirestoreDb(), COLLECTION_NAMES.orders, request.billId), { status: BILL_STATUS.cancelled, superCancelledBy: ctx.uid, superCancelledAt: serverTimestamp(), cancelReason: updates.cancelReason });
             }
-            await addDoc(collection(firestore, COLLECTION_NAMES.superAdminCancelledOrders), {
+            await addDoc(collection(getFirestoreDb(), COLLECTION_NAMES.superAdminCancelledOrders), {
               ...cancelledRecord,
               cancelledAt: serverTimestamp(),
             });
@@ -2625,19 +3127,10 @@ export const processSuperApprovalRequest = async (requestIdOrDocId, action = 'ap
 export const getUserPerformance = async (filters = {}) => {
   try {
     const ctx = await getManagerContext();
-    const restrict =
-      !ctx.isSuperAdmin && !ctx.isAdmin && ctx.branchIds.length > 0;
-    const branchIds = filters.branchId
-      ? [filters.branchId]
-      : restrict ? ctx.branchIds : [];
+    const scope = buildScope(ctx, filters.branchId);
 
     const allUsers = await fetchCollection(COLLECTION_NAMES.users, 'users');
-    const branchUsers = allUsers.filter(
-      u =>
-        branchIds.length === 0 ||
-        branchIds.includes(u.storeId) ||
-        u.storeIds?.some(s => branchIds.includes(s))
-    );
+    const branchUsers = allUsers.filter((u) => userMatchesBranchScope(scope, u));
 
     const allOrders = await fetchAllOrders();
 
@@ -2646,7 +3139,7 @@ export const getUserPerformance = async (filters = {}) => {
         const userOrders = allOrders.filter(
           o =>
             o.billerId === u.uid &&
-            (branchIds.length === 0 || branchIds.includes(o.storeId))
+            itemMatchesBranchScope(scope, o.storeId)
         );
         const totalSales     = userOrders.reduce((s, o) => s + Number(o.totalAmount  || 0), 0);
         const totalDiscount  = userOrders.reduce((s, o) => s + Number(o.discountAmount|| 0), 0);
@@ -2673,11 +3166,12 @@ export const getUserPerformance = async (filters = {}) => {
 const managerService = {
   getDashboardSummary,
   getBills, getBillDetails, updateBill,
+  subscribeToOrdersLive, filterOrdersList,
   collectPayment,
   searchCustomers, addCustomer, updateCustomer, getCustomerHistory,
   addExpense, listExpenses, approveExpense, rejectExpense,
   listCashTransactions, addCashTransaction,
-  markCashTransactionReconciled, getCashSummary,
+  markCashTransactionReconciled, getCashSummary, listCashFlowPageData,
   getSalespersons, markCommissionPaid,
   listReturns, approveReturn, rejectReturn,
   getActiveShift, openShift, closeShift,
@@ -2693,3 +3187,5 @@ const managerService = {
 };
 
 export default managerService;
+
+export { normalizeOrder };

@@ -7,7 +7,7 @@ import { Download, FileText, FileSpreadsheet, FileType, ChevronDown } from 'luci
 import { clsx } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import { exportData } from '../../utils/exportUtils';
-import toast from 'react-hot-toast';
+import { toast } from 'react-hot-toast';
 
 const cn = (...inputs) => twMerge(clsx(inputs));
 

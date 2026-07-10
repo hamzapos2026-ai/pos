@@ -8,7 +8,7 @@ import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { X, Trash2, PlayCircle, Clock } from "lucide-react";
 import { getHeldBills, deleteHeldBill } from "../../services/holdBillService";
-import toast from "react-hot-toast";
+import { toast } from "react-hot-toast";
 import { cn } from "../../utils/cn";
 
 export const HoldBillModal = ({

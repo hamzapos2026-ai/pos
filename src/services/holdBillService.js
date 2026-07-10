@@ -38,10 +38,12 @@ export const holdBill = async ({ billId, items, customer, billDiscount, billDisc
  */
 export const getHeldBills = async (billerId, storeId) => {
   try {
-    return await db.held_bills
-      .where({ billerId, storeId })
-      .reverse()
-      .sortBy('heldAt');
+    const rows = await db.held_bills
+      .where('billerId')
+      .equals(billerId)
+      .filter((row) => row.storeId === storeId)
+      .toArray();
+    return rows.sort((a, b) => String(b.heldAt || '').localeCompare(String(a.heldAt || '')));
   } catch (err) {
     console.error("[holdBillService] getHeldBills failed:", err);
     return [];
@@ -49,14 +51,18 @@ export const getHeldBills = async (billerId, storeId) => {
 };
 
 /**
- * Restore a held bill by its ID
+ * Restore a held bill by holdId (UUID) or Dexie auto id
  */
-export const restoreHeldBill = async (id) => {
+export const restoreHeldBill = async (idOrHoldId) => {
   try {
-    const bill = await db.held_bills.get(id);
+    let bill = await db.held_bills.where('holdId').equals(idOrHoldId).first();
+    if (!bill) {
+      const numericId = Number(idOrHoldId);
+      if (Number.isFinite(numericId)) bill = await db.held_bills.get(numericId);
+    }
     if (bill) {
-      // After restoring, we typically delete it from held list
-      await db.held_bills.delete(id);
+      if (bill.id != null) await db.held_bills.delete(bill.id);
+      else if (bill.holdId) await db.held_bills.where('holdId').equals(bill.holdId).delete();
       return { success: true, data: bill };
     }
     return { success: false, error: "Bill not found" };
@@ -67,11 +73,15 @@ export const restoreHeldBill = async (id) => {
 };
 
 /**
- * Delete a held bill without restoring
+ * Delete a held bill without restoring (holdId or Dexie id)
  */
-export const deleteHeldBill = async (id) => {
+export const deleteHeldBill = async (idOrHoldId) => {
   try {
-    await db.held_bills.delete(id);
+    const bill = await db.held_bills.where('holdId').equals(idOrHoldId).first()
+      || (Number.isFinite(Number(idOrHoldId)) ? await db.held_bills.get(Number(idOrHoldId)) : null);
+    if (bill?.id != null) await db.held_bills.delete(bill.id);
+    else if (bill?.holdId) await db.held_bills.where('holdId').equals(bill.holdId).delete();
+    else return { success: false, error: "Bill not found" };
     return { success: true };
   } catch (err) {
     console.error("[holdBillService] deleteHeldBill failed:", err);

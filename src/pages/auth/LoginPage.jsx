@@ -5,7 +5,7 @@
 // ✅ Shows offline badge after login
 
 import { useEffect, useState } from 'react';
-import { useNavigate, Link } from 'react-router-dom';
+import { useNavigate, Link, useLocation } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
   Sparkles, 
@@ -26,6 +26,7 @@ import LoadingSpinner from '../../components/ui/LoadingSpinner';
 import Button from '../../components/ui/Button';
 import Input from '../../components/ui/Input';
 import { toast } from '../../utils/toast';
+import { resolveRoleHome, ROLE_HOME } from '../../utils/roleHome';
 import { getLastLoginEmail, hasOfflineAccess } from '../../services/authService';
 import { processQueue } from '../../services/syncService';
 
@@ -43,10 +44,11 @@ const LoginPage = () => {
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const [hasOfflineCache, setHasOfflineCache] = useState(false);
 
-  const { signIn, isSetupComplete } = useAuth();
+  const { signIn, isSetupComplete, isAuthenticated, userData, activeRole, hasPermission } = useAuth();
   const { isDark } = useTheme();
   const { t } = useLanguage();
   const navigate = useNavigate();
+  const location = useLocation();
 
   // ── Network status ──
   useEffect(() => {
@@ -64,11 +66,24 @@ const LoginPage = () => {
   useEffect(() => {
     const lastEmail = getLastLoginEmail();
     if (lastEmail) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setFormData(prev => ({ ...prev, email: lastEmail }));
       // Check if user has offline cache
       hasOfflineAccess(lastEmail).then(setHasOfflineCache);
     }
   }, []);
+
+  // ── Already logged in (returning session) — skip during form submit ──
+  useEffect(() => {
+    if (checkingSetup || !isAuthenticated || isSubmitting) return;
+    const from = location.state?.from?.pathname;
+    if (from && from !== '/login') {
+      navigate(from, { replace: true });
+      return;
+    }
+    if (!userData) return;
+    navigate(resolveRoleHome({ userData, activeRole, hasPermission }), { replace: true });
+  }, [checkingSetup, isAuthenticated, isSubmitting, userData, activeRole, hasPermission, location.state, navigate]);
 
   // ── Check setup ──
   useEffect(() => {
@@ -88,7 +103,7 @@ const LoginPage = () => {
 
   // ── Check offline cache when email changes ──
   useEffect(() => {
-    if (formData.email && formData.email.includes('@')) {
+    if (formData.email) {
       hasOfflineAccess(formData.email).then(setHasOfflineCache);
     } else {
       setHasOfflineCache(false);
@@ -105,11 +120,14 @@ const LoginPage = () => {
 
   const validateForm = () => {
     const newErrors = {};
-    if (!formData.email) {
-      newErrors.email = 'Email is required';
-    } else if (!/\S+@\S+\.\S+/.test(formData.email)) {
+    const identifier = String(formData.email || '').trim();
+
+    if (!identifier) {
+      newErrors.email = 'Email or username is required';
+    } else if (identifier.includes('@') && !/\S+@\S+\.\S+/.test(identifier)) {
       newErrors.email = 'Invalid email format';
     }
+
     if (!formData.password) {
       newErrors.password = 'Password is required';
     }
@@ -138,27 +156,12 @@ const LoginPage = () => {
           toast.success(t('auth.loginSuccess', 'Login successful!'));
         }
 
-        // Navigate based on role
-        setTimeout(() => {
-          const role = formData.role;
-          switch (role) {
-            case 'superAdmin':
-            case 'admin':
-              navigate('/admin');
-              break;
-            case 'manager':
-              navigate('/manager');
-              break;
-            case 'biller':
-              navigate('/biller');
-              break;
-            case 'cashier':
-              navigate('/cashier');
-              break;
-            default:
-              navigate('/dashboard');
-          }
-        }, 500);
+        const fromPath = location.state?.from?.pathname;
+        if (fromPath && fromPath !== '/login') {
+          navigate(fromPath, { replace: true });
+        } else {
+          navigate(ROLE_HOME[formData.role] || '/biller', { replace: true });
+        }
       } else {
         // Show inline error (NOT modal)
         setLoginError(result.error);
@@ -301,7 +304,6 @@ const LoginPage = () => {
                   >
                     <option value="">{t('auth.selectRole', 'Select your role')}</option>
                     <option value="superAdmin">Super Admin</option>
-                    <option value="admin">Admin</option>
                     <option value="manager">Manager</option>
                     <option value="biller">Biller</option>
                     <option value="cashier">Cashier</option>
@@ -314,22 +316,22 @@ const LoginPage = () => {
               </div>
             </motion.div>
 
-            {/* Email */}
+            {/* Username or Email */}
             <motion.div
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ delay: 0.6 }}
             >
               <Input
-                label={t('auth.email', 'Email Address')}
-                placeholder="you@example.com"
-                type="email"
+                label={t('auth.emailOrUsername', 'Email or Username')}
+                placeholder="you@example.com or USER123"
+                type="text"
                 value={formData.email}
                 onChange={(e) => updateFormData('email', e.target.value)}
                 error={errors.email}
                 leftIcon={<Mail className="w-4 h-4" />}
                 required
-                autoComplete="email"
+                autoComplete="username"
               />
             </motion.div>
 

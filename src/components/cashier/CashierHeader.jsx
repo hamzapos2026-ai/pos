@@ -14,7 +14,8 @@ import { useAuth } from '../../context/AuthContext';
 import { useTheme } from '../../context/ThemeContext';
 import { useNetwork } from '../../context/NetworkContext';
 import { useNavigate } from 'react-router-dom';
-import toast from 'react-hot-toast';
+import { toast } from 'react-hot-toast';
+import useLanguage from '../../hooks/useLanguage';
 
 function cn(...i) { return twMerge(clsx(i)); }
 
@@ -55,6 +56,7 @@ const LiveClock = ({ isDark }) => {
 
 const ConnectionStatus = ({ isDark }) => {
   const { isOnline } = useNetwork();
+  const { t } = useLanguage();
 
   return (
     <div className={cn(
@@ -71,12 +73,12 @@ const ConnectionStatus = ({ isDark }) => {
             <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500" />
           </span>
           <Wifi className="w-3 h-3" />
-          <span>Live</span>
+          <span>{t('liveBadge', 'LIVE')}</span>
         </>
       ) : (
         <>
           <WifiOff className="w-3 h-3" />
-          <span>Offline</span>
+          <span>{t('offlineBadge', 'OFFLINE')}</span>
         </>
       )}
     </div>
@@ -95,13 +97,14 @@ const CashierHeader = ({
   onRefresh,
 }) => {
   const { isDark } = useTheme();
+  const { t } = useLanguage();
   const { user, userData, activeRole, setActiveRole, hasMultipleRoles, signOut } = useAuth();
   const navigate = useNavigate();
 
   const handleSignOut = async () => {
     await signOut();
     navigate('/login');
-    toast.success('Signed out');
+    toast.success(t('logoutSuccess', 'Signed out'));
   };
 
   const displayName = userData?.name || userData?.displayName || user?.displayName || 'Cashier';
@@ -115,15 +118,15 @@ const CashierHeader = ({
 
   const currentRole = activeRole || userData?.primaryRole || userData?.role || 'cashier';
   const roleLabel = currentRole === 'superAdmin'
-    ? 'Super Admin'
+    ? t('superAdmin', 'Super Admin')
     : currentRole === 'admin'
-      ? 'Admin'
+      ? t('admin', 'Admin')
       : currentRole === 'manager'
-        ? 'Manager'
+        ? t('manager', 'Manager')
         : currentRole === 'biller'
-          ? 'Biller'
+          ? t('biller', 'Biller')
           : currentRole === 'cashier'
-            ? 'Cashier'
+            ? t('cashier', 'Cashier')
             : currentRole.charAt(0).toUpperCase() + currentRole.slice(1);
 
   const otherRole = userRoles.find((role) => role !== currentRole && ['biller', 'cashier'].includes(role))
@@ -165,10 +168,10 @@ const CashierHeader = ({
           </div>
           <div className="hidden sm:block">
             <p className={cn('text-xs font-bold leading-none', isDark ? 'text-[#f5f5f4]' : 'text-[#1c1917]')}>
-              A One Jewelry
+              {t('appName', 'A One Jewelry')}
             </p>
             <p className={cn('text-[10px]', isDark ? 'text-amber-400' : 'text-amber-600')}>
-              CASHIER
+              {t('cashier', 'Cashier')}
             </p>
           </div>
         </div>
@@ -185,7 +188,7 @@ const CashierHeader = ({
             type="text"
             value={searchValue}
             onChange={e => onSearchChange(e.target.value)}
-            placeholder="Search Bill#, customer, phone... (INSERT)"
+            placeholder={t('searchBillsPh', 'Search Bill#, customer, phone... (INSERT)')}
             className={cn(
               'w-full pl-9 pr-4 py-2 rounded-xl text-sm border outline-none transition-all',
               isDark
@@ -207,7 +210,7 @@ const CashierHeader = ({
               ? 'bg-amber-500/10 border-amber-500/30 text-amber-400 hover:bg-amber-500/20'
               : 'bg-amber-50 border-amber-300 text-amber-700 hover:bg-amber-100',
           )}
-          title="QR Scanner (F2)"
+          title={t('qrScannerBtnTitle', 'QR Scanner (F2)')}
         >
           <QrCode className="w-4 h-4" />
           <span className="hidden sm:inline">QR</span>
@@ -229,7 +232,7 @@ const CashierHeader = ({
               ? 'border-[#2a1f0d] text-[#a8a29e] hover:bg-[#2a1f0d] hover:text-[#f5f5f4]'
               : 'border-amber-200 text-[#78716c] hover:bg-amber-50 hover:text-[#1c1917]',
           )}
-          title="Refresh (F9)"
+          title={t('refreshTitle', 'Refresh (F9)')}
         >
           <RefreshCw className="w-4 h-4" />
         </motion.button>
@@ -270,7 +273,7 @@ const CashierHeader = ({
                     : 'bg-amber-100 text-amber-700 hover:bg-amber-200',
                 )}
               >
-                Switch to {otherRole === 'biller' ? 'Biller' : otherRole === 'cashier' ? 'Cashier' : otherRole}
+                {t('switchTo', 'Switch to')} {otherRole === 'biller' ? t('biller', 'Biller') : otherRole === 'cashier' ? t('cashier', 'Cashier') : otherRole}
               </button>
             )}
           </div>
@@ -284,7 +287,7 @@ const CashierHeader = ({
                 ? 'text-red-400 hover:bg-red-500/10'
                 : 'text-red-600 hover:bg-red-50',
             )}
-            title="Sign Out"
+            title={t('logout', 'Sign Out')}
           >
             <LogOut className="w-4 h-4" />
           </motion.button>

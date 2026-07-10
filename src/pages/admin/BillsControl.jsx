@@ -1,22 +1,76 @@
 // File: src/pages/admin/BillsControl.jsx
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
-  ShoppingBag, Search, Eye, Trash2, RotateCcw, Download,
-  Clock, FileText, CheckCircle2, Printer, Wifi, Database,
-  AlertTriangle, FileCheck, Coins, ChevronUp, ChevronDown,
-  X, Filter, DollarSign, Check, RefreshCw, MoreVertical,
+  ShoppingBag, Eye, Trash2, RotateCcw, Download,
+  Clock, FileText, CheckCircle2, Wifi, Database,
+  AlertTriangle, FileCheck, Coins, DollarSign, Check, RefreshCw, MoreVertical, Zap, WifiOff,
 } from 'lucide-react';
 import {
   collection, doc, updateDoc, deleteDoc,
-  serverTimestamp, onSnapshot, query, orderBy, limit,
+  serverTimestamp, query, orderBy, limit, getDocs,
   addDoc,
 } from '../../services/firebase';
 import { db, isFirebaseReady } from '../../services/firebase';
-import toast from 'react-hot-toast';
+import { toast } from 'react-hot-toast';
 import { cn } from '../../utils/cn';
 import { motion, AnimatePresence } from 'framer-motion';
 import Button from '../../components/ui/Button';
 import DataTable from '../../components/manager/DataTable';
+import InvoicePrint from '../../components/biller/InvoicePrint';
+import { useSettings } from '../../context/SettingsContext';
+import { useAuth } from '../../context/AuthContext';
+import { softArchiveOrder, permanentDeleteOrder, PERMANENT_DELETE_PHRASE } from '../../services/archiveService';
+import { useTheme } from '../../context/ThemeContext';
+import { useLanguage } from '../../hooks/useLanguage';
+import { useNetwork } from '../../context/NetworkContext';
+import DatePresetBar from '../../components/shared/DatePresetBar';
+import { resolveDatePresetRange } from '../../utils/datePresetUtils';
+import { normalizeStoreForInvoice, normalizeOrderForInvoice, buildInvoicePrintProps } from '../../utils/invoiceUtils';
+import BillsAdvancedToolbar from '../../components/shared/BillsAdvancedToolbar';
+import {
+  DEFAULT_BILLS_FILTERS,
+  applyBillsFilters,
+  getBillsFilterStats,
+  prepareBillsForDisplay,
+  getBillSerialSortKey,
+  dedupeBillsBySerial,
+  isPendingCashier,
+  isDualModeBillRow,
+  getOfflineChannelBadge,
+} from '../../utils/billsFilterUtils';
+import { getBillPaymentStatus, getBillStatusInfo, getBillWorkflowStatusBadge } from '../../utils/managerHelpers';
+import { normalizeOrder } from '../../services/managerService';
+import useStoresMap, { resolveStoreLabel } from '../../hooks/useStoresMap';
+import { resolveUserBranchIds, resolveUserPrimaryBranch, expandBranchIds, isElevatedRole, resolveAdminDataScope } from '../../utils/branchAccess';
+import { fetchBillsControlPage, fetchElevatedAdminPendingBills, BILLS_CONTROL_PAGE_SIZE } from '../../utils/ordersQueryUtils';
+import { BILLS_PAGE_SIZE_OPTIONS } from '../../utils/paginationConstants';
+import { BILLS_CONTROL_POLL_MS } from '../../utils/firebaseQuotaConfig';
+import { mergeCloudWithLocalOrders } from '../../utils/billsMergeUtils';
+import { getUnsyncedLocalOrdersForStores } from '../../services/localBillService';
+import {
+  formatBillDateTime, getBillDisplayTimestamp, getBillPaidByDisplay,
+  getBillPaidAtTimestamp, getBillSerialDisplay,
+} from '../../utils/billsListHelpers';
+import { buildSettlePatch, buildRestorePendingPatch, isCashierPaidPendingManager } from '../../utils/cashierOrderUtils';
+import { logBillSettled } from '../../services/activityLogger';
+import useBillRowAlerts from '../../hooks/useBillRowAlerts';
+import {
+  getBillRowHighlightClass,
+  getBillCardHighlightClass,
+  getBillRemovedBadge,
+  getBillEditedBadge,
+} from '../../utils/billRowStyles';
+
+const resolveBillActor = (userData) => {
+  const roles = Array.isArray(userData?.roles) ? userData.roles : [userData?.primaryRole || userData?.role].filter(Boolean);
+  const role = roles.find((r) => ['superAdmin', 'superadmin', 'admin'].includes(r))
+    || userData?.primaryRole || userData?.role || 'admin';
+  return {
+    userId: userData?.uid || '',
+    userName: userData?.name || userData?.displayName || 'Admin',
+    role,
+  };
+};
 
 // ── Helpers ────────────────────────────────────────────────────
 const toDate = (v) => {
@@ -34,6 +88,22 @@ const toDate = (v) => {
 
 const fmt = (v) => `Rs ${Number(v || 0).toLocaleString()}`;
 
+const paymentLabel = (row) => {
+  const ps = String(row.paymentStatus || '').toLowerCase();
+  if (ps === 'pending_approval') return 'MGR APPROVAL';
+  if (ps === 'pending_payment') return 'PENDING CASHIER';
+  if (ps === 'paid') return 'PAID';
+  if (ps === 'unpaid' || !ps) return 'UNPAID';
+  return ps.replace(/_/g, ' ').toUpperCase();
+};
+
+const paymentVariant = (row) => {
+  const ps = String(row.paymentStatus || '').toLowerCase();
+  if (ps === 'paid') return 'success';
+  if (ps === 'pending_payment' || ps === 'pending_approval') return 'warning';
+  return 'warning';
+};
+
 // ── Status Badge ───────────────────────────────────────────────
 const StatusBadge = ({ variant, children }) => {
   const variants = {
@@ -41,6 +111,7 @@ const StatusBadge = ({ variant, children }) => {
     warning: 'bg-amber-500/15   text-amber-400   border-amber-500/25',
     destructive: 'bg-rose-500/15    text-rose-400    border-rose-500/25',
     info: 'bg-blue-500/15    text-blue-400    border-blue-500/25',
+    purple: 'bg-violet-500/15  text-violet-400  border-violet-500/25',
   };
   return (
     <span className={cn(
@@ -89,7 +160,8 @@ const StatCard = ({ label, value, icon: Icon, color }) => (
 );
 
 // ── Action Menu ────────────────────────────────────────────────
-const ActionMenu = ({ row, onView, onApprove, onMarkPaid, onReset, onSoftDelete, onHardDelete }) => {
+const ActionMenu = ({ row, onView, onApprove, onMarkPaid, onConfirmCashier, onReset, onSoftDelete, onHardDelete, canHardDelete = false }) => {
+  const { t } = useLanguage();
   const [open, setOpen] = useState(false);
   const ref = useRef(null);
 
@@ -105,6 +177,7 @@ const ActionMenu = ({ row, onView, onApprove, onMarkPaid, onReset, onSoftDelete,
   const total = Number(row.grandTotal || row.totalAmount || row.total || 0);
   const paid = Number(row.paidAmount || 0);
   const hasOut = total - paid > 0;
+  const needsConfirm = isCashierPaidPendingManager(row);
 
   return (
     <div className="relative" ref={ref} onClick={(e) => e.stopPropagation()}>
@@ -129,7 +202,7 @@ const ActionMenu = ({ row, onView, onApprove, onMarkPaid, onReset, onSoftDelete,
                 onClick={() => { setOpen(false); onView(); }}
                 className="w-full text-left px-2.5 py-1.5 text-xs text-slate-300 hover:bg-amber-500/10 hover:text-amber-400 rounded-lg transition-all flex items-center gap-2"
               >
-                <Eye className="w-3.5 h-3.5 text-amber-500" /> View Details
+                <Eye className="w-3.5 h-3.5 text-amber-500" /> {t('admin.billsPage.viewDetails', 'View Details')}
               </button>
 
               {!isDel && (row.status === 'pending' || row.paymentStatus === 'unpaid' || !row.paymentStatus) && (
@@ -137,16 +210,25 @@ const ActionMenu = ({ row, onView, onApprove, onMarkPaid, onReset, onSoftDelete,
                   onClick={() => { setOpen(false); onApprove(); }}
                   className="w-full text-left px-2.5 py-1.5 text-xs text-emerald-400 hover:bg-emerald-500/10 rounded-lg transition-all flex items-center gap-2"
                 >
-                  <Check className="w-3.5 h-3.5 text-emerald-500" /> Approve
+                  <Check className="w-3.5 h-3.5 text-emerald-500" /> {t('admin.billsPage.approve', 'Approve')}
                 </button>
               )}
 
-              {!isDel && hasOut && (
+              {needsConfirm && (
+                <button
+                  onClick={() => { setOpen(false); onConfirmCashier(); }}
+                  className="w-full text-left px-2.5 py-1.5 text-xs text-sky-400 hover:bg-sky-500/10 rounded-lg transition-all flex items-center gap-2"
+                >
+                  <CheckCircle2 className="w-3.5 h-3.5 text-sky-500" /> {t('bills.confirmCashierPayment', 'Confirm Payment')}
+                </button>
+              )}
+
+              {!isDel && hasOut && !needsConfirm && (
                 <button
                   onClick={() => { setOpen(false); onMarkPaid(); }}
                   className="w-full text-left px-2.5 py-1.5 text-xs text-emerald-400 hover:bg-emerald-500/10 rounded-lg transition-all flex items-center gap-2"
                 >
-                  <Coins className="w-3.5 h-3.5 text-emerald-500" /> Mark Paid
+                  <Coins className="w-3.5 h-3.5 text-emerald-500" /> {t('admin.billsPage.markPaid', 'Mark Paid')}
                 </button>
               )}
 
@@ -155,7 +237,7 @@ const ActionMenu = ({ row, onView, onApprove, onMarkPaid, onReset, onSoftDelete,
                   onClick={() => { setOpen(false); onReset(); }}
                   className="w-full text-left px-2.5 py-1.5 text-xs text-amber-400 hover:bg-amber-500/10 rounded-lg transition-all flex items-center gap-2"
                 >
-                  <RefreshCw className="w-3.5 h-3.5 text-amber-500" /> Reset Pending
+                  <RefreshCw className="w-3.5 h-3.5 text-amber-500" /> {t('admin.billsPage.resetPending', 'Reset Pending')}
                 </button>
               )}
 
@@ -166,7 +248,7 @@ const ActionMenu = ({ row, onView, onApprove, onMarkPaid, onReset, onSoftDelete,
                   onClick={() => { setOpen(false); onSoftDelete(); }}
                   className="w-full text-left px-2.5 py-1.5 text-xs text-rose-400 hover:bg-rose-500/10 rounded-lg transition-all flex items-center gap-2"
                 >
-                  <Trash2 className="w-3.5 h-3.5 text-rose-500" /> Cancel Bill
+                  <Trash2 className="w-3.5 h-3.5 text-rose-500" /> {t('admin.billsPage.cancelBill', 'Cancel Bill')}
                 </button>
               )}
 
@@ -176,14 +258,16 @@ const ActionMenu = ({ row, onView, onApprove, onMarkPaid, onReset, onSoftDelete,
                     onClick={() => { setOpen(false); onReset(); }}
                     className="w-full text-left px-2.5 py-1.5 text-xs text-emerald-400 hover:bg-emerald-500/10 rounded-lg transition-all flex items-center gap-2"
                   >
-                    <RotateCcw className="w-3.5 h-3.5 text-emerald-500" /> Restore
+                    <RotateCcw className="w-3.5 h-3.5 text-emerald-500" /> {t('admin.billsPage.restore', 'Restore')}
                   </button>
-                  <button
-                    onClick={() => { setOpen(false); onHardDelete(); }}
-                    className="w-full text-left px-2.5 py-1.5 text-xs text-rose-400 hover:bg-rose-500/10 rounded-lg transition-all flex items-center gap-2"
-                  >
-                    <Trash2 className="w-3.5 h-3.5 text-rose-500" /> Erase Forever
-                  </button>
+                  {canHardDelete && (
+                    <button
+                      onClick={() => { setOpen(false); onHardDelete?.(); }}
+                      className="w-full text-left px-2.5 py-1.5 text-xs text-rose-400 hover:bg-rose-500/10 rounded-lg transition-all flex items-center gap-2"
+                    >
+                      <Trash2 className="w-3.5 h-3.5 text-rose-500" /> {t('admin.billsPage.eraseForever', 'Erase Forever')}
+                    </button>
+                  )}
                 </>
               )}
             </div>
@@ -194,121 +278,261 @@ const ActionMenu = ({ row, onView, onApprove, onMarkPaid, onReset, onSoftDelete,
   );
 };
 
-const BillsControl = () => {
+const BillsControl = ({ scopeOverride = null, managerMode = false } = {}) => {
+  const { settings } = useSettings();
+  const { user, userData, isSuperAdmin } = useAuth();
+  const { isDark } = useTheme();
+  const { t, isRTL } = useLanguage();
+  const { isOnline } = useNetwork();
+  const storesMap = useStoresMap();
+  const elevated = managerMode ? false : isElevatedRole(userData);
+  // Permanent delete — SIRF Super Admin. (Manager/Admin ke liye nahi.)
+  const canHardDelete = !!isSuperAdmin;
+  const adminScope = useMemo(
+    () => scopeOverride || resolveAdminDataScope(userData, storesMap),
+    [scopeOverride, userData, storesMap],
+  );
+  const storeListenIds = useMemo(() => {
+    if (managerMode) return adminScope.storeIds || [];
+    if (elevated || !adminScope.storeIds) return [];
+    return adminScope.storeIds;
+  }, [managerMode, elevated, adminScope.storeIds]);
+  const branchScope = useMemo(() => {
+    if (elevated) return [];
+    return resolveUserBranchIds(userData);
+  }, [userData, elevated]);
+  const branchAliasScope = useMemo(() => {
+    if (elevated) return [];
+    if (managerMode && adminScope.storeIds?.length) {
+      return expandBranchIds(adminScope.storeIds, storesMap);
+    }
+    const primary = resolveUserPrimaryBranch(userData);
+    return expandBranchIds(
+      [...new Set([primary, ...branchScope].filter(Boolean))],
+      storesMap,
+    );
+  }, [userData, branchScope, storesMap, elevated, managerMode, adminScope.storeIds]);
+  const invoiceStore = normalizeStoreForInvoice({
+    name: settings?.shop?.name || settings?.store?.name,
+    address: settings?.shop?.address || settings?.store?.address,
+    phone: settings?.shop?.phone || settings?.store?.phone,
+    email: settings?.shop?.email,
+    tagline: settings?.shop?.tagline,
+    ntn: settings?.shop?.ntn,
+  });
   const [bills, setBills] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [search, setSearch] = useState('');
-  const [filter, setFilter] = useState('all');
-  const [dateFilter, setDateFilter] = useState('all');
-  const [branchFilter, setBranchFilter] = useState('all');
-  const [showFilters, setShowFilters] = useState(false);
+  const [liveAt, setLiveAt] = useState(null);
+  const [billsCursor, setBillsCursor] = useState(null);
+  const [hasMoreBills, setHasMoreBills] = useState(false);
+  const [cloudStatusFilter, setCloudStatusFilter] = useState('all');
+  const billsMountedRef = useRef(true);
+  const cloudBillsRef = useRef([]);
+  const [filters, setFilters] = useState({ ...DEFAULT_BILLS_FILTERS, showAdvanced: false });
+
+  useEffect(() => {
+    if (elevated && !managerMode) {
+      setFilters((prev) => (prev.showAll ? prev : { ...prev, showAll: true }));
+    }
+  }, [elevated, managerMode]);
   const [selectedBill, setSelectedBill] = useState(null);
+  const [invoiceSeq, setInvoiceSeq] = useState(0);
+  const openBillInvoice = useCallback((row) => {
+    setInvoiceSeq((n) => n + 1);
+    setSelectedBill(row);
+  }, []);
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [deleteReason, setDeleteReason] = useState('');
   const [submittingDelete, setSubmittingDelete] = useState(false);
+  const [hardDeleteTarget, setHardDeleteTarget] = useState(null);
+  const [hardConfirm, setHardConfirm] = useState('');
+  const [submittingHardDelete, setSubmittingHardDelete] = useState(false);
   const [loadingAction, setLoadingAction] = useState(null);
 
+  const loadBills = useCallback(async (cursor = null, { silent = false } = {}) => {
+    if (!isFirebaseReady() || !db) {
+      if (!silent) setLoading(false);
+      return;
+    }
+    if (!silent) setLoading(true);
+    try {
+      const scopeStore = storeListenIds[0] || adminScope.storeId || null;
+      const { orders, lastDoc, hasMore } = await fetchBillsControlPage({
+        storeIds: storeListenIds.length ? storeListenIds : adminScope.storeIds,
+        storeId: scopeStore,
+        branchId: adminScope.branchId || scopeStore,
+        statusFilter: cloudStatusFilter,
+        cursor,
+        pageSize: BILLS_CONTROL_PAGE_SIZE,
+        normalizer: (raw) => normalizeOrder(raw),
+      });
+
+      let mergedCloud = orders;
+      if (elevated && !cursor) {
+        const branchIds = Object.keys(storesMap || {}).filter(Boolean);
+        if (branchIds.length) {
+          const pendingRows = await fetchElevatedAdminPendingBills({
+            storeIds: branchIds,
+            limitPerStore: 250,
+            normalizer: (raw) => normalizeOrder(raw),
+          });
+          const map = new Map();
+          mergedCloud.forEach((o) => map.set(o.id || o.localId, o));
+          pendingRows.forEach((o) => map.set(o.id || o.localId, o));
+          mergedCloud = [...map.values()];
+        }
+      }
+
+      const localScopeIds = elevated
+        ? Object.keys(storesMap || {}).filter(Boolean)
+        : (storeListenIds.length ? storeListenIds : null);
+      const localOrders = await getUnsyncedLocalOrdersForStores(
+        localScopeIds?.length ? localScopeIds : null,
+      ).catch(() => []);
+      if (cursor) {
+        const map = new Map();
+        cloudBillsRef.current.forEach((o) => map.set(o.id || o.localId, o));
+        mergedCloud.forEach((o) => map.set(o.id || o.localId, o));
+        cloudBillsRef.current = [...map.values()];
+      } else {
+        cloudBillsRef.current = mergedCloud;
+      }
+      const merged = mergeCloudWithLocalOrders(cloudBillsRef.current, localOrders);
+      let enriched = merged;
+      try {
+        const { fetchAndApplyCloudPayments } = await import('../../services/paymentReconciliationService');
+        const { from } = resolveDatePresetRange(filters.datePreset || 'today', filters.dateFrom, filters.dateTo);
+        enriched = await fetchAndApplyCloudPayments(merged, {
+          storeIds: storeListenIds.length ? storeListenIds : adminScope.storeIds,
+          since: from,
+        });
+      } catch { /* non-critical */ }
+      if (!billsMountedRef.current) return;
+      setBills(prepareBillsForDisplay(enriched.filter(Boolean)));
+      setBillsCursor(lastDoc);
+      setHasMoreBills(hasMore);
+      setLiveAt(Date.now());
+    } catch (err) {
+      console.error('[BillsControl] loadBills:', err);
+    } finally {
+      if (billsMountedRef.current && !silent) setLoading(false);
+    }
+  }, [storeListenIds, adminScope, userData, cloudStatusFilter, filters.datePreset, filters.dateFrom, filters.dateTo, elevated, storesMap]);
+
+  const silentRefreshBills = useCallback(() => {
+    if (!isOnline || document.hidden) return;
+    void loadBills(null, { silent: true });
+  }, [isOnline, loadBills]);
+
   useEffect(() => {
-    if (!isFirebaseReady() || !db) { setLoading(false); return; }
-    setLoading(true);
-    const q = query(collection(db, 'orders'), orderBy('createdAt', 'desc'), limit(10000));
-    const unsub = onSnapshot(q, snap => {
-      setBills(snap.docs.map(d => ({ id: d.id, ...d.data() })));
-      setLoading(false);
-    }, err => {
-      console.error('[BillsControl]', err);
-      setLoading(false);
-    });
-    return () => unsub();
-  }, []);
+    billsMountedRef.current = true;
+    void loadBills(null);
+    return () => { billsMountedRef.current = false; };
+  }, [storeListenIds, cloudStatusFilter, loadBills, storesMap]);
 
-  const branches = useMemo(() => {
-    const s = new Set(bills.map(b => b.storeId || b.branchId).filter(Boolean));
-    return [...s].sort();
-  }, [bills]);
+  const prevOnlineRef = useRef(isOnline);
+  useEffect(() => {
+    if (!prevOnlineRef.current && isOnline) {
+      void loadBills(null, { silent: false });
+    }
+    prevOnlineRef.current = isOnline;
+  }, [isOnline, loadBills]);
 
-  const stats = useMemo(() => ({
-    total: bills.length,
-    active: bills.filter(b => !b.deleted && !b.isDeleted).length,
-    deleted: bills.filter(b => b.deleted || b.isDeleted).length,
-    pending: bills.filter(b => !b.deleted && !b.isDeleted &&
-      (b.paymentStatus === 'unpaid' || b.paymentStatus === 'pending' || !b.paymentStatus)).length,
-    totalAmount: bills.filter(b => !b.deleted && !b.isDeleted)
-      .reduce((s, b) => s + Number(b.grandTotal || b.totalAmount || b.total || 0), 0),
-  }), [bills]);
+  useEffect(() => {
+    if (!isOnline) return undefined;
+    const timer = setInterval(silentRefreshBills, BILLS_CONTROL_POLL_MS);
+    return () => clearInterval(timer);
+  }, [isOnline, silentRefreshBills]);
 
-  const filtered = useMemo(() => {
-    const today = new Date(); today.setHours(0, 0, 0, 0);
-    const weekAgo = new Date(today); weekAgo.setDate(weekAgo.getDate() - 7);
-    const monAgo = new Date(today); monAgo.setMonth(monAgo.getMonth() - 1);
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') silentRefreshBills();
+    };
+    const onCloudUpdated = () => silentRefreshBills();
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('aone:bills-cloud-updated', onCloudUpdated);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('aone:bills-cloud-updated', onCloudUpdated);
+    };
+  }, [silentRefreshBills]);
 
-    return bills.filter(b => {
-      const isDel = b.deleted || b.isDeleted;
-      if (filter === 'deleted' && !isDel) return false;
-      if (filter === 'active' && isDel) return false;
-      if (filter === 'pending' && (isDel ||
-        (b.paymentStatus !== 'unpaid' && b.paymentStatus !== 'pending' && b.paymentStatus))) return false;
+  const filtered = useMemo(
+    () => applyBillsFilters(bills, { ...filters, branchScope: branchAliasScope }),
+    [bills, filters, branchAliasScope]
+  );
 
-      if (branchFilter !== 'all' && b.storeId !== branchFilter && b.branchId !== branchFilter) return false;
+  const filterStats = useMemo(
+    () => getBillsFilterStats(filtered, filtered),
+    [filtered],
+  );
+  const loadedBillCount = useMemo(
+    () => dedupeBillsBySerial(bills).length,
+    [bills],
+  );
 
-      if (dateFilter !== 'all') {
-        const d = toDate(b.createdAt);
-        if (dateFilter === 'today' && d < today) return false;
-        if (dateFilter === 'week' && d < weekAgo) return false;
-        if (dateFilter === 'month' && d < monAgo) return false;
-      }
+  const { newBillIds, newBillCount, dismissBill, dismissAll, fraudSummary } = useBillRowAlerts(bills, { enabled: true });
+  const getRowClassName = useCallback(
+    (row, idx) => getBillRowHighlightClass(row, { newBillIds, idx }),
+    [newBillIds],
+  );
 
-      if (search) {
-        const s = search.toLowerCase();
-        return (
-          (b.billSerial || b.serialNo || b.id || '').toLowerCase().includes(s) ||
-          (b.customer?.name || b.customerName || '').toLowerCase().includes(s) ||
-          (b.customer?.phone || '').includes(s) ||
-          (b.billerName || '').toLowerCase().includes(s)
-        );
-      }
-      return true;
-    });
-  }, [bills, search, filter, dateFilter, branchFilter]);
-
-  // ── Actions ────────────────────────────────────────────────
+  const handleResetFilters = useCallback(() => {
+    setFilters({ ...DEFAULT_BILLS_FILTERS, showAdvanced: filters.showAdvanced });
+  }, [filters.showAdvanced]);
   const handleApprove = useCallback(async (row) => {
-    if (!confirm('Approve this bill?')) return;
+    if (!confirm(t('admin.billsPage.approveConfirm', 'Approve this bill?'))) return;
     setLoadingAction(row.id);
     try {
       await updateDoc(doc(db, 'orders', row.id), {
         status: 'approved',
         approvedAt: serverTimestamp(),
       });
-      toast.success('Bill approved ✓');
+      toast.success(t('admin.billsPage.billApproved', 'Bill approved'));
     } catch (e) { toast.error(e.message); }
     finally { setLoadingAction(null); }
-  }, []);
+  }, [t]);
 
-  const handleMarkPaid = useCallback(async (row) => {
-    if (!confirm('Mark as Paid?')) return;
+  const handleConfirmCashier = useCallback(async (row) => {
+    if (!confirm(t('bills.confirmCashierPayment', 'Confirm cashier payment?'))) return;
     const total = Number(row.grandTotal || row.totalAmount || row.total || 0);
+    const actor = resolveBillActor(userData);
     setLoadingAction(row.id);
     try {
       await updateDoc(doc(db, 'orders', row.id), {
-        paymentStatus: 'paid',
-        paidAmount: total,
-        outstandingAmount: 0,
+        ...buildSettlePatch({ ...actor, amount: total, keepCashierPaidBy: true }),
         paidAt: serverTimestamp(),
       });
-      toast.success('Marked as Paid ✓');
+      await logBillSettled(actor, row, { confirmCashier: true });
+      toast.success(t('admin.billsPage.billApproved', 'Payment confirmed'));
     } catch (e) { toast.error(e.message); }
     finally { setLoadingAction(null); }
-  }, []);
+  }, [t, userData]);
+
+  const handleMarkPaid = useCallback(async (row) => {
+    if (!confirm(t('admin.billsPage.markPaidConfirm', 'Mark this bill as paid?'))) return;
+    const total = Number(row.grandTotal || row.totalAmount || row.total || 0);
+    const actor = resolveBillActor(userData);
+    setLoadingAction(row.id);
+    try {
+      await updateDoc(doc(db, 'orders', row.id), {
+        ...buildSettlePatch({ ...actor, amount: total, keepCashierPaidBy: false }),
+        paidAt: serverTimestamp(),
+      });
+      await logBillSettled(actor, row, { confirmCashier: false });
+      toast.success(t('admin.billsPage.markedPaid', 'Marked as Paid ✓'));
+    } catch (e) { toast.error(e.message); }
+    finally { setLoadingAction(null); }
+  }, [t, userData]);
 
   const handleRestore = useCallback(async (row) => {
     setLoadingAction(row.id);
     try {
+      const total = Number(row.grandTotal || row.totalAmount || row.total || 0);
       await updateDoc(doc(db, 'orders', row.id), {
-        deleted: false,
-        isDeleted: false,
+        ...buildRestorePendingPatch({ total, approved: row.status === 'approved' || row.status === 'pending' }),
         restoredAt: serverTimestamp(),
-        paymentStatus: 'unpaid',
+        updatedAt: serverTimestamp(),
       });
       toast.success(`Bill restored ✓`);
     } catch (e) { toast.error(e.message); }
@@ -321,10 +545,8 @@ const BillsControl = () => {
     setLoadingAction(row.id);
     try {
       await updateDoc(doc(db, 'orders', row.id), {
-        paymentStatus: 'unpaid',
-        paidAmount: 0,
-        outstandingAmount: total,
-        status: 'pending',
+        ...buildRestorePendingPatch({ total, approved: true }),
+        updatedAt: serverTimestamp(),
       });
       toast.success('Reset ✓');
     } catch (e) { toast.error(e.message); }
@@ -335,53 +557,45 @@ const BillsControl = () => {
     if (!deleteTarget || !deleteReason.trim()) { toast.error('Reason required'); return; }
     setSubmittingDelete(true);
     try {
-      await updateDoc(doc(db, 'orders', deleteTarget.id), {
-        deleted: true,
-        isDeleted: true,
-        deletedAt: serverTimestamp(),
-        deleteReason: deleteReason.trim(),
-        cancelReason: deleteReason.trim(),
-        status: 'cancelled',
-        paymentStatus: 'deleted',
-      });
-      await addDoc(collection(db, 'auditLogs'), {
-        action: 'SOFT_DELETE',
-        billId: deleteTarget.id,
-        billSerial: deleteTarget.serial,
+      const target = bills.find((b) => b.id === deleteTarget.id);
+      await softArchiveOrder(deleteTarget.id, {
+        deletedBy: { uid: user?.uid, email: user?.email },
         reason: deleteReason.trim(),
-        timestamp: serverTimestamp(),
-      }).catch(() => { });
-      toast.success(`Bill cancelled`);
+        billRow: target,
+      });
+      toast.success('Bill archive ho gaya — Backup → Archive se restore karo');
       setDeleteTarget(null);
       setDeleteReason('');
     } catch (e) { toast.error(e.message); }
     finally { setSubmittingDelete(false); }
-  }, [deleteTarget, deleteReason]);
+  }, [deleteTarget, deleteReason, bills, user]);
 
   const executeHardDelete = useCallback(async () => {
-    if (!deleteTarget || !deleteReason.trim()) { toast.error('Reason required'); return; }
-    setSubmittingDelete(true);
+    if (!hardDeleteTarget) return;
+    if (!canHardDelete) { toast.error(t('admin.billsPage.hardDeleteNoPerm', 'Permission nahi')); return; }
+    if (String(hardConfirm || '').trim().toUpperCase() !== PERMANENT_DELETE_PHRASE) {
+      toast.error(`${t('admin.billsPage.hardDeleteTypeToConfirm', 'Likho')}: ${PERMANENT_DELETE_PHRASE}`);
+      return;
+    }
+    setSubmittingHardDelete(true);
     try {
-      const target = bills.find(b => b.id === deleteTarget.id);
-      if (target) {
-        await addDoc(collection(db, 'deletedBills'), {
-          ...target,
-          deletedAt: serverTimestamp(),
-          hardDeleteReason: deleteReason.trim(),
-        }).catch(() => { });
-      }
-      await deleteDoc(doc(db, 'orders', deleteTarget.id));
-      toast.success(`Permanently deleted`);
-      setDeleteTarget(null);
-      setDeleteReason('');
+      const target = bills.find((b) => b.id === hardDeleteTarget.id) || hardDeleteTarget.row;
+      await permanentDeleteOrder(target || { id: hardDeleteTarget.id }, {
+        deletedBy: { uid: user?.uid, email: user?.email, name: userData?.name },
+        reason: 'permanent_delete_from_bills',
+      });
+      setBills((prev) => prev.filter((b) => b.id !== hardDeleteTarget.id));
+      toast.success(t('admin.billsPage.hardDeleteDone', 'Bill hamesha ke liye delete ho gaya'));
+      setHardDeleteTarget(null);
+      setHardConfirm('');
     } catch (e) { toast.error(e.message); }
-    finally { setSubmittingDelete(false); }
-  }, [deleteTarget, deleteReason, bills]);
+    finally { setSubmittingHardDelete(false); }
+  }, [hardDeleteTarget, hardConfirm, canHardDelete, bills, user, userData, t]);
 
   const handleExport = useCallback(() => {
     if (!filtered.length) { toast.error('No data'); return; }
     const rows = filtered.map(b => [
-      b.billSerial || b.serialNo || b.id.slice(0, 8),
+      getBillSerialDisplay(b),
       b.storeId || 'Main',
       b.customer?.name || 'Walk-in',
       b.customer?.phone || '',
@@ -404,53 +618,81 @@ const BillsControl = () => {
   // ── COMPACT Columns — fit screen ──────────────────────────
   const columns = useMemo(() => [
     {
-      label: 'Serial',
+      label: t('admin.billsPage.colSerial', 'Serial'),
       field: 'billSerial',
-      width: '95px',
+      width: '200px',
       sortable: true,
-      sortValue: (row) => row.billSerial || row.serialNo || row.id,
+      sortValue: (row) => getBillSerialSortKey(row) || row.billSerial || row.serialNo || row.id,
+      render: (row) => {
+        const serial = getBillSerialDisplay(row);
+        const { date, time } = formatBillDateTime(getBillDisplayTimestamp(row));
+        return (
+          <div className="min-w-0">
+            <p className="font-mono font-semibold text-[13px] text-gray-100 whitespace-nowrap leading-tight" title={serial}>
+              {serial}
+            </p>
+            <p className="text-[11px] text-slate-500 mt-0.5">{date}</p>
+            <p className="text-[11px] text-amber-400/90 font-mono">{time}</p>
+          </div>
+        );
+      },
+    },
+    {
+      label: t('bills.colPaidBy', 'Paid By'),
+      field: 'paidByName',
+      width: '110px',
+      sortable: true,
+      sortValue: (row) => getBillPaidByDisplay(row),
+      render: (row) => {
+        const paidAt = getBillPaidAtTimestamp(row);
+        const { date, time } = formatBillDateTime(paidAt);
+        const name = isPendingCashier(row)
+          ? t('bills.awaitingCashier', 'Awaiting')
+          : getBillPaidByDisplay(row);
+        return (
+          <div className="min-w-0 text-xs leading-tight">
+            <p className="text-gray-200 truncate">{name}</p>
+            {paidAt && date !== '—' && (
+              <>
+                <p className="text-[10px] text-slate-500 mt-0.5">{date}</p>
+                <p className="text-[10px] text-emerald-400/90 font-mono">{time}</p>
+              </>
+            )}
+          </div>
+        );
+      },
+    },
+    {
+      label: t('bills.colStore', 'Store / Branch'),
+      field: 'storeId',
+      width: '100px',
+      sortable: true,
+      sortValue: (row) => resolveStoreLabel(row, storesMap),
       render: (row) => (
         <div className="min-w-0">
-          <p className="font-mono font-semibold text-[15px] text-gray-100 truncate leading-tight">
-            {(row.billSerial || row.serialNo || row.id.slice(0, 8) || '').slice(-12)}
-          </p>
-          <p className="text-[15px] text-slate-500 mt-0.5">
-            {toDate(row.createdAt).toLocaleDateString('en-PK', { day: '2-digit', month: 'short' })}
-          </p>
+          <p className="text-[13px] text-gray-200 truncate">{resolveStoreLabel(row, storesMap)}</p>
         </div>
       ),
     },
     {
-      label: 'Customer',
+      label: t('admin.billsPage.colCustomer', 'Customer'),
       field: 'customerName',
-      width: '110px',
+      width: '100px',
       sortable: true,
       sortValue: (row) => row.customer?.name || row.customerName || 'Walk-in',
       render: (row) => (
         <div className="min-w-0">
-          <p className="text-[15px] font-medium text-gray-200 truncate">
+          <p className="text-[13px] font-medium text-gray-200 truncate">
             {row.customer?.name || row.customerName || 'Walk-in'}
           </p>
-          {row.customer?.phone && (
-            <p className="text-[15px] text-slate-500 font-mono truncate">{row.customer.phone}</p>
+          {row.billerName && (
+            <p className="text-[11px] text-slate-500 truncate">{row.billerName}</p>
           )}
         </div>
       ),
     },
     {
-      label: 'Biller',
-      field: 'billerName',
-      width: '70px',
-      sortable: true,
-      sortValue: (row) => row.billerName || row.cashierName || '',
-      render: (row) => (
-        <span className="text-[14px] text-slate-400 truncate block">
-          {row.billerName || row.cashierName || '—'}
-        </span>
-      ),
-    },
-    {
-      label: 'Amount',
+      label: t('admin.billsPage.colAmount', 'Amount'),
       field: 'grandTotal',
       width: '80px',
       sortable: true,
@@ -463,16 +705,47 @@ const BillsControl = () => {
       ),
     },
     {
-      label: 'Payment',
+      label: t('payment.title', 'Payment'),
       field: 'paymentStatus',
-      width: '80px',
+      width: '100px',
       sortable: true,
       sortValue: (row) => row.deleted || row.isDeleted ? 'deleted' : (row.paymentStatus || 'unpaid'),
       render: (row) => {
-        const isDel = row.deleted || row.isDeleted;
-        if (isDel) return <StatusBadge variant="destructive">DELETED</StatusBadge>;
-        if (row.paymentStatus === 'paid') return <StatusBadge variant="success">PAID</StatusBadge>;
-        return <StatusBadge variant="warning">{row.paymentStatus?.toUpperCase() || 'UNPAID'}</StatusBadge>;
+        const removed = getBillRemovedBadge(row);
+        const edited = getBillEditedBadge(row);
+        const ps = getBillPaymentStatus(row);
+        const workflow = getBillWorkflowStatusBadge(row);
+        const payVariant = ps.color === 'green' ? 'success' : ps.color === 'red' ? 'destructive' : 'warning';
+        return (
+          <div className="flex flex-wrap gap-1 items-center max-w-[110px]">
+            {removed ? (
+              <StatusBadge variant="destructive">{removed.label}</StatusBadge>
+            ) : (
+              <StatusBadge variant={payVariant}>{ps.label}</StatusBadge>
+            )}
+            {edited && (
+              <StatusBadge variant="purple">{edited.label}</StatusBadge>
+            )}
+            {!removed && workflow && (
+              <StatusBadge variant="info">{workflow.label}</StatusBadge>
+            )}
+            {!removed && isDualModeBillRow(row) && (
+              <StatusBadge variant="purple">{t('bills.dualMode', 'Dual Mode')}</StatusBadge>
+            )}
+            {!removed && (() => {
+              const offlineBadge = getOfflineChannelBadge(row);
+              if (!offlineBadge) return null;
+              return (
+                <StatusBadge variant="warning">
+                  {t(offlineBadge.labelKey, offlineBadge.label)}
+                </StatusBadge>
+              );
+            })()}
+            {!removed && !edited && newBillIds.has(row.id) && (
+              <StatusBadge variant="warning">NEW</StatusBadge>
+            )}
+          </div>
+        );
       },
     },
     {
@@ -510,24 +783,27 @@ const BillsControl = () => {
           );
         }
         const isDel = row.deleted || row.isDeleted;
-        const serial = row.billSerial || row.id.slice(0, 8);
+        const serial = getBillSerialDisplay(row);
         return (
           <ActionMenu
             row={row}
-            onView={() => setSelectedBill(row)}
+            canHardDelete={canHardDelete}
+            onView={() => openBillInvoice(row)}
             onApprove={() => handleApprove(row)}
             onMarkPaid={() => handleMarkPaid(row)}
+            onConfirmCashier={() => handleConfirmCashier(row)}
             onReset={() => isDel ? handleRestore(row) : handleResetPending(row)}
             onSoftDelete={() => setDeleteTarget({ id: row.id, type: 'soft', serial })}
-            onHardDelete={() => setDeleteTarget({ id: row.id, type: 'hard', serial })}
+            onHardDelete={() => { setHardConfirm(''); setHardDeleteTarget({ id: row.id, serial, row }); }}
           />
         );
       },
     },
-  ], [loadingAction, handleApprove, handleMarkPaid, handleRestore, handleResetPending]);
+  ], [loadingAction, handleApprove, handleMarkPaid, handleConfirmCashier, handleRestore, handleResetPending, storesMap, t, newBillIds, openBillInvoice, canHardDelete]);
 
   const mobileCard = useCallback((row) => {
-    const isDel = row.deleted || row.isDeleted;
+    const removed = getBillRemovedBadge(row);
+    const edited = getBillEditedBadge(row);
     const total = Number(row.grandTotal || row.totalAmount || row.total || 0);
     const paid = Number(row.paidAmount || 0);
     const out = total - paid;
@@ -535,46 +811,58 @@ const BillsControl = () => {
       <motion.div
         initial={{ opacity: 0, y: 4 }}
         animate={{ opacity: 1, y: 0 }}
-        onClick={() => setSelectedBill(row)}
-        className="p-2.5 rounded-lg border border-[#2a1f0d] bg-gradient-to-br from-[#1a1208] to-[#0f0a05] hover:border-amber-500/30 cursor-pointer transition-all"
+        onClick={() => {
+          dismissBill(row);
+          openBillInvoice(row);
+        }}
+        className={getBillCardHighlightClass(row, { newBillIds })}
       >
-        <div className="flex items-center justify-between gap-2 mb-1.5">
-          <span className="text-[11px] font-semibold text-gray-100 font-mono truncate">
-            {(row.billSerial || row.serialNo || row.id.slice(0, 8) || '').slice(-12)}
+        <div className="flex items-center justify-between gap-2 mb-1.5 flex-wrap">
+          <span className="text-[11px] font-semibold text-gray-100 font-mono break-all leading-tight">
+            {getBillSerialDisplay(row)}
           </span>
-          {isDel
-            ? <StatusBadge variant="destructive">Deleted</StatusBadge>
-            : row.paymentStatus === 'paid'
-              ? <StatusBadge variant="success">Paid</StatusBadge>
-              : <StatusBadge variant="warning">{row.paymentStatus?.toUpperCase() || 'UNPAID'}</StatusBadge>
-          }
+          <div className="flex items-center gap-1 shrink-0">
+            {removed ? (
+              <StatusBadge variant="destructive">{removed.label}</StatusBadge>
+            ) : (
+              <StatusBadge variant={paymentVariant(row)}>{paymentLabel(row)}</StatusBadge>
+            )}
+            {edited && <StatusBadge variant="purple">{edited.label}</StatusBadge>}
+          </div>
         </div>
         <p className="text-[11px] text-gray-300 truncate mb-1">
           {row.customer?.name || row.customerName || 'Walk-in'}
         </p>
         <div className="flex items-center justify-between text-[10px]">
           <span className="text-gray-200 font-medium font-mono">{fmt(total)}</span>
-          {out > 0 && !isDel && (
+          {out > 0 && !removed && (
             <span className="text-rose-400 font-medium">Due {fmt(out)}</span>
           )}
         </div>
       </motion.div>
     );
-  }, []);
+  }, [newBillIds, dismissBill, openBillInvoice]);
 
   return (
-    <div className="p-2 sm:p-3 lg:p-4 max-w-[1600px] mx-auto space-y-3">
+    <div dir={isRTL ? 'rtl' : 'ltr'} className={cn(
+      managerMode ? 'p-0 max-w-none space-y-3' : 'p-2 sm:p-3 lg:p-4 max-w-[1600px] mx-auto space-y-3',
+    )}>
 
       {/* ── Header ─────────────────────────────────────────────── */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
         <div>
           <h1 className="text-base sm:text-lg font-bold text-gray-100 flex items-center gap-2">
             <ShoppingBag className="w-4 h-4 text-amber-500" />
-            Bills Control Center
+            {t('admin.pages.bills.title', 'Bills Control')}
+            {liveAt && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[9px] font-bold bg-amber-500/15 text-amber-400 border border-amber-500/25">
+                Updated {new Date(liveAt).toLocaleTimeString('en-PK', { hour: '2-digit', minute: '2-digit' })}
+              </span>
+            )}
             {loading && <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />}
           </h1>
           <p className="text-[10px] text-slate-500 mt-0.5">
-            {bills.length.toLocaleString()} orders • {filtered.length.toLocaleString()} shown
+            {filterStats.shown.toLocaleString()} / {loadedBillCount.toLocaleString()} {t('manager.bills', 'bills')} • Rs {filterStats.shownValue.toLocaleString()}
           </p>
         </div>
         <Button
@@ -583,106 +871,83 @@ const BillsControl = () => {
           onClick={handleExport}
           disabled={!filtered.length}
         >
-          Export CSV
+          {t('admin.billsPage.exportCsv', 'Export CSV')}
         </Button>
+        <select
+          value={cloudStatusFilter}
+          onChange={(e) => setCloudStatusFilter(e.target.value)}
+          className="rounded-lg border border-[#2a1f0d] bg-[#0f0a05] text-gray-200 text-xs px-2 py-1.5"
+        >
+          <option value="all">All</option>
+          <option value="pending_payment">Pending</option>
+          <option value="paid">Paid</option>
+          <option value="cancelled">Cancelled</option>
+        </select>
+        <Button variant="ghost" onClick={() => loadBills(null)} disabled={loading}>
+          <RefreshCw className={cn('w-4 h-4', loading && 'animate-spin')} />
+        </Button>
+        {hasMoreBills && billsCursor && (
+          <Button variant="secondary" size="sm" onClick={() => loadBills(billsCursor)} disabled={loading}>
+            Load More (50)
+          </Button>
+        )}
       </div>
+
+      <DatePresetBar
+        datePreset={filters.datePreset || 'today'}
+        onPresetChange={(preset) => setFilters((f) => ({ ...f, datePreset: preset, dateFrom: preset === 'custom' ? f.dateFrom : '', dateTo: preset === 'custom' ? f.dateTo : '' }))}
+        customFrom={filters.dateFrom || ''}
+        customTo={filters.dateTo || ''}
+        onCustomFromChange={(v) => setFilters((f) => ({ ...f, datePreset: 'custom', dateFrom: v }))}
+        onCustomToChange={(v) => setFilters((f) => ({ ...f, datePreset: 'custom', dateTo: v }))}
+        isDark={isDark}
+      />
 
       {/* ── Stats ──────────────────────────────────────────────── */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
-        <StatCard label="Total" value={stats.total} icon={ShoppingBag} color="amber" />
-        <StatCard label="Active" value={stats.active} icon={FileCheck} color="green" />
-        <StatCard label="Pending" value={stats.pending} icon={Clock} color="red" />
-        <StatCard label="Deleted" value={stats.deleted} icon={AlertTriangle} color="purple" />
-        <StatCard label="Total Value" value={stats.totalAmount} icon={DollarSign} color="blue" />
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-7 gap-2">
+        <StatCard label={t('admin.billsPage.totalBills', 'Total Bills')} value={filterStats.total} icon={ShoppingBag} color="amber" />
+        <StatCard label={t('bills.pendingCashier', 'Pending Cashier')} value={filterStats.pendingCashier} icon={Clock} color="red" />
+        <StatCard label={t('bills.pendingMgrCashier', 'Cashier Paid · Mgr Pending')} value={filterStats.pendingMgrCashier} icon={CheckCircle2} color="blue" />
+        <StatCard label={t('bills.dualMode', 'Dual Mode')} value={filterStats.dualMode} icon={Zap} color="purple" />
+        <StatCard label={t('bills.cashierOfflinePay', 'Cashier Offline Pay')} value={filterStats.offline} icon={WifiOff} color="amber" />
+        <StatCard label={t('bills.paid', 'Confirmed')} value={filterStats.paid} icon={CheckCircle2} color="green" />
+        <StatCard label={t('admin.billsPage.totalValue', 'Shown Value')} value={filterStats.shownValue} icon={DollarSign} color="blue" />
       </div>
 
-      {/* ── Filter Bar ─────────────────────────────────────────── */}
-      <div className="rounded-xl border border-[#2a1f0d] bg-gradient-to-br from-[#1a1208] to-[#0f0a05] p-2.5">
-        <div className="flex flex-col sm:flex-row gap-2 mb-2">
-          <div className="flex-1 relative">
-            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-500" />
-            <input
-              type="text"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search..."
-              className="w-full pl-8 pr-3 py-1.5 text-xs bg-[#0f0a05] border border-[#2a1f0d] rounded-lg text-gray-200 placeholder-slate-500 outline-none focus:border-amber-500/50"
-            />
-          </div>
-          <div className="flex gap-2">
-            <button
-              onClick={() => setShowFilters(!showFilters)}
-              className={cn(
-                'flex items-center gap-1 px-2.5 py-1.5 rounded-lg border text-xs font-medium',
-                showFilters
-                  ? 'bg-amber-500/10 border-amber-500/30 text-amber-400'
-                  : 'bg-[#0f0a05] border-[#2a1f0d] text-slate-400'
-              )}
-            >
-              <Filter className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Filters</span>
-              {showFilters ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
-            </button>
-            {(search || filter !== 'all' || dateFilter !== 'all' || branchFilter !== 'all') && (
-              <button
-                onClick={() => { setSearch(''); setFilter('all'); setDateFilter('all'); setBranchFilter('all'); }}
-                className="flex items-center justify-center p-1.5 text-slate-500 hover:text-rose-400"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            )}
-          </div>
-        </div>
+      <BillsAdvancedToolbar
+        filters={filters}
+        onChange={setFilters}
+        onReset={handleResetFilters}
+        bills={bills}
+        shownCount={filtered.length}
+        totalCount={bills.length}
+        shownValue={filterStats.shownValue}
+        isLoading={loading}
+        liveAt={liveAt}
+        showLive
+        showShowAll
+        hideDatePreset
+        t={t}
+      />
 
-        <AnimatePresence>
-          {showFilters && (
-            <motion.div
-              initial={{ height: 0, opacity: 0 }}
-              animate={{ height: 'auto', opacity: 1 }}
-              exit={{ height: 0, opacity: 0 }}
-              className="overflow-hidden"
-            >
-              <div className="flex flex-wrap gap-2 pt-2 border-t border-[#2a1f0d]">
-                <select
-                  value={branchFilter}
-                  onChange={(e) => setBranchFilter(e.target.value)}
-                  className="bg-[#0f0a05] border border-[#2a1f0d] text-gray-200 text-xs px-2 py-1.5 rounded-lg outline-none focus:border-amber-500/50"
-                >
-                  <option value="all">All Branches</option>
-                  {branches.map(b => (
-                    <option key={b} value={b}>{b.length > 14 ? b.slice(0, 14) + '…' : b}</option>
-                  ))}
-                </select>
-                <select
-                  value={dateFilter}
-                  onChange={(e) => setDateFilter(e.target.value)}
-                  className="bg-[#0f0a05] border border-[#2a1f0d] text-gray-200 text-xs px-2 py-1.5 rounded-lg outline-none focus:border-amber-500/50"
-                >
-                  <option value="all">All Time</option>
-                  <option value="today">Today</option>
-                  <option value="week">7 Days</option>
-                  <option value="month">30 Days</option>
-                </select>
-                <select
-                  value={filter}
-                  onChange={(e) => setFilter(e.target.value)}
-                  className="bg-[#0f0a05] border border-[#2a1f0d] text-gray-200 text-xs px-2 py-1.5 rounded-lg outline-none focus:border-amber-500/50"
-                >
-                  <option value="all">All Statuses</option>
-                  <option value="active">Active</option>
-                  <option value="deleted">Deleted</option>
-                  <option value="pending">Pending</option>
-                </select>
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-
-        <div className="flex items-center justify-between text-[10px] text-slate-500 mt-2 pt-2 border-t border-[#2a1f0d]">
-          <span>{filtered.length.toLocaleString()} records</span>
-          <span>Loaded: {bills.length.toLocaleString()}</span>
+      {newBillCount > 0 && (
+        <div className="bill-alert-banner">
+          <div className="flex items-center gap-2 min-w-0">
+            <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+            <p className="text-xs text-red-100 font-semibold truncate">
+              {newBillCount} fraud alert{newBillCount > 1 ? 's' : ''}
+              {fraudSummary ? ` — ${fraudSummary}` : ''}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={dismissAll}
+            className="shrink-0 text-[10px] font-bold px-2.5 py-1 rounded-lg border border-amber-500/40 text-amber-300 hover:bg-amber-500/10"
+          >
+            Dismiss
+          </button>
         </div>
-      </div>
+      )}
 
       {/* ── Data Table ─────────────────────────────────────────── */}
       <div className="w-full overflow-hidden">
@@ -690,16 +955,26 @@ const BillsControl = () => {
           columns={columns}
           data={filtered}
           loading={loading}
-          emptyMessage="No bills found"
-          emptySubtext="Check connection or filters"
+          emptyMessage={t('admin.billsPage.noBills', 'No bills found')}
+          emptySubtext={t('admin.usersPage.noFilterMatch', 'Try adjusting filters')}
           rowKey="id"
-          onRowClick={(row) => setSelectedBill(row)}
+          defaultSortField="billSerial"
+          defaultSortDir="desc"
+          onRowClick={(row) => {
+            dismissBill(row);
+            openBillInvoice(row);
+          }}
+          getRowClassName={getRowClassName}
           mobileCardRenderer={mobileCard}
-          pageSize={50}
-          enableVirtualization={true}
-          virtualizationThreshold={50}
+          pageSize={25}
+          pageSizeOptions={BILLS_PAGE_SIZE_OPTIONS}
+          paginationResetKey={`${filters.quick}|${filters.paymentStatus}|${filters.branchId}|${filters.search}`}
+          enableVirtualization={false}
           maxHeight="600px"
-          className="rounded-xl border border-[#2a1f0d] overflow-hidden w-full"
+          billsTableMode={true}
+          striped={false}
+          hoverable={false}
+          rowEstimateSize={72}
         />
       </div>
 
@@ -716,11 +991,11 @@ const BillsControl = () => {
               <div className="flex items-center gap-2 pb-3 border-b border-[#2a1f0d] mb-4">
                 <AlertTriangle className="w-5 h-5 text-rose-500" />
                 <h3 className="text-sm font-semibold text-gray-100">
-                  {deleteTarget.type === 'hard' ? 'Permanent Delete' : 'Cancel Bill'}
+                  Archive Bill
                 </h3>
               </div>
               <p className="text-xs text-slate-400 mb-4">
-                Action on <strong className="text-gray-200">#{deleteTarget.serial}</strong> will be logged.
+                Bill <strong className="text-gray-200">#{deleteTarget.serial}</strong> archive hogi — permanent delete nahi. Restore: Admin → Backup → Archive tab.
               </p>
               <textarea
                 value={deleteReason}
@@ -740,13 +1015,10 @@ const BillsControl = () => {
                 </Button>
                 <button
                   disabled={!deleteReason.trim() || submittingDelete}
-                  onClick={deleteTarget.type === 'hard' ? executeHardDelete : executeSoftDelete}
+                  onClick={executeSoftDelete}
                   className="flex-1 rounded-xl bg-rose-500 hover:bg-rose-600 py-2.5 text-xs font-semibold text-white disabled:opacity-40"
                 >
-                  {submittingDelete
-                    ? 'Processing...'
-                    : deleteTarget.type === 'hard' ? 'Erase Forever' : 'Confirm'
-                  }
+                  {submittingDelete ? 'Processing...' : 'Archive Bill'}
                 </button>
               </div>
             </motion.div>
@@ -754,157 +1026,74 @@ const BillsControl = () => {
         )}
       </AnimatePresence>
 
-      {/* ── Bill Detail Drawer — LARGE READABLE RECEIPT ───────── */}
+      {/* ── Permanent Delete Modal ─────────────────────────────── */}
       <AnimatePresence>
-        {selectedBill && (
-          <div className="fixed inset-0 z-50 flex items-center justify-end bg-black/75 backdrop-blur-sm">
+        {hardDeleteTarget && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
             <motion.div
-              initial={{ x: '100%' }}
-              animate={{ x: 0 }}
-              exit={{ x: '100%' }}
-              transition={{ type: 'spring', damping: 28, stiffness: 220 }}
-              className="w-full max-w-md sm:max-w-xl h-full flex flex-col bg-gradient-to-b from-[#1a1208] to-[#0f0a05] border-l border-[#2a1f0d] shadow-2xl"
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="w-full max-w-md rounded-2xl border border-rose-500/40 bg-gradient-to-b from-[#1a1208] to-[#0f0a05] p-5 shadow-2xl"
             >
-              {/* Header */}
-              <div className="flex items-center justify-between p-4 border-b border-[#2a1f0d] shrink-0">
-                <div className="flex items-center gap-2">
-                  <FileText className="w-5 h-5 text-amber-500" />
-                  <h3 className="text-sm font-semibold text-gray-100">Receipt Details</h3>
-                </div>
-                <div className="flex gap-1">
-                  <button
-                    onClick={() => window.print()}
-                    className="p-1.5 rounded-lg text-slate-400 hover:text-amber-500 hover:bg-amber-500/10 transition-all"
-                  >
-                    <Printer className="w-4 h-4" />
-                  </button>
-                  <button
-                    onClick={() => setSelectedBill(null)}
-                    className="p-1.5 rounded-lg text-slate-400 hover:text-gray-200 hover:bg-[#2a1f0d] transition-all"
-                  >
-                    <X className="w-4 h-4" />
-                  </button>
-                </div>
+              <div className="flex items-center gap-2 pb-3 border-b border-rose-500/20 mb-4">
+                <AlertTriangle className="w-5 h-5 text-rose-500" />
+                <h3 className="text-sm font-semibold text-rose-300">
+                  {t('admin.billsPage.hardDeleteTitle', 'Permanent Delete')}
+                </h3>
               </div>
-
-              {/* Scrollable Body */}
-              <div className="flex-1 overflow-y-auto p-4 sm:p-5 space-y-4">
-
-                {/* ─── LARGER RECEIPT — readable ───────────────── */}
-                <div className="bg-white text-gray-900 p-5 rounded-xl border-4 border-dashed border-gray-300 mx-auto max-w-[400px] font-mono shadow-inner">
-
-                  <div className="text-center space-y-1 mb-4">
-                    <h4 className="font-bold text-xl">A-ONE JEWELRY</h4>
-                    <p className="text-xs text-gray-600">Tariq Road Gold Bazar, Karachi</p>
-                    <p className="text-xs text-gray-600">PH: 0316-2502498</p>
-                    <div className="border-b-2 border-dashed border-gray-400 pt-1.5" />
-                  </div>
-
-                  <div className="space-y-1.5 text-sm text-gray-800 mb-4">
-                    <p><strong>Bill No:</strong> {selectedBill.billSerial || selectedBill.serialNo || selectedBill.id?.slice(0, 10)}</p>
-                    <p><strong>Date:</strong> {toDate(selectedBill.createdAt).toLocaleString('en-PK')}</p>
-                    <p><strong>Cashier:</strong> {selectedBill.billerName || selectedBill.cashierName || '—'}</p>
-                    <p><strong>Customer:</strong> {selectedBill.customer?.name || 'Walk-in'}</p>
-                    <p><strong>Phone:</strong> {selectedBill.customer?.phone || '—'}</p>
-                    <div className="border-b-2 border-dashed border-gray-400 pt-1" />
-                  </div>
-
-                  <div className="space-y-2.5 mb-4">
-                    <div className="flex justify-between font-bold text-black text-sm">
-                      <span>Item</span><span>Total</span>
-                    </div>
-                    <div className="border-b border-dashed border-gray-400" />
-                    {(selectedBill.items || []).map((item, i) => (
-                      <div key={i} className="space-y-1 text-gray-800">
-                        <div className="flex justify-between font-semibold text-sm">
-                          <span className="truncate max-w-[200px]">
-                            {item.productName || `Item #${item.serialId || i + 1}`}
-                          </span>
-                          <span>{fmt(item.total || item.price * item.qty)}</span>
-                        </div>
-                        <div className="text-xs text-gray-600 flex justify-between">
-                          <span>{item.qty} × {fmt(item.price)}</span>
-                          {item.discount > 0 && <span>-{item.discount}%</span>}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-
-                  <div className="border-b-2 border-dashed border-gray-400 mb-3" />
-
-                  <div className="space-y-1.5 text-sm text-black mb-4">
-                    <div className="flex justify-between">
-                      <span>Subtotal:</span>
-                      <span className="font-medium">{fmt(selectedBill.subtotal)}</span>
-                    </div>
-                    {Number(selectedBill.totalDiscount) > 0 && (
-                      <div className="flex justify-between text-rose-600">
-                        <span>Discount:</span>
-                        <span>-{fmt(selectedBill.totalDiscount)}</span>
-                      </div>
-                    )}
-                    <div className="flex justify-between font-bold border-t-2 border-dashed border-gray-400 pt-1.5 text-base">
-                      <span>Grand Total:</span>
-                      <span>{fmt(selectedBill.grandTotal || selectedBill.totalAmount)}</span>
-                    </div>
-                    <div className="border-b border-dashed border-gray-400 py-0.5" />
-                    <div className="flex justify-between">
-                      <span>Received:</span>
-                      <span className="font-medium">{fmt(selectedBill.amountReceived)}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span>Change:</span>
-                      <span className="font-medium">{fmt(selectedBill.changeGiven)}</span>
-                    </div>
-                  </div>
-
-                  <div className="text-center text-xs text-gray-600 border-t-2 border-dashed border-gray-400 pt-3 space-y-1">
-                    <p className="font-bold text-sm">22K Gold Purity Certified</p>
-                    <p>Thank you for your purchase!</p>
-                  </div>
-                </div>
-
-                {/* Audit Info */}
-                <div className="space-y-3">
-                  <h4 className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Audit Information</h4>
-                  <div className="grid grid-cols-2 gap-2 text-[11px]">
-                    {[
-                      { label: 'Store ID', value: selectedBill.storeId || '—' },
-                      { label: 'Source', value: (selectedBill.source || 'biller').toUpperCase() },
-                      { label: 'Payment', value: selectedBill.paymentType || selectedBill.paymentMethod || '—' },
-                      { label: 'Sync', value: selectedBill.synced !== false ? '✅ Synced' : '⏳ Pending' },
-                    ].map(f => (
-                      <div key={f.label} className="p-2.5 rounded-lg border border-[#2a1f0d] bg-[#070503]">
-                        <p className="text-[9px] text-slate-500 font-bold uppercase mb-1">{f.label}</p>
-                        <p className="font-medium text-gray-300 truncate">{f.value}</p>
-                      </div>
-                    ))}
-                  </div>
-
-                  {selectedBill.deleteReason && (
-                    <div className="bg-rose-500/5 p-3 rounded-lg border border-rose-500/20 text-xs">
-                      <p className="text-[9px] text-rose-400 font-bold uppercase mb-1">Delete Reason</p>
-                      <p className="font-mono text-rose-300">{selectedBill.deleteReason}</p>
-                    </div>
-                  )}
-
-                  <div className="flex items-center justify-center gap-1.5 py-2 text-emerald-500 text-[11px] bg-emerald-500/5 rounded-lg border border-emerald-500/10">
-                    <CheckCircle2 className="w-3.5 h-3.5" />
-                    Transaction locked in sync registry
-                  </div>
-                </div>
-              </div>
-
-              {/* Footer */}
-              <div className="p-4 shrink-0 border-t border-[#2a1f0d]">
-                <Button variant="primary" className="w-full" onClick={() => setSelectedBill(null)}>
-                  Close
+              <p className="text-xs text-slate-400 mb-2">
+                {t('admin.billsPage.hardDeleteDesc1', 'Bill')}{' '}
+                <strong className="text-gray-200">#{hardDeleteTarget.serial}</strong>{' '}
+                {t('admin.billsPage.hardDeleteDesc2', 'hamesha ke liye delete ho jayega — restore nahi ho sakta.')}
+              </p>
+              <p className="text-[11px] text-rose-400/90 mb-3">
+                {t('admin.billsPage.hardDeleteWarn', 'Ye action wapas nahi ho sakta. Confirm karne ke liye niche likho:')}{' '}
+                <span className="font-mono font-bold">{PERMANENT_DELETE_PHRASE}</span>
+              </p>
+              <input
+                value={hardConfirm}
+                onChange={(e) => setHardConfirm(e.target.value)}
+                placeholder={PERMANENT_DELETE_PHRASE}
+                className="w-full rounded-xl border border-rose-500/30 bg-[#0f0a05] p-3 text-xs text-gray-200 placeholder-slate-600 uppercase outline-none focus:border-rose-500/60 mb-4"
+              />
+              <div className="flex gap-2">
+                <Button
+                  variant="secondary"
+                  className="flex-1"
+                  disabled={submittingHardDelete}
+                  onClick={() => { setHardDeleteTarget(null); setHardConfirm(''); }}
+                >
+                  {t('common.cancel', 'Cancel')}
                 </Button>
+                <button
+                  disabled={String(hardConfirm).trim().toUpperCase() !== PERMANENT_DELETE_PHRASE || submittingHardDelete}
+                  onClick={executeHardDelete}
+                  className="flex-1 rounded-xl bg-rose-600 hover:bg-rose-700 py-2.5 text-xs font-semibold text-white disabled:opacity-40"
+                >
+                  {submittingHardDelete
+                    ? t('admin.billsPage.processing', 'Processing...')
+                    : t('admin.billsPage.eraseForever', 'Erase Forever')}
+                </button>
               </div>
             </motion.div>
           </div>
         )}
       </AnimatePresence>
+
+      {/* ── Bill invoice — same UI as Biller ─────────────────── */}
+      {selectedBill && (
+        <InvoicePrint
+          key={`adm-inv-${invoiceSeq}-${selectedBill.billSerial || selectedBill.serialNo || selectedBill.id}`}
+          {...buildInvoicePrintProps({
+            order: selectedBill,
+            store: invoiceStore,
+            onClose: () => setSelectedBill(null),
+            settings,
+            extra: { isReprint: true },
+          })}
+        />
+      )}
     </div>
   );
 };

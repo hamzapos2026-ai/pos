@@ -37,6 +37,7 @@ export const processReturn = async ({ originalBillId, returnItems, refundAmount,
       storeId,
       customer,
       processedAt,
+      status: 'completed',
       synced: false
     };
 
@@ -54,6 +55,16 @@ export const processReturn = async ({ originalBillId, returnItems, refundAmount,
       });
       // Mark as synced in Dexie (optional, depending on sync strategy)
     }
+
+    void import('./customerPersonaService').then(({ applyReturnTransaction }) =>
+      applyReturnTransaction({
+        customer,
+        storeId,
+        branchId: storeId,
+        refundAmount,
+        userId: billerId,
+      }),
+    );
 
     return { success: true, returnId };
   } catch (err) {

@@ -7,8 +7,8 @@ import {
   ShoppingCart, Plus, Mic, User, X,
   Search, Loader2, UserCheck, AlertCircle, Lock, Percent,
 } from "lucide-react";
-import toast from "react-hot-toast";
-import { cn } from "../../utils/cn";
+import { toast } from "react-hot-toast";
+import { sanitizeProductNameInput } from "../../utils/validators";
 import {
   isSpeechSupported, parseSpokenNumber, parseDiscount,
 } from "../../hooks/useSpeech";
@@ -81,14 +81,6 @@ const EmbeddedSPSelector = memo(({ agents, currentSPId, onSelect, required, isDa
         <UserCheck size={11} className="text-amber-500" />
         Current Salesperson
         {required && <span className="text-red-400">*</span>}
-        {current && (
-          <span className={cn(
-            "ml-auto text-[10px] font-mono px-1.5 py-0.5 rounded normal-case font-bold",
-            isDark ? "bg-amber-500/20 text-amber-400" : "bg-amber-100 text-amber-700",
-          )}>
-            {current.commissionType === "fixed" ? `Rs ${current.commissionRate}` : `${current.commissionRate}%`}
-          </span>
-        )}
       </label>
       <div className="relative">
         <select
@@ -111,7 +103,7 @@ const EmbeddedSPSelector = memo(({ agents, currentSPId, onSelect, required, isDa
           {required && !currentSPId && <option value="">⚠️ Select</option>}
           {agents.map((a) => (
             <option key={a.id} value={a.id}>
-              {a.name} ({a.commissionType === "fixed" ? `Rs ${a.commissionRate}` : `${a.commissionRate}%`})
+              {a.name}
             </option>
           ))}
         </select>
@@ -182,19 +174,10 @@ const ItemEntryForm = memo(({
   const previewQty = Number(form.qty) || 1;
   const previewDisc = Number(form.discount) || 0;
   const previewRaw = previewPrice * previewQty;
-  const previewDiscAmt = form.discountType === "percent"
-    ? Math.round(previewRaw * previewDisc / 100)
-    : Math.min(previewDisc, previewRaw);
+  // Enforce PKR-only discount (fixed amount)
+  const previewDiscAmt = Math.min(previewDisc, previewRaw);
   const previewTotal = Math.max(0, previewRaw - previewDiscAmt);
   const discExceeded = previewPrice > 0 && previewDiscAmt > previewRaw;
-
-  const currentAgent = salespersonAgents.find((a) => a.id === currentSPId);
-  const previewCommission = (() => {
-    if (!salespersonEnabled || !currentAgent || previewTotal <= 0) return 0;
-    const rate = Number(currentAgent.commissionRate || 0);
-    if (currentAgent.commissionType === "fixed") return rate * previewQty;
-    return Math.round((previewTotal * rate) / 100);
-  })();
 
   // Speech handlers
   const handlePriceSpeech = useCallback((val) => {
@@ -210,21 +193,24 @@ const ItemEntryForm = memo(({
   const handleDiscountSpeech = useCallback((val) => {
     const parsed = typeof val === "string" ? parseDiscount(val, language) : null;
     if (parsed) {
-      setForm((p) => ({ ...p, discount: parsed.value, discountType: parsed.type === "percent" ? "percent" : "fixed" }));
+      // always use fixed (PKR)
+      setForm((p) => ({ ...p, discount: parsed.value, discountType: 'fixed' }));
       flashField("discount");
     }
   }, [setForm, flashField, language]);
 
   const handleCustNameSpeech = useCallback((val) => { onNameChange?.(val); flashField("customerName"); }, [onNameChange, flashField]);
   const handlePhoneSpeech = useCallback((val) => { onPhoneChange?.(String(val).replace(/\D/g, "")); flashField("phone"); }, [onPhoneChange, flashField]);
-  const handleNameSpeech = useCallback((val) => { setForm((p) => ({ ...p, productName: val })); flashField("productName"); }, [setForm, flashField]);
+  const handleNameSpeech = useCallback((val) => {
+    setForm((p) => ({ ...p, productName: sanitizeProductNameInput(val) }));
+    flashField("productName");
+  }, [setForm, flashField]);
 
   useKeyboardShortcuts({
     f3: () => (productNameRef?.current || nameInputRef?.current)?.focus(),
     f4: () => priceInputRef?.current?.focus(),
     f5: () => { qtyInputRef?.current?.focus(); qtyInputRef?.current?.select(); },
     f6: () => discountInputRef?.current?.focus(),
-    f7: () => setTimeout(() => phoneInputRef?.current?.focus(), 100),
     "ctrl+shift+c": () => {
       onNameChange?.("Walking Customer");
       onPhoneChange?.("");
@@ -258,12 +244,7 @@ const ItemEntryForm = memo(({
         isDark ? "bg-yellow-500/5 border-yellow-500/20" : "bg-yellow-50 border-yellow-200",
       )}>
         <p className="text-[10px] uppercase text-gray-500 font-semibold">Bill Serial</p>
-        <p className="text-[17px] font-bold text-yellow-400 font-mono truncate">{currentBillSerial}</p>
-        {billStartTime && (
-          <p className="text-[10px] text-gray-500 mt-0.5">Started: {fmtTime?.(billStartTime)}</p>
-        )}
-      </div>
-
+          <p className="text-[12px] font-bold text-yellow-400 font-mono truncate whitespace-nowrap">{currentBillSerial}</p>
       {/* Salesperson Selector */}
       {showSPSelector && (
         <EmbeddedSPSelector
@@ -279,17 +260,22 @@ const ItemEntryForm = memo(({
       {/* Product Name */}
       {showProductName && (
         <div className="space-y-0.5">
-          <label className="block text-[11px] font-bold uppercase text-gray-500">Product Name *</label>
+          <label className="block text-[10px] sm:text-[11px] font-bold uppercase text-gray-500">Product Name *</label>
           <div className="relative">
             <input
               ref={productNameRef}
               type="text"
               value={form.productName}
-              onChange={(e) => setForm((p) => ({ ...p, productName: e.target.value }))}
-              onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); onAddItem?.(); } }}
+              placeholder="e.g. Gold Ring"
+              onChange={(e) => setForm((p) => ({ ...p, productName: sanitizeProductNameInput(e.target.value) }))}
+              onKeyDown={(e) => { if (e.key.length === 1 && /\d/.test(e.key)) e.preventDefault(); }}
+              onPaste={(e) => {
+                e.preventDefault();
+                setForm((p) => ({ ...p, productName: sanitizeProductNameInput(e.clipboardData?.getData("text") || "") }));
+              }}
               disabled={screenLocked}
-              placeholder="Product name..."
-              className={cn(inputCls("productName"), "px-3 py-2 text-sm pr-8")}
+              autoComplete="off" spellCheck={false} data-bill-input="true"
+              className={cn(inputCls("productName"), "px-2 sm:px-3 py-2 text-xs sm:text-sm w-full pr-8 placeholder:text-[9px] sm:placeholder:text-[10px] placeholder:opacity-50")}
             />
             <FieldMic fieldName="productName" onResult={handleNameSpeech} speech={speech} />
           </div>
@@ -297,14 +283,14 @@ const ItemEntryForm = memo(({
       )}
 
       {/* Price + Qty */}
-      <div className="grid grid-cols-2 gap-1.5">
+      <div className="grid grid-cols-2 gap-1.5 sm:gap-2">
         <div className="space-y-0.5 min-w-0">
-          <label className="block text-[11px] font-bold uppercase text-gray-500">Price *</label>
+          <label className="block text-[10px] sm:text-[11px] font-bold uppercase text-gray-500">Price *</label>
           <div className="relative">
             <input
               ref={priceInputRef}
               type="text"
-              inputMode="numeric"
+              inputMode="decimal"
               value={form.price}
               onChange={(e) => {
                 const v = e.target.value.replace(/\D/g, "");
@@ -318,13 +304,13 @@ const ItemEntryForm = memo(({
                 if (!ok.includes(e.key) && !/^\d$/.test(e.key) &&
                   !((e.ctrlKey || e.metaKey) && ["a", "c", "v", "x"].includes(e.key.toLowerCase())))
                   e.preventDefault();
-                if (e.key === "Enter") { e.preventDefault(); onAddItem?.(); }
               }}
-              placeholder={lastEntryPrice ? `↵ ${lastEntryPrice}` : "0"}
               disabled={screenLocked}
+              autoComplete="off" autoCorrect="off" spellCheck={false}
+              data-bill-input="true"
               className={cn(
                 inputCls("price"),
-                "font-bold px-3 py-2.5 pr-8 text-[22px]",
+                "font-bold font-mono px-2 sm:px-3 py-2 sm:py-2.5 pr-8 text-base sm:text-lg md:text-xl",
                 isDark ? "text-yellow-400 border-yellow-500/30" : "text-yellow-700 border-yellow-300",
               )}
             />
@@ -332,7 +318,7 @@ const ItemEntryForm = memo(({
           </div>
         </div>
         <div className="space-y-0.5 min-w-0">
-          <label className="block text-[11px] font-bold uppercase text-gray-500">Qty</label>
+          <label className="block text-[10px] sm:text-[11px] font-bold uppercase text-gray-500">Qty</label>
           <div className="relative">
             <input
               ref={qtyInputRef}
@@ -343,12 +329,13 @@ const ItemEntryForm = memo(({
               onFocus={(e) => e.target.select()}
               onClick={(e) => { e.target.focus(); e.target.select(); }}
               onKeyDown={(e) => {
-                if (e.key === "Enter") { e.preventDefault(); onAddItem?.(); }
                 if (e.key === "ArrowUp") { e.preventDefault(); setForm((p) => ({ ...p, qty: (Number(p.qty) || 1) + 1 })); }
                 if (e.key === "ArrowDown") { e.preventDefault(); setForm((p) => ({ ...p, qty: Math.max(1, (Number(p.qty) || 1) - 1) })); }
               }}
               readOnly={screenLocked}
-              className={cn(inputCls("qty"), "text-center font-bold px-2 py-2.5 text-[22px]")}
+              data-bill-input="true"
+              autoComplete="off" spellCheck={false}
+              className={cn(inputCls("qty"), "text-center font-bold font-mono px-1 sm:px-2 py-2 sm:py-2.5 text-base sm:text-lg md:text-xl")}
             />
             <FieldMic fieldName="qty" onResult={handleQtySpeech} speech={speech} />
           </div>
@@ -358,40 +345,28 @@ const ItemEntryForm = memo(({
       {/* Discount */}
       {showDiscountField && (
         <div className="space-y-0.5">
-          <label className="block text-[11px] font-bold uppercase text-gray-500 flex items-center justify-between">
-            <span>Discount / Item</span>
-            <span className="text-[9px] normal-case text-gray-500">Num* toggle</span>
-          </label>
-          <div className="flex gap-1.5">
-            <div className="relative flex-1 min-w-0">
-              <input
-                ref={discountInputRef}
-                type="number"
-                min="0"
-                value={form.discount}
-                onChange={(e) => setForm((p) => ({ ...p, discount: e.target.value }))}
-                onFocus={(e) => setTimeout(() => e.target.select(), 10)}
-                onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); onAddItem?.(); } }}
-                disabled={screenLocked}
-                className={cn(
-                  inputCls("discount"),
-                  "font-semibold px-3 py-2 pr-8 text-sm",
-                  discExceeded && "border-red-500 ring-1 ring-red-500/30",
-                )}
-              />
-              <FieldMic fieldName="discount" onResult={handleDiscountSpeech} speech={speech} />
-            </div>
-            <button
-              type="button"
-              onClick={() => setForm((f) => ({ ...f, discountType: f.discountType === "fixed" ? "percent" : "fixed" }))}
+          <label className="block text-[10px] sm:text-[11px] font-bold uppercase text-gray-500">Discount</label>
+          <div className="relative">
+            <input
+              ref={discountInputRef}
+              type="text"
+              inputMode="decimal"
+              data-bill-input="true"
+              value={form.discount}
+              onChange={(e) => {
+                const cleaned = e.target.value.replace(/[^\d]/g, "");
+                setForm((p) => ({ ...p, discount: cleaned, discountType: 'fixed' }));
+              }}
+              onFocus={(e) => setTimeout(() => e.target.select(), 10)}
               disabled={screenLocked}
+              autoComplete="off" spellCheck={false}
               className={cn(
-                "px-3 rounded-xl font-bold text-sm shrink-0",
-                isDark ? "bg-yellow-500/20 text-yellow-400 hover:bg-yellow-500/30" : "bg-yellow-100 text-yellow-700 hover:bg-yellow-200",
+                inputCls("discount"),
+                "font-semibold font-mono px-2 sm:px-3 py-2 text-xs sm:text-sm w-full",
+                discExceeded && "border-red-500 ring-1 ring-red-500/30",
               )}
-            >
-              {form.discountType === "percent" ? "%" : "Rs"}
-            </button>
+            />
+            <FieldMic fieldName="discount" onResult={handleDiscountSpeech} speech={speech} />
           </div>
         </div>
       )}
@@ -413,27 +388,6 @@ const ItemEntryForm = memo(({
               Rs.{previewTotal.toLocaleString()}
               {!discExceeded && " ✓"}
             </span>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* Commission Preview */}
-      <AnimatePresence>
-        {salespersonEnabled && currentAgent && previewCommission > 0 && (
-          <motion.div
-            initial={{ opacity: 0, y: 4 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0 }}
-            className={cn(
-              "flex items-center justify-between px-3 py-2 rounded-xl border text-sm",
-              isDark ? "bg-emerald-500/5 border-emerald-500/20 text-emerald-400" : "bg-emerald-50 border-emerald-200 text-emerald-700",
-            )}
-          >
-            <span className="flex items-center gap-1.5 min-w-0">
-              <UserCheck size={12} />
-              <span className="truncate font-medium">{currentAgent.name}</span>
-            </span>
-            <span className="font-mono font-bold text-[14px]">+Rs.{previewCommission.toLocaleString()}</span>
           </motion.div>
         )}
       </AnimatePresence>
@@ -479,7 +433,7 @@ const ItemEntryForm = memo(({
               }}
               onBlur={() => setTimeout(() => { if (activeField === "name") { onSetShowSug?.(false); onSetActiveField?.(""); } }, 200)}
               disabled={screenLocked}
-              placeholder="Walking Customer"
+              autoComplete="off" spellCheck={false}
               className={cn(inputCls("customerName"), "pl-8 pr-8 py-2 text-sm")}
             />
             <FieldMic fieldName="customerName" onResult={handleCustNameSpeech} speech={speech} />
@@ -546,7 +500,7 @@ const ItemEntryForm = memo(({
               }}
               onBlur={() => setTimeout(() => { if (activeField === "phone") { onSetShowSug?.(false); onSetActiveField?.(""); } }, 200)}
               disabled={screenLocked}
-              placeholder="03XX-XXXXXXX"
+              autoComplete="off" spellCheck={false}
               maxLength={12}
               className={cn(inputCls("phone"), "px-3 py-2 pr-8 text-sm")}
             />
@@ -619,10 +573,8 @@ const ItemEntryForm = memo(({
       </motion.button>
 
       {lastEntryPrice && (
-        <p className="text-center text-[10px] text-gray-500">
-          ↵ Rs.{lastEntryPrice}
-          {lastEntryDiscount > 0 && ` −${lastEntryDiscount}${lastEntryDiscountType === "percent" ? "%" : ""}`}
-          {" "}×{lastEntryQty} · qty+Enter to dup
+        <p className="text-center text-[10px] text-gray-500 font-mono">
+          {Number(lastEntryPrice).toLocaleString()} ×{lastEntryQty}
         </p>
       )}
     </motion.div>

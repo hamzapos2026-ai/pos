@@ -7,7 +7,7 @@ import {
   collection, doc, addDoc, updateDoc, deleteDoc, serverTimestamp, onSnapshot 
 } from '../../services/firebase';
 import { db, isFirebaseReady } from '../../services/firebase';
-import toast from 'react-hot-toast';
+import { toast } from 'react-hot-toast';
 import { cn } from '../../utils/cn';
 import { useTheme } from '../../context/ThemeContext';
 import { useAuth } from '../../context/AuthContext';
@@ -20,25 +20,27 @@ import Badge from '../../components/ui/Badge';
 import PageHeader from '../../components/admin/PageHeader';
 import EmptyState from '../../components/admin/EmptyState';
 import StatCard from '../../components/admin/StatCard';
+import { useLanguage } from '../../hooks/useLanguage';
 
 const BranchForm = ({ formData, setFormData, onSubmit, onCancel, submitLabel, isSubmitting }) => {
   const { isDark } = useTheme();
+  const { t } = useLanguage();
   return (
     <div className="space-y-4">
       <Input 
-        label="Branch Name" 
-        placeholder="E.g., Clifton Gold Arcade" 
+        label={t('admin.branchesPage.branchName', 'Branch Name')}
+        placeholder={t('admin.branchesPage.branchNamePh', 'E.g., Clifton Gold Arcade')} 
         value={formData.name} 
         onChange={(e) => setFormData((p) => ({ ...p, name: e.target.value }))} 
         leftIcon={<Building2 className="w-4 h-4 text-amber-500" />} 
       />
       <div className="space-y-1.5">
-        <label className={cn('text-xs font-semibold uppercase tracking-wider', isDark ? 'text-gray-400' : 'text-gray-600')}>Location / Address</label>
+        <label className={cn('text-xs font-semibold uppercase tracking-wider', isDark ? 'text-gray-400' : 'text-gray-600')}>{t('admin.branchesPage.location', 'Location / Address')}</label>
         <textarea
           rows={3}
           value={formData.location}
           onChange={(e) => setFormData((p) => ({ ...p, location: e.target.value }))}
-          placeholder="E.g., Shop 42, Gold Bazar, Tariq Road, Karachi"
+          placeholder={t('admin.branchesPage.locationPh', 'E.g., Shop 42, Gold Bazar, Tariq Road, Karachi')}
           className={cn(
             'w-full px-3 py-2 rounded-xl text-xs resize-none outline-none transition-all',
             isDark 
@@ -48,16 +50,16 @@ const BranchForm = ({ formData, setFormData, onSubmit, onCancel, submitLabel, is
         />
       </div>
       <Input 
-        label="Phone Number" 
-        placeholder="E.g., 0316-2502498" 
+        label={t('admin.branchesPage.phone', 'Phone Number')}
+        placeholder={t('admin.branchesPage.phonePh', 'E.g., 0316-2502498')} 
         value={formData.phone} 
         onChange={(e) => setFormData((p) => ({ ...p, phone: e.target.value }))} 
         leftIcon={<Phone className="w-4 h-4 text-amber-500" />} 
       />
       <Input 
-        label="Email Address" 
+        label={t('admin.branchesPage.email', 'Email Address')}
         type="email" 
-        placeholder="E.g., branch@aonejewelry.com" 
+        placeholder={t('admin.branchesPage.emailPh', 'E.g., branch@aonejewelry.com')} 
         value={formData.email} 
         onChange={(e) => setFormData((p) => ({ ...p, email: e.target.value }))} 
         leftIcon={<Mail className="w-4 h-4 text-amber-500" />} 
@@ -70,13 +72,13 @@ const BranchForm = ({ formData, setFormData, onSubmit, onCancel, submitLabel, is
           onChange={(e) => setFormData((p) => ({ ...p, isActive: e.target.checked }))} 
           className="w-4 h-4 rounded text-amber-500 bg-[#0a0805] border-[#2a1f0d] focus:ring-amber-500 focus:ring-offset-0 focus:ring-1" 
         />
-        <span className={cn('text-xs font-medium', isDark ? 'text-gray-300' : 'text-gray-700')}>Mark Branch Active</span>
+        <span className={cn('text-xs font-medium', isDark ? 'text-gray-300' : 'text-gray-700')}>{t('admin.branchesPage.markActive', 'Mark Branch Active')}</span>
       </label>
 
       <div className="flex gap-2 pt-3 border-t border-[#2a1f0d]/50">
-        <Button variant="secondary" onClick={onCancel} className="flex-1 rounded-xl" disabled={isSubmitting}>Cancel</Button>
+        <Button variant="secondary" onClick={onCancel} className="flex-1 rounded-xl" disabled={isSubmitting}>{t('common.cancel', 'Cancel')}</Button>
         <Button variant="primary" onClick={onSubmit} className="flex-1 rounded-xl font-semibold" disabled={isSubmitting}>
-          {isSubmitting ? 'Processing...' : submitLabel}
+          {isSubmitting ? t('admin.branchesPage.processing', 'Processing...') : submitLabel}
         </Button>
       </div>
     </div>
@@ -87,6 +89,7 @@ const BranchManagement = () => {
   const { isDark } = useTheme();
   const { user } = useAuth();
   const { isOnline } = useNetwork();
+  const { t, isRTL } = useLanguage();
   
   // Data States
   const [branches, setBranches] = useState([]);
@@ -124,7 +127,7 @@ const BranchManagement = () => {
         setLoading(false);
       }, (err) => {
         console.error('[BranchManagement] Store stream error:', err);
-        toast.error('Failed to bind real-time stores feed');
+        toast.error(t('admin.branchesPage.feedFailed', 'Failed to bind real-time stores feed'));
         setLoading(false);
       });
 
@@ -168,7 +171,7 @@ const BranchManagement = () => {
 
   // Handle Create Branch
   const handleCreate = async () => {
-    if (!form.name.trim()) return toast.error('Branch name required');
+    if (!form.name.trim()) return toast.error(t('admin.branchesPage.nameRequired', 'Branch name required'));
     setIsSubmitting(true);
 
     try {
@@ -192,12 +195,12 @@ const BranchManagement = () => {
         { branchName: form.name.trim(), initiator: user?.email || 'admin' }
       ).catch(e => console.warn('Activity logger fail:', e));
 
-      toast.success(`Branch "${form.name}" created successfully`);
+      toast.success(t('admin.branchesPage.created', 'Branch created', { name: form.name }));
       setShowCreate(false);
       setForm({ name: '', location: '', phone: '', email: '', isActive: true });
     } catch (e) {
       console.error('[BranchManagement] Create failed:', e);
-      toast.error(`Create failed: ${e.message}`);
+      toast.error(t('admin.branchesPage.createFailed', 'Create failed: {{msg}}', { msg: e.message }));
     } finally {
       setIsSubmitting(false);
     }
@@ -206,7 +209,7 @@ const BranchManagement = () => {
   // Handle Update Branch
   const handleUpdate = async () => {
     if (!selected) return;
-    if (!form.name.trim()) return toast.error('Branch name required');
+    if (!form.name.trim()) return toast.error(t('admin.branchesPage.nameRequired', 'Branch name required'));
     setIsSubmitting(true);
 
     try {
@@ -228,12 +231,12 @@ const BranchManagement = () => {
         { branchName: form.name.trim(), initiator: user?.email || 'admin' }
       ).catch(e => console.warn('Activity logger fail:', e));
 
-      toast.success('Branch details updated');
+      toast.success(t('admin.branchesPage.updated', 'Branch details updated'));
       setShowEdit(false);
       setSelected(null);
     } catch (e) {
       console.error('[BranchManagement] Update failed:', e);
-      toast.error(`Update failed: ${e.message}`);
+      toast.error(t('admin.branchesPage.updateFailed', 'Update failed: {{msg}}', { msg: e.message }));
     } finally {
       setIsSubmitting(false);
     }
@@ -246,7 +249,7 @@ const BranchManagement = () => {
     );
     
     if (assignedStaff.length > 0) {
-      toast.error(`Safety Lock: Cannot delete branch. ${assignedStaff.length} user(s) remain assigned!`);
+      toast.error(t('admin.branchesPage.safetyLock', 'Cannot delete branch. {{count}} user(s) remain assigned!', { count: assignedStaff.length }));
       return;
     }
 
@@ -263,10 +266,10 @@ const BranchManagement = () => {
         { branchName: b.name, initiator: user?.email || 'admin' }
       ).catch(e => console.warn('Activity logger fail:', e));
 
-      toast.success(`Branch "${b.name}" erased successfully`);
+      toast.success(t('admin.branchesPage.erased', 'Branch erased', { name: b.name }));
     } catch (e) {
       console.error('[BranchManagement] Erase failed:', e);
-      toast.error(`Erase failed: ${e.message}`);
+      toast.error(t('admin.branchesPage.eraseFailed', 'Erase failed: {{msg}}', { msg: e.message }));
     }
   };
 
@@ -302,13 +305,13 @@ const BranchManagement = () => {
   }, [branches, search, statusFilter]);
 
   return (
-    <div className="p-4 sm:p-6 max-w-[1600px] mx-auto min-h-screen">
+    <div dir={isRTL ? 'rtl' : 'ltr'} className="p-4 sm:p-6 max-w-[1600px] mx-auto min-h-screen">
       
       {/* Page Header */}
       <PageHeader 
         icon={Store} 
-        title="Branch Control Center" 
-        description="Verify active store locations, manage branch terminals, and evaluate operator assignments" 
+        title={t('admin.branchesPage.title', 'Branch Control Center')}
+        description={t('admin.branchesPage.subtitle', 'Verify active store locations, manage branch terminals, and evaluate operator assignments')}
         actions={
           <Button 
             variant="primary" 
@@ -319,17 +322,17 @@ const BranchManagement = () => {
             }}
             className="rounded-xl font-bold"
           >
-            Add Store Branch
+            {t('admin.branchesPage.addBranch', 'Add Branch')}
           </Button>
         } 
       />
 
       {/* Dynamic Gold Gradient Stat Cards */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-4 mb-6">
-        <StatCard label="Total Branches" value={stats.total} icon={Store} color="amber" />
-        <StatCard label="Active Stores" value={stats.active} icon={Building2} color="green" />
-        <StatCard label="Closed / Suspended" value={stats.inactive} icon={AlertTriangle} color="rose" />
-        <StatCard label="Registered Staff" value={stats.totalStaff} icon={Plus} color="blue" />
+        <StatCard label={t('admin.branchesPage.totalBranches', 'Total Branches')} value={stats.total} icon={Store} color="amber" />
+        <StatCard label={t('admin.branchesPage.activeStores', 'Active Stores')} value={stats.active} icon={Building2} color="green" />
+        <StatCard label={t('admin.branchesPage.closedSuspended', 'Closed / Suspended')} value={stats.inactive} icon={AlertTriangle} color="rose" />
+        <StatCard label={t('admin.branchesPage.registeredStaff', 'Registered Staff')} value={stats.totalStaff} icon={Plus} color="blue" />
       </div>
 
       {/* Advanced Filters Panel */}
@@ -345,7 +348,7 @@ const BranchManagement = () => {
               setShowSuggestions(true);
             }} 
             onFocus={() => setShowSuggestions(true)}
-            placeholder="Search by branch name, location, or contact details..." 
+            placeholder={t('admin.branchesPage.searchPh', 'Search by branch name, location, or contact details...')} 
             leftIcon={<Search className="w-4 h-4 text-gray-500" />} 
             className="w-full" 
           />
@@ -386,12 +389,12 @@ const BranchManagement = () => {
               isDark ? 'bg-[#0a0805] border-[#2a1f0d] text-white focus:border-amber-500/50' : 'bg-white border-amber-200 text-gray-900'
             )}
           >
-            <option value="all">All Branches</option>
-            <option value="active">Active Only</option>
-            <option value="inactive">Inactive Only</option>
+            <option value="all">{t('admin.usersPage.allBranches', 'All Branches')}</option>
+            <option value="active">{t('common.active', 'Active')}</option>
+            <option value="inactive">{t('common.inactive', 'Inactive')}</option>
           </select>
           <Button variant="secondary" onClick={() => { setSearch(''); setStatusFilter('all'); }} className="rounded-xl px-4 py-2 text-xs">
-            Reset Filters
+            {t('common.clear', 'Clear')}
           </Button>
         </div>
       </div>
@@ -400,16 +403,16 @@ const BranchManagement = () => {
       {loading ? (
         <div className="text-center py-16 flex flex-col items-center justify-center">
           <div className="w-10 h-10 border-4 border-amber-500/30 border-t-amber-500 rounded-full animate-spin mb-3" />
-          <p className="text-sm text-gray-400">Loading branch registries...</p>
+          <p className="text-sm text-gray-400">{t('common.loading', 'Loading...')}</p>
         </div>
       ) : filteredBranches.length === 0 ? (
         <EmptyState 
           icon={Store} 
-          title="No branch registries found" 
-          description="Adjust query criteria or register a new store branch." 
+          title={t('admin.branchesPage.noBranches', 'No branch registries found')}
+          description={t('admin.branchesPage.noBranchesDesc', 'Adjust query criteria or register a new store branch.')}
           action={
             <Button variant="primary" leftIcon={<Plus className="w-4 h-4" />} onClick={() => setShowCreate(true)}>
-              Register Store
+              {t('admin.branchesPage.registerModal', 'Register Store Branch')}
             </Button>
           }
         />
@@ -462,7 +465,7 @@ const BranchManagement = () => {
                       <td className="px-4 py-3.5 text-gray-300">
                         <div className="flex items-start gap-1 max-w-[280px]">
                           <MapPin className="w-3.5 h-3.5 mt-0.5 text-amber-500 shrink-0" />
-                          <span className="truncate" title={b.location || 'No address specified'}>
+                          <span className="truncate" title={b.location || t('admin.branchesPage.noAddress', 'No address specified')}>
                             {b.location || 'N/A'}
                           </span>
                         </div>
@@ -489,18 +492,18 @@ const BranchManagement = () => {
                       {/* Active Status */}
                       <td className="px-4 py-3.5">
                         <Badge variant={b.isActive ? 'success' : 'secondary'}>
-                          {b.isActive ? 'ACTIVE' : 'INACTIVE'}
+                          {b.isActive ? t('common.active', 'Active').toUpperCase() : t('common.inactive', 'Inactive').toUpperCase()}
                         </Badge>
                       </td>
 
                       {/* Cloud Sync Status */}
                       <td className="px-4 py-3.5 text-center">
                         {isOnline ? (
-                          <span title="Branch registry synced with Firebase" className="inline-flex text-emerald-500">
+                          <span title={t('admin.branchesPage.syncedFirebase', 'Branch registry synced with Firebase')} className="inline-flex text-emerald-500">
                             <Wifi className="w-4 h-4" />
                           </span>
                         ) : (
-                          <span title="Saved locally in Dexie database cache" className="inline-flex text-amber-500 animate-pulse">
+                          <span title={t('admin.branchesPage.savedLocal', 'Saved locally in Dexie database cache')} className="inline-flex text-amber-500 animate-pulse">
                             <Database className="w-4 h-4" />
                           </span>
                         )}
@@ -513,7 +516,7 @@ const BranchManagement = () => {
                             variant="ghost" 
                             size="sm" 
                             onClick={() => openEdit(b)} 
-                            title="Edit details"
+                            title={t('admin.branchesPage.editDetails', 'Edit details')}
                             className="p-1.5"
                           >
                             <Edit className="w-4 h-4 text-amber-500" />
@@ -522,7 +525,7 @@ const BranchManagement = () => {
                             variant="ghost" 
                             size="sm" 
                             onClick={() => handleDelete(b)} 
-                            title="Erase Branch"
+                            title={t('admin.branchesPage.eraseBranch', 'Erase Branch')}
                             className="p-1.5"
                           >
                             <Trash2 className="w-4 h-4 text-rose-500/80 hover:text-rose-500" />
@@ -539,25 +542,25 @@ const BranchManagement = () => {
       )}
 
       {/* Create Modal */}
-      <Modal isOpen={showCreate} onClose={() => setShowCreate(false)} title="Register Store Branch" size="medium">
+      <Modal isOpen={showCreate} onClose={() => setShowCreate(false)} title={t('admin.branchesPage.registerModal', 'Register Store Branch')} size="medium">
         <BranchForm 
           formData={form} 
           setFormData={setForm} 
           onSubmit={handleCreate} 
           onCancel={() => setShowCreate(false)} 
-          submitLabel="Create Branch" 
+          submitLabel={t('admin.branchesPage.createBranch', 'Create Branch')}
           isSubmitting={isSubmitting}
         />
       </Modal>
 
       {/* Edit Modal */}
-      <Modal isOpen={showEdit} onClose={() => setShowEdit(false)} title="Edit Branch Registry" size="medium">
+      <Modal isOpen={showEdit} onClose={() => setShowEdit(false)} title={t('admin.branchesPage.editModal', 'Edit Branch Registry')} size="medium">
         <BranchForm 
           formData={form} 
           setFormData={setForm} 
           onSubmit={handleUpdate} 
           onCancel={() => setShowEdit(false)} 
-          submitLabel="Save Settings" 
+          submitLabel={t('admin.branchesPage.saveSettings', 'Save Settings')}
           isSubmitting={isSubmitting}
         />
       </Modal>

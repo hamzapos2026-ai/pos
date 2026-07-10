@@ -1,4 +1,5 @@
 import localDB, { getSyncQueue, enqueueSync } from './localDB';
+import { getHasInternet } from '../utils/networkReachability';
 import {
   db as firestore,
   isFirebaseReady,
@@ -20,20 +21,40 @@ export const enqueue = async (type, payload) => {
     status: 'pending',
   };
   await enqueueSync(op);
-  // trigger processing
-  processQueue().catch(() => {});
+  // trigger processing only when online and Firestore is ready
+  try {
+    if (getHasInternet() && isFirebaseReady()) {
+      processQueue().catch(() => {});
+    }
+  } catch (e) {
+    // ignore environment issues
+  }
 };
 
 export const processQueue = async () => {
   if (running) return;
   running = true;
   try {
-    const items = await getSyncQueue();
-    if (!items || items.length === 0) return;
+    const allItems = await getSyncQueue();
+    if (!allItems || allItems.length === 0) return;
 
-    // If Firestore is not ready, skip processing
+    // `setting:update` ops (Super Admin settings, role permissions, feature
+    // toggles) are owned by settingsSyncWorker, which replays them to the live
+    // `settings/{key}` docs. Skip them here so they are never double-written
+    // into the generic `sync_ops` collection.
+    const items = allItems.filter((it) => it.type !== 'setting:update');
+    if (items.length === 0) return;
+
+    // If Firestore is not ready or offline, skip processing
+    try {
+      if (!getHasInternet()) {
+        // offline — let retry happen later
+        return;
+      }
+    } catch (e) {
+      // ignore
+    }
     if (!isFirebaseReady() || !firestore) {
-      // mark nothing; caller can retry later
       return;
     }
 

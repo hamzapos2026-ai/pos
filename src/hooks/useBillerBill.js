@@ -10,7 +10,7 @@ import { getNextItemSerial } from "../services/serialService";
 import { generateLineItemId } from "../utils/billIdGenerator";
 
 const fmtItemSerial = (n) =>
-  String(Math.max(1, Number(n) || 1)).padStart(2, "0");
+  String(Math.max(1, Number(n) || 1));
 
 const lineUnitPrice = (p) => {
   if (typeof p === "number" && Number.isFinite(p)) return Math.max(0, p);

@@ -15,8 +15,14 @@ export const clearAllCaches = async () => {
 
     // 1. Clear localStorage (except critical app settings)
     const keysToKeep = [
-      'aone_device_id', // Keep device ID for continuity
-      'aone_sound_enabled_', // Keep user sound preferences
+      'aone_device_id',
+      'aone_sound_enabled_',
+      'aone-setup-complete',
+      'aone_setup_permanent_lock',
+      'aone_setup_date',
+      'aone_setup_version',
+      'aone_setup_complete_enc',
+      'aone_backup_schedule',
     ];
 
     const localStorageKeys = Object.keys(localStorage);
@@ -56,6 +62,11 @@ export const clearAllCaches = async () => {
  */
 export const clearDexieDatabase = async () => {
   try {
+    let setupCacheRow = null;
+    try {
+      setupCacheRow = await db.settings_cache.get('system_setup_done_enc');
+    } catch { /* ignore */ }
+
     // Clear all tables
     await db.drafts.clear();
     await db.settings_cache.clear();
@@ -80,6 +91,10 @@ export const clearDexieDatabase = async () => {
 
     // Orders table (legacy + offline bills)
     await db.orders.clear();
+
+    if (setupCacheRow) {
+      try { await db.settings_cache.put(setupCacheRow); } catch { /* ignore */ }
+    }
 
     console.log('[CacheUtils] Dexie database cleared');
     return { success: true };

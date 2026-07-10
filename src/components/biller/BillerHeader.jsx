@@ -13,29 +13,31 @@ import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Search, UserPlus, User, X, Wifi, WifiOff,
-  Volume2, VolumeX, Hash, Clock, Lock, Unlock,
+  Volume2, VolumeX, Hash, Clock, Lock,
   Loader2, Phone, MapPin, Database, ChevronDown,
   Sun, Moon, Languages, LogOut, Settings, Gem,
   Menu, CreditCard, ShoppingBag, Download, Trash2,
   Crown, ShieldCheck, Users, Receipt, Building2,
-  CheckCircle2, Clock3, Plus, Package,
+  CheckCircle2, Clock3, Plus, Package, CheckCircle,
   Eye, EyeOff, Zap, MoreHorizontal, Bell,
-  Mic, MicOff, Music, Calculator,
+  Mic, MicOff, Music, Calculator, AlertCircle, RefreshCw,
 } from 'lucide-react';
 import {
   collection, query, where, limit,
   onSnapshot, getDocs, orderBy, doc,
 } from '../../services/firebase';
-import toast from 'react-hot-toast';
+import { toast } from 'react-hot-toast';
+import { BILLER_TOP5_LISTENER_LIMIT, BILLER_TOP5_OFFLINE_POLL_MS } from '../../utils/firebaseQuotaConfig';
+import { showBillerBillToast } from '../../utils/billerOrderToast';
 
 import { db } from '../../services/firebase';
 import { db as localDb } from '../../db/index';
-import { getRecentOrders } from '../../services/localBillService';
+import { getBillerTop5OrdersLocal } from '../../services/localBillService';
 import { useTheme } from '../../context/ThemeContext';
 import { useLanguage } from '../../hooks/useLanguage';
 import { useAuth } from '../../context/AuthContext';
 import { useNetwork } from '../../context/NetworkContext';
-import { useNextSerial } from '../../hooks/useNextSerial';
+import { getHasInternet } from '../../utils/networkReachability';
 import { useSound } from '../../hooks/useSound';
 import {
   cacheLoad,
@@ -50,7 +52,21 @@ import {
 } from '../../utils/customerUtils';
 import { ROLE_INFO } from '../../utils/rolePermissions';
 import { cn } from '../../utils/cn';
+import InvoicePrint from './InvoicePrint';
 import { relativeTime, toSafeDate } from '../../utils/dateHelpers';
+import { useSettings } from '../../context/SettingsContext';
+import { buildInvoicePrintProps, getOrderDisplayTotal } from '../../utils/invoiceUtils';
+import { normalizeSerial, serialTail, compareSerialsDesc, serialSortKey } from '../../utils/serialMatch';
+import { extractSerialNumber } from '../../services/serialService';
+import { INSTANT_ORDER_EVENT, INSTANT_PENDING_LS_KEY } from '../../utils/billChannelUtils';
+import useStoresMap, { resolveStoreName, findStoreRecord, getStoreDisplayName, resolveEffectiveStoreId, orderMatchesStore } from '../../hooks/useStoresMap';
+import {
+  previewCountingSpeech,
+  ensureSpeechVoices,
+  ensureUrduVoicesReady,
+  primeSpeechEngine,
+  resolveCountingSpeechOpts,
+} from '../../utils/countingSpeech';
 
 // ══════════════════════════════════════════════════════════════
 // CONSTANTS
@@ -58,7 +74,7 @@ import { relativeTime, toSafeDate } from '../../utils/dateHelpers';
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const SEARCH_DEBOUNCE_MS = 150;
 const MAX_TABS = 10;
-const TOP5_CACHE_PREFIX = 'pos_top5_';
+const TOP5_CACHE_PREFIX = 'pos_top5_v9_';
 const BILLING_CHANNEL = 'aone_pos_billing';
 const ORDERS_CHANNEL = 'aone_pos_orders';
 
@@ -97,8 +113,11 @@ const T = {
     alerts: 'Alerts',
     newTab: 'New tab',
     orders: 'Orders',
+    recent: 'Recent',
     recentOrders: 'Recent Orders',
-    syncedToCloud: 'Synced to cloud',
+    syncedToCloud: 'Local & online bills',
+    billPaidByCashier: 'Bill paid by cashier',
+    localAndCloud: 'Local & cloud — latest 5',
     live: 'LIVE',
     cached: 'CACHED',
     noOrders: 'No synced orders yet',
@@ -133,6 +152,23 @@ const T = {
     switchedTo: 'Switched to',
     clearCacheConfirm: 'Clear all local cache?\nPage will reload.',
     biller: 'Biller',
+    countingOn: 'Counting: ON',
+    countingOff: 'Counting: OFF',
+    enableCounting: 'Enable counting',
+    disableCounting: 'Disable counting',
+    voiceLanguage: 'Voice Language',
+    voiceAuto: 'Auto',
+    voiceUrdu: 'Urdu',
+    voiceRomanUrdu: 'Roman Urdu',
+    voiceOff: 'Off',
+    voiceVolume: 'Volume',
+    english: 'English',
+    voiceSpeed: 'Voice Speed',
+    speedSlow: 'Slow',
+    speedNormal: 'Normal',
+    speedFast: 'Fast',
+    testVoice: 'Test',
+    speedHint: '200 to 2 / char so se do',
   },
   ur: {
     posSystem: 'پی او ایس سسٹم',
@@ -165,8 +201,10 @@ const T = {
     alerts: 'الرٹس',
     newTab: 'نیا ٹیب',
     orders: 'آرڈرز',
+    recent: 'حالیہ',
     recentOrders: 'حالیہ آرڈرز',
-    syncedToCloud: 'کلاؤڈ پر سنک',
+    syncedToCloud: 'لوکل اور آن لائن بل',
+    localAndCloud: 'لوکل اور کلاؤڈ — تازہ 5',
     live: 'لائیو',
     cached: 'کیشڈ',
     noOrders: 'ابھی کوئی سنک شدہ آرڈر نہیں',
@@ -201,6 +239,23 @@ const T = {
     switchedTo: 'تبدیل ہو گیا',
     clearCacheConfirm: 'تمام لوکل کیشے صاف کریں؟\nصفحہ ری لوڈ ہوگا۔',
     biller: 'بلر',
+    countingOn: 'گنتی: آن',
+    countingOff: 'گنتی: آف',
+    enableCounting: 'گنتی چالو کریں',
+    disableCounting: 'گنتی بند کریں',
+    voiceLanguage: 'آواز کی زبان',
+    voiceAuto: 'خودکار',
+    voiceUrdu: 'اردو',
+    voiceRomanUrdu: 'رومن اردو',
+    voiceOff: 'بند',
+    voiceVolume: 'آواز',
+    english: 'انگریزی',
+    voiceSpeed: 'آواز کی رفتار',
+    speedSlow: 'آہستہ',
+    speedNormal: 'عام',
+    speedFast: 'تیز',
+    testVoice: 'آزمائیں',
+    speedHint: 'do so se do پیش نظارہ',
   },
 };
 
@@ -461,212 +516,598 @@ const Chip = memo(({ children, color = 'gray', isDark, className }) => {
 });
 Chip.displayName = 'Chip';
 
+const _isPendingLocalOrder = (o) => {
+  if (!o) return false;
+  if (o.synced === true || o.syncStatus === 'synced') return false;
+  return o.syncStatus === 'pending' || o.syncStatus === 'syncing' || o.syncStatus === 'failed';
+};
+
+const _orderSerialKey = (o) => normalizeSerial(o?.serialNo || o?.billSerial || o?.billNo || '');
+
+const _serialNum = (o) => extractSerialNumber(_orderSerialKey(o)) || 0;
+
+const _storeIdAliases = (storeId, storesMap = {}) => {
+  const primary = resolveEffectiveStoreId(storeId, storesMap);
+  const hit = findStoreRecord(storeId, storesMap);
+  const keys = new Set([String(storeId || '').trim(), primary, hit?.id, hit?.shortCode, hit?.storeCode, hit?.branchCode, hit?.code].filter(Boolean));
+  return keys;
+};
+
+const _matchesStoreTop5 = (o, storeId, storeAliases = null) => {
+  if (!o) return false;
+  const key = _orderSerialKey(o);
+  if (!key) return false;
+  if (storeId) {
+    const allowed = storeAliases instanceof Set ? storeAliases : new Set([storeId].filter(Boolean));
+    const sid = o.storeId || o.branchId;
+    if (sid && allowed.size && !allowed.has(sid) && !orderMatchesStore(o, [...allowed])) {
+      return false;
+    }
+  }
+  return true;
+};
+
+/** @deprecated — store-wide top 5, all billers */
+const _matchesBillerTop5 = (o, storeId, billerId, storeAliases = null) =>
+  _matchesStoreTop5(o, storeId, storeAliases);
+
+/** Global lifetime serial # — date+counter; falls back to timestamp for legacy suffix serials */
+const _top5SerialNum = (o) => {
+  const sk = serialSortKey(_orderSerialKey(o));
+  if (sk > 0) return sk;
+  return toMs(o.createdAt || o.savedAt || o.billerSubmittedAt || o._ts) || 0;
+};
+
+const _orderRecentTs = (o) => toMs(o?.createdAt || o?.savedAt || o?.billerSubmittedAt || o?._ts) || 0;
+
+/** Top 5 header: most recently created/saved bills first */
+const sortTop5ByRecent = (orders) => [...orders].sort((a, b) => {
+  const ta = _orderRecentTs(a);
+  const tb = _orderRecentTs(b);
+  if (tb !== ta) return tb - ta;
+  const na = _top5SerialNum(a);
+  const nb = _top5SerialNum(b);
+  return nb - na;
+});
+
+const sortTop5Desc = (orders) => [...orders].sort((a, b) => {
+  const na = _top5SerialNum(a);
+  const nb = _top5SerialNum(b);
+  if (nb !== na) return nb - na;
+  return _orderRecentTs(b) - _orderRecentTs(a);
+});
+
+const sortBySerialDesc = sortTop5Desc;
+
+const _billerCashierPaid = (o) => Boolean(
+  o?.cashierPaymentReceived
+  || o?.cashierHandover
+  || String(o?.paymentStatus || '').toLowerCase() === 'cashier_paid',
+);
+
+/** Biller Top5: cashier paid = notification only, not "paid" badge in list */
+const mapRecentOrder = (o, idx = 0) => {
+  const base = {
+    id: o.firebaseId || o.localId || o.id || `local_${idx}`,
+    ...o,
+    _ts: toMs(o.createdAt || o.savedAt || o.billerSubmittedAt) || 0,
+  };
+  if (!_billerCashierPaid(base)) return base;
+  return {
+    ...base,
+    _cashierPaidNotify: true,
+    _underlyingPaymentStatus: base.paymentStatus,
+    paymentStatus: 'pending_payment',
+    status: base.status === 'paid' || base.status === 'cashier_paid' ? 'pending' : (base.status || 'pending'),
+  };
+};
+
+const _toastBillerCashierPaid = (orders) => {
+  (orders || []).forEach((o) => {
+    const ps = String(o?.paymentStatus || '').toLowerCase();
+    const st = String(o?.status || '').toLowerCase();
+    const actuallyPaid = o?.cashierPaymentReceived
+      || ps === 'cashier_paid' || ps === 'paid'
+      || st === 'cashier_paid' || st === 'paid';
+    if (!actuallyPaid) return;
+    const serial = _orderSerialKey(o);
+    if (!serial) return;
+    const amt = o.cashierPaymentAmount || o.paidAmount || o.totalAmount || o.grandTotal || 0;
+    const name = o.cashierPaymentBy || o.paidByName || 'Cashier';
+    showBillerBillToast('paid', { serial, amount: amt, cashierName: name });
+  });
+};
+
+const loadCachedTop5 = (cacheKey) => {
+  const cached = safeJSON(cacheKey);
+  return Array.isArray(cached) ? cached : [];
+};
+
+const _orderItemCount = (o) => {
+  const raw = o?.items || o?.cartItems || o?.products || o?.bill_items || [];
+  return Array.isArray(raw) ? raw.filter(Boolean).length : 0;
+};
+
+const _pickOrderItems = (...records) => {
+  for (const rec of records) {
+    const items = rec?.items || rec?.cartItems || rec?.products;
+    if (Array.isArray(items) && items.length > 0) return items;
+  }
+  return [];
+};
+
+const _mergeTop5Record = (existing, incoming) => {
+  if (!existing) return incoming;
+  if (!incoming) return existing;
+  const eItems = _orderItemCount(existing);
+  const iItems = _orderItemCount(incoming);
+  const isSynced = (o) => o?.syncStatus === 'synced' || o?.synced === true;
+  let base = incoming;
+  if (iItems === 0 && eItems > 0) base = existing;
+  else if (iItems > 0 && eItems === 0) base = incoming;
+  else {
+    const inSynced = isSynced(incoming);
+    const exSynced = isSynced(existing);
+    if (inSynced && !exSynced) base = incoming;
+    else if (!inSynced && exSynced) base = existing;
+    else base = (incoming._ts || 0) >= (existing._ts || 0) ? incoming : existing;
+  }
+  return {
+    ...existing,
+    ...incoming,
+    ...base,
+    items: _pickOrderItems(base, incoming, existing),
+  };
+};
+
+const mergeAllRecentOrders = (localOrders, firebaseOrders, max = 5, billerId = null, storeId = null, storeAliases = null, preferRemote = false) => {
+  const remote = (firebaseOrders || []).filter((o) => _matchesStoreTop5(o, storeId, storeAliases));
+  if (preferRemote) {
+    return sortTop5ByRecent(remote).slice(0, max);
+  }
+
+  const bySerial = new Map();
+  const add = (o) => {
+    if (!_matchesStoreTop5(o, storeId, storeAliases)) return;
+    const key = _orderSerialKey(o);
+    if (!key) return;
+    const existing = bySerial.get(key);
+    bySerial.set(key, existing ? _mergeTop5Record(existing, o) : o);
+  };
+  (firebaseOrders || []).forEach(add);
+  (localOrders || []).forEach(add);
+  return sortTop5ByRecent(Array.from(bySerial.values())).slice(0, max);
+};
+
+/** Load all local bills for biller Top 5 — merged with cloud for full line items. */
+const loadLocalTop5 = async (storeId, billerId, storeAliases = null, skipWhenOnline = false) => {
+  if (skipWhenOnline || !storeId) return [];
+  try {
+    const recent = await getBillerTop5OrdersLocal(storeId, billerId);
+    const aliasList = storeAliases instanceof Set ? [...storeAliases] : [storeId];
+    const expanded = aliasList.length
+      ? (await Promise.all(aliasList.map((sid) => getBillerTop5OrdersLocal(sid, billerId)))).flat()
+      : recent;
+    const mergedLocal = expanded.length ? expanded : recent;
+    const byKey = new Map();
+    (mergedLocal || []).forEach((o) => {
+      const k = _orderSerialKey(o);
+      if (k) byKey.set(k, o);
+    });
+    return [...byKey.values()].map(mapRecentOrder);
+  } catch {
+    return [];
+  }
+};
+
+const _asCloudOrder = (o) => ({
+  ...o,
+  synced: true,
+  syncStatus: 'synced',
+});
+
+const mapFirebaseTopOrders = (snap, storeId, billerId, storeAliases = null) =>
+  snap.docs
+    .map((d) => mapRecentOrder(_asCloudOrder({ id: d.id, ...d.data() })))
+    .filter((o) => _matchesStoreTop5(o, storeId, storeAliases));
+
+/** Firestore top orders — fast server fetch, sort by most recent (all billers). */
+const fetchFirebaseTopOrders = async (storeId, billerId, hasInternet = true, storeAliases = null) => {
+  if (!storeId || !hasInternet) return [];
+  try {
+    const { fetchRecentOrdersByStore } = await import('../../utils/ordersQueryUtils');
+    const rows = await fetchRecentOrdersByStore({ storeId, limitCount: 400 });
+    return sortTop5ByRecent(
+      rows
+        .map((o, idx) => mapRecentOrder(_asCloudOrder({ id: o.id, ...o }), idx))
+        .filter((o) => _matchesStoreTop5(o, storeId, storeAliases)),
+    );
+  } catch (err) {
+    console.warn('[Top5] fetch failed:', err?.message || err);
+    return [];
+  }
+};
+
+const _top5MaxSerial = (orders) => {
+  if (!Array.isArray(orders) || !orders.length) return 0;
+  return Math.max(...orders.map(_top5SerialNum));
+};
+
+const mergeAndSaveTop5 = (localMapped, firebaseDocs, cacheKey, billerId, storeId, _preferRemote = false, storeAliases = null) => {
+  const remote = Array.isArray(firebaseDocs) ? firebaseDocs : [];
+  const merged = mergeAllRecentOrders(localMapped, remote, 5, billerId, storeId, storeAliases, false);
+  const final = merged.length > 0
+    ? merged
+    : sortTop5ByRecent(remote).slice(0, 5);
+
+  if (final.length > 0) {
+    try { localStorage.setItem(cacheKey, JSON.stringify(final)); } catch { /* ignore */ }
+  }
+  return final;
+};
+
+const _top5Fingerprint = (list) => (list || []).map((o) => [
+  _orderSerialKey(o),
+  o.syncStatus,
+  o.paymentStatus,
+  o.cashierPaymentReceived ? '1' : '0',
+].join(':')).join('|');
+
+const _normalizeTop5AgainstRemote = (merged, remote) => {
+  if (!Array.isArray(merged) || !merged.length) return merged;
+  const remoteBySerial = new Map((remote || []).map((o) => [_orderSerialKey(o), o]));
+  return merged.map((o) => {
+    const key = _orderSerialKey(o);
+    const cloud = remoteBySerial.get(key);
+    if (!cloud) return o;
+    const stuckLocal = o.syncStatus === 'syncing' || o.syncStatus === 'pending' || o.syncStatus === 'failed';
+    if (!stuckLocal) return o;
+    return {
+      ...cloud,
+      ...o,
+      items: _pickOrderItems(o, cloud),
+      synced: true,
+      syncStatus: 'synced',
+      firebaseId: cloud.firebaseId || cloud.id || o.firebaseId,
+    };
+  });
+};
+
+const OrderSyncIcon = ({ order }) => {
+  if (order?.syncStatus === 'synced' || order?.synced === true) {
+    return <CheckCircle2 size={10} className="text-emerald-500 shrink-0" />;
+  }
+  if (order?.syncStatus === 'failed') {
+    return <AlertCircle size={10} className="text-red-400 shrink-0" />;
+  }
+  if (order?.syncStatus === 'syncing') {
+    return <RefreshCw size={10} className="text-blue-400 shrink-0 animate-spin" />;
+  }
+  return <Clock3 size={10} className="text-amber-400 shrink-0" />;
+};
+
 // ══════════════════════════════════════════════════════════════
 // ✅ FIXED: TOP 5 LIVE ORDERS — with text label
 // ══════════════════════════════════════════════════════════════
 const Top5LiveBadge = memo(({
-  storeId, billerId, isDark, isOnline, onViewInvoice, t, rtl,
+  storeId, billerId, branchLabel = '', storeAliases = null, isDark, isOnline, onViewInvoice, t, rtl,
 }) => {
-  const { playLog, speak } = useSound();
+  const branchName = String(branchLabel || '').trim();
+  const top5Subtitle = branchName
+    ? `${branchName} · ${isOnline ? t.localAndCloud : t.cached}`
+    : (isOnline ? t.localAndCloud : t.cached);
+  const { playLog } = useSound();
   const [orders, setOrders] = useState([]);
   const [loading, setLoading] = useState(true);
   const [open, setOpen] = useState(false);
   const [lastSync, setLastSync] = useState(null);
+  const aliasSet = useMemo(
+    () => (storeAliases instanceof Set ? storeAliases : new Set([storeId].filter(Boolean))),
+    [storeAliases, storeId],
+  );
+  const aliasKey = useMemo(() => [...aliasSet].sort().join('|'), [aliasSet]);
   const cacheKey = `${TOP5_CACHE_PREFIX}${storeId}_${billerId || 'all'}`;
 
   useEffect(() => {
-    let cancelled = false;
-    const cached = safeJSON(cacheKey);
-    if (Array.isArray(cached) && cached.length > 0) {
+    try {
+      Object.keys(localStorage).forEach((key) => {
+        if (key.startsWith('pos_top5_v') && !key.startsWith(TOP5_CACHE_PREFIX)) {
+          localStorage.removeItem(key);
+        }
+      });
+    } catch { /* ignore */ }
+  }, []);
+
+  useEffect(() => {
+    const cached = loadCachedTop5(cacheKey);
+    if (cached.length > 0) {
       setOrders(cached);
       setLoading(false);
     }
-
-    const loadLocal = async () => {
-      if (!storeId) return;
-      try {
-        const recent = await getRecentOrders(storeId, 5);
-        if (cancelled) return;
-        if (Array.isArray(recent) && recent.length > 0) {
-          const mapped = recent.map((o, idx) => ({
-            id: o.firebaseId || o.localId || `local_${idx}`,
-            ...o,
-            _ts: toMs(o.createdAt || o.savedAt) || Date.now(),
-          }));
-          setOrders(mapped);
-          setLoading(false);
-          try { localStorage.setItem(cacheKey, JSON.stringify(mapped)); } catch { }
-        }
-      } catch (e) { /* ignore */ }
-    };
-
-    loadLocal();
-    return () => { cancelled = true; };
   }, [cacheKey]);
 
   useEffect(() => {
-    if (!storeId || !isOnline) { setLoading(false); return; }
+    let cancelled = false;
 
-    const constraints = [
-      where('storeId', '==', storeId),
-      orderBy('createdAt', 'desc'),
-      limit(50),
-    ];
-    if (billerId) constraints.push(where('billerId', '==', billerId));
-
-    const q = query(collection(db, 'orders'), ...constraints);
-
-    const unsub = onSnapshot(
-      q,
-      (snap) => {
-        const docs = snap.docs.map((d) => ({
-          id: d.id, ...d.data(),
-          _ts: toMs(d.data().createdAt) || Date.now(),
-        }));
-        const filtered = docs
-          .filter((d) => d?.syncStatus === 'synced' || d?.synced === true)
-          .sort((a, b) => (b._ts || 0) - (a._ts || 0))
-          .slice(0, 5);
-
+    (async () => {
+      if (isOnline) return;
+      const localTop = await loadLocalTop5(storeId, billerId, aliasSet);
+      if (cancelled) return;
+      if (localTop.length > 0) {
         setOrders((prev) => {
-          if (prev.length > 0 && filtered.length > 0) {
-            const prevIds = new Set(prev.map((o) => o.id));
-            const newOrders = filtered.filter((o) => !prevIds.has(o.id));
-            if (newOrders.length > 0) {
-              try {
-                playLog();
-                const newest = newOrders[0];
-                const serial = newest.serialNo || newest.billSerial || newest.billNo || '';
-                if (serial) {
-                  speak(`New order received: ${serial}`);
-                }
-              } catch (soundErr) {
-                console.warn("[Top5LiveBadge] playLog/speak failed:", soundErr);
-              }
-            }
-          }
-          return filtered;
+          const merged = mergeAllRecentOrders(localTop, prev, 5, billerId, storeId, aliasSet, false);
+          try { localStorage.setItem(cacheKey, JSON.stringify(merged)); } catch { }
+          return merged;
         });
+        setLoading(false);
+      }
+    })();
 
+    return () => { cancelled = true; };
+  }, [cacheKey, storeId, billerId, isOnline]);
+
+  useEffect(() => {
+    if (!storeId) { setLoading(false); return; }
+
+    let cancelled = false;
+    let debounceTimer = null;
+    let lastFp = '';
+
+    const resolveRemoteTop5 = async (firebaseDocs) => {
+      if (firebaseDocs != null) return firebaseDocs;
+      if (isOnline) return fetchFirebaseTopOrders(storeId, billerId, isOnline, aliasSet);
+      return loadCachedTop5(cacheKey);
+    };
+
+    const refreshTop5 = async (firebaseDocs = null) => {
+      try {
+        const localMapped = await loadLocalTop5(storeId, billerId, aliasSet, false);
+        const remote = await resolveRemoteTop5(firebaseDocs);
+        if (cancelled) return;
+        let merged = mergeAndSaveTop5(localMapped, remote, cacheKey, billerId, storeId, false, aliasSet);
+        merged = _normalizeTop5AgainstRemote(merged, remote);
+        _toastBillerCashierPaid(merged);
+        const fp = _top5Fingerprint(merged);
+        setOrders(merged);
         setLoading(false);
-        setLastSync(Date.now());
-        try { localStorage.setItem(cacheKey, JSON.stringify(filtered)); } catch { }
-      },
-      () => {
-        setLoading(false);
-        setTimeout(() => {
-          if (!isOnline) return;
-          getDocs(query(collection(db, 'orders'),
-            where('storeId', '==', storeId),
-            orderBy('createdAt', 'desc'), limit(50)))
-            .then((snap) => {
-              const allDocs = snap.docs.map((d) => ({
-                id: d.id, ...d.data(),
-                _ts: toMs(d.data().createdAt) || Date.now(),
-              }))
-                .filter((d) =>
-                  (d?.syncStatus === 'synced' || d?.synced === true) &&
-                  (!billerId || d.billerId === billerId))
-                .sort((a, b) => (b._ts || 0) - (a._ts || 0))
-                .slice(0, 5);
-              setOrders(allDocs);
-              try { localStorage.setItem(cacheKey, JSON.stringify(allDocs)); } catch { }
-            }).catch(() => { });
-        }, 2000);
-      },
-    );
-    return () => { try { unsub(); } catch { } };
-  }, [storeId, billerId, isOnline, cacheKey, playLog, speak]);
+        if (fp && fp !== lastFp) {
+          lastFp = fp;
+          setLastSync(Date.now());
+        }
+      } catch {
+        if (!cancelled) setLoading(false);
+      }
+    };
+
+    const scheduleRefreshTop5 = (firebaseDocs = null, delayMs = 0) => {
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        refreshTop5(firebaseDocs);
+      }, delayMs);
+    };
+
+    refreshTop5();
+
+    if (!isOnline) {
+      const poll = setInterval(() => refreshTop5(), BILLER_TOP5_OFFLINE_POLL_MS);
+      return () => {
+        cancelled = true;
+        clearTimeout(debounceTimer);
+        clearInterval(poll);
+      };
+    }
+
+    let unsub = () => {};
+    const attachListener = () => {
+      try { unsub(); } catch { /* ignore */ }
+
+      const q = query(
+        collection(db, 'orders'),
+        where('storeId', '==', storeId),
+        limit(BILLER_TOP5_LISTENER_LIMIT),
+      );
+
+      unsub = onSnapshot(
+        q,
+        () => {
+          scheduleRefreshTop5(null, 0);
+        },
+        async () => {
+          try {
+            const remote = await fetchFirebaseTopOrders(storeId, billerId, true, aliasSet);
+            if (!cancelled) scheduleRefreshTop5(remote, 0);
+          } catch {
+            if (!cancelled) scheduleRefreshTop5(null, 0);
+          }
+        },
+      );
+    };
+
+    attachListener();
+
+    return () => {
+      cancelled = true;
+      clearTimeout(debounceTimer);
+      try { unsub(); } catch { /* ignore */ }
+    };
+  }, [storeId, billerId, isOnline, cacheKey, aliasKey]);
 
   useEffect(() => {
     if (typeof BroadcastChannel === 'undefined') return;
+
+    const upsertTop5FromPayload = (data) => {
+      if (!data) return;
+      const o = data.order || data;
+      if (!o?.billSerial && !o?.serialNo && !o?.localId) return;
+      if (storeId && !orderMatchesStore(o, aliasSet.size ? [...aliasSet] : [storeId])) return;
+      const mapped = mapRecentOrder(o);
+      setOrders((prev) => {
+        const next = mergeAllRecentOrders([mapped], prev, 5, billerId, storeId, aliasSet);
+        try { localStorage.setItem(cacheKey, JSON.stringify(next)); } catch { /* ignore */ }
+        return next;
+      });
+      setLastSync(Date.now());
+      setLoading(false);
+    };
+
     const ch = new BroadcastChannel(ORDERS_CHANNEL);
+    const billingCh = new BroadcastChannel(BILLING_CHANNEL);
     const handler = async (ev) => {
       setLastSync(Date.now());
       try {
         const data = ev?.data || ev;
         // If sync completed for a local item, remove it from local DB and optimistically show Firebase record
         if (data?.type === 'SYNC_COMPLETE' && data?.localId) {
-          const { localId, firebaseId, billSerial, billSerial: serial } = data;
+          const { localId, firebaseId, billSerial, billSerial: serial, order: syncedOrder } = data;
           try {
-            // delete local record so it doesn't show in local recent list
-            await localDb.orders.where('localId').equals(localId).delete();
+            await localDb.orders.where('localId').equals(localId).modify({
+              synced: true,
+              syncStatus: 'synced',
+              firebaseId: firebaseId || localId,
+            });
           } catch { /* ignore */ }
 
-          // Optimistically insert Firebase-backed record into Top5
+          const base = syncedOrder || {};
           const optimistic = {
+            ...base,
             id: firebaseId || localId,
             firebaseId: firebaseId || localId,
             localId,
-            serialNo: billSerial || serial || `#${Date.now()}`,
-            createdAt: new Date().toISOString(),
-            _ts: Date.now(),
+            serialNo: billSerial || serial || base.serialNo || base.billSerial || `#${Date.now()}`,
+            createdAt: base.createdAt || base.savedAt || new Date().toISOString(),
+            _ts: toMs(base.createdAt || base.savedAt || base.billerSubmittedAt) || Date.now(),
             synced: true,
             syncStatus: 'synced',
           };
 
           setOrders((prev) => {
-            const dedup = prev.filter((o) => (o.firebaseId || o.localId) !== (firebaseId || localId));
-            const next = [optimistic, ...dedup].sort((a, b) => (b._ts || 0) - (a._ts || 0)).slice(0, 5);
+            const dedup = prev.filter((o) => _orderSerialKey(o) !== _orderSerialKey(optimistic));
+            const next = mergeAllRecentOrders([optimistic], dedup, 5, billerId, storeId, aliasSet);
             try { localStorage.setItem(cacheKey, JSON.stringify(next)); } catch { }
             return next;
           });
 
-          // Show confirmation toast
-          try { toast.success(`${t.syncedToCloud} — ${optimistic.serialNo || ''}`, { duration: 2000 }); } catch { }
+          showBillerBillToast('synced', { serial: optimistic.serialNo || billSerial || serial });
+          try { playLog(); } catch { /* no voice after sync */ }
+          return;
+        }
+
+        // Offline bill saved — show immediately in Top 5
+        if (data?.type === 'ORDER_SAVED_OFFLINE' && data?.localId) {
           try {
-            playLog();
-            speak(`Sync complete: ${billSerial || serial || ''}`);
-          } catch (soundErr) {}
+            const recent = await getBillerTop5OrdersLocal(storeId, billerId);
+            if (Array.isArray(recent)) {
+              const localMapped = recent.map((o, idx) => mapRecentOrder(o, idx));
+              setOrders((prev) => {
+                const cachedRemote = loadCachedTop5(cacheKey);
+                const firebaseOnly = prev.filter((o) => o.syncStatus === 'synced' || o.synced === true);
+                const remote = firebaseOnly.length > 0 ? firebaseOnly : cachedRemote;
+                const merged = mergeAllRecentOrders(localMapped, remote, 5, billerId, storeId, aliasSet);
+                try { localStorage.setItem(cacheKey, JSON.stringify(merged)); } catch { }
+                return merged.length > 0 ? merged : sortTop5ByRecent(localMapped).slice(0, 5);
+              });
+            }
+          } catch { /* ignore */ }
+          return;
+        }
+
+        if (data?.type === 'CASHIER_PAYMENT_RECEIVED') {
+          const serial = data.billSerial || '';
+          const amt = data.amount || 0;
+          const name = data.cashierName || 'Cashier';
+          if (serial) {
+            showBillerBillToast('paid', { serial, amount: amt, cashierName: name });
+            setOrders((prev) => prev.map((o) => {
+              if (_orderSerialKey(o) !== normalizeSerial(serial)) return o;
+              return mapRecentOrder({
+                ...o,
+                cashierPaymentReceived: true,
+                cashierPaymentAmount: amt,
+                cashierPaymentBy: name,
+              });
+            }));
+          }
           return;
         }
 
         // NEW_LOCAL_ORDER: optimistic update when a local order is saved to Dexie
         if (data?.type === 'NEW_LOCAL_ORDER' && data?.order) {
-          try {
-            const o = data.order;
-            if (!storeId || o.storeId !== storeId) return;
-            const mapped = {
-              id: o.firebaseId || o.localId || `local_${Date.now()}`,
-              ...o,
-              _ts: toMs(o.createdAt || o.savedAt) || Date.now(),
-            };
-            setOrders((prev) => {
-              const dedup = prev.filter((p) => (p.firebaseId || p.localId) !== (o.firebaseId || o.localId));
-              const next = [mapped, ...dedup].sort((a, b) => (b._ts || 0) - (a._ts || 0)).slice(0, 5);
-              try { localStorage.setItem(cacheKey, JSON.stringify(next)); } catch { }
-              return next;
-            });
-          } catch { /* ignore */ }
+          upsertTop5FromPayload(data);
+          return;
+        }
+
+        if (data?.type === 'BILL_SAVED_INSTANT' && data?.billSerial) {
+          upsertTop5FromPayload({
+            order: {
+              localId: data.localId,
+              billSerial: data.billSerial || data.serialNo,
+              serialNo: data.serialNo || data.billSerial,
+              storeId: data.storeId || storeId,
+              branchId: data.storeId || storeId,
+              customer: { name: data.customerName || 'Walk-in' },
+              totalAmount: data.totalAmount,
+              grandTotal: data.totalAmount,
+              itemCount: data.itemCount,
+              billerName: data.billerName,
+              billerId: data.billerId,
+              syncStatus: 'pending',
+              paymentStatus: 'pending_payment',
+              status: 'pending',
+              isActiveOrder: true,
+              createdAt: new Date(data.timestamp || Date.now()).toISOString(),
+            },
+          });
+          return;
+        }
+
+        if (data?.type === 'CASHIER_NEW_PENDING' && data?.order) {
+          upsertTop5FromPayload(data);
           return;
         }
 
         if (!storeId) return;
-        const recent = await getRecentOrders(storeId, 5);
+        const recent = await getBillerTop5OrdersLocal(storeId, billerId);
         if (Array.isArray(recent) && recent.length > 0) {
-          const mapped = recent.map((o, idx) => ({
-            id: o.firebaseId || o.localId || `local_${idx}`,
-            ...o,
-            _ts: toMs(o.createdAt || o.savedAt) || Date.now(),
-          }));
-          setOrders(mapped);
-          try { localStorage.setItem(cacheKey, JSON.stringify(mapped)); } catch { }
+          const localMapped = recent.map((o, idx) => mapRecentOrder(o, idx));
+          const merged = mergeAllRecentOrders(localMapped, loadCachedTop5(cacheKey), 5, billerId, storeId, aliasSet);
+          const next = merged.length > 0 ? merged : sortTop5ByRecent(localMapped).slice(0, 5);
+          setOrders(next);
+          try { localStorage.setItem(cacheKey, JSON.stringify(next)); } catch { }
         }
       } catch { /* ignore */ }
     };
     ch.addEventListener('message', handler);
-    return () => { ch.removeEventListener('message', handler); ch.close(); };
-  }, [storeId, cacheKey, t, playLog, speak]);
+    billingCh.addEventListener('message', handler);
+
+    const onInstantEvent = (ev) => {
+      if (ev?.detail) upsertTop5FromPayload(ev.detail);
+    };
+    window.addEventListener(INSTANT_ORDER_EVENT, onInstantEvent);
+
+    const onStorage = (e) => {
+      if (e.key !== INSTANT_PENDING_LS_KEY || !e.newValue) return;
+      try { upsertTop5FromPayload(JSON.parse(e.newValue)); } catch { /* ignore */ }
+    };
+    window.addEventListener('storage', onStorage);
+
+    return () => {
+      ch.removeEventListener('message', handler);
+      ch.close();
+      billingCh.removeEventListener('message', handler);
+      billingCh.close();
+      window.removeEventListener(INSTANT_ORDER_EVENT, onInstantEvent);
+      window.removeEventListener('storage', onStorage);
+    };
+  }, [storeId, billerId, cacheKey, t, playLog, aliasSet]);
 
   return (
     <div className="relative">
-      {/* ✅ Button with label */}
       <motion.button
         type="button"
         onClick={() => setOpen((v) => !v)}
         whileHover={{ scale: 1.04 }}
         whileTap={{ scale: 0.94 }}
-        title={t.orders}
+        title={t.recentOrders}
         className={cn(
           'relative flex items-center gap-1.5 h-8 px-2.5 rounded-lg border transition-all duration-150',
           open
@@ -679,7 +1120,7 @@ const Top5LiveBadge = memo(({
         )}
       >
         <ShoppingBag size={13} />
-        <span className="text-[11px] font-semibold">{t.orders}</span>
+        <span className="text-[11px] font-semibold">{t.recent}</span>
         {!loading && orders.length > 0 && (
           <span className={cn(
             'flex h-4 min-w-[16px] items-center justify-center rounded-full px-1 text-[9px] font-bold',
@@ -698,11 +1139,17 @@ const Top5LiveBadge = memo(({
           <DropdownHeader
             icon={ShoppingBag}
             title={t.recentOrders}
-            subtitle={t.syncedToCloud}
+            subtitle={top5Subtitle}
             isDark={isDark}
             rtl={rtl}
             right={
-              <div className="flex items-center gap-1.5">
+              <div className="flex flex-col items-end gap-1">
+                {branchName && (
+                  <Chip color="blue" isDark={isDark} className="max-w-[140px]">
+                    <Building2 size={8} />
+                    <span className="truncate" title={branchName}>{branchName}</span>
+                  </Chip>
+                )}
                 {isOnline ? (
                   <Chip color="green" isDark={isDark}>
                     <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
@@ -738,13 +1185,17 @@ const Top5LiveBadge = memo(({
 
             {!loading && orders.map((order, idx) => {
               const serial = order.serialNo || order.billSerial || order.billNo || `#${idx + 1}`;
-              const total = order.grandTotal || order.totalAmount || order.total || 0;
+              const total = getOrderDisplayTotal(order);
 
               return (
                 <button
                   key={order.id || idx}
                   type="button"
-                  onClick={() => { onViewInvoice?.(order); setOpen(false); }}
+                  onClick={() => {
+                    try { document.activeElement?.blur?.(); } catch { /* ignore */ }
+                    onViewInvoice?.(order);
+                    setOpen(false);
+                  }}
                   className={cn(
                     'flex w-full items-center gap-3 px-3.5 py-2.5 text-left transition-colors border-b last:border-0',
                     isDark
@@ -758,24 +1209,30 @@ const Top5LiveBadge = memo(({
                   )}>
                     {idx + 1}
                   </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-1.5">
-                      <span className={cn('font-mono text-[12px] font-bold', isDark ? 'text-white' : 'text-gray-900')}>
+                  <div className="flex-1 min-w-0 overflow-hidden">
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <span
+                        className={cn('font-mono text-[11px] font-bold truncate block min-w-0', isDark ? 'text-white' : 'text-gray-900')}
+                        title={serial}
+                      >
                         {serial}
                       </span>
-                      <CheckCircle2 size={10} className="text-emerald-500 shrink-0" />
+                      <OrderSyncIcon order={order} />
                     </div>
-                    <div className="flex items-center gap-1.5 mt-0.5">
-                      <span className={cn('text-[10px]', isDark ? 'text-gray-500' : 'text-gray-400')}>
+                    <div className="flex items-center gap-1.5 mt-0.5 min-w-0">
+                      <span className={cn('text-[10px] shrink-0', isDark ? 'text-gray-500' : 'text-gray-400')}>
                         {relativeTime(order.createdAt || order._ts)}
                       </span>
-                      <span className={cn('text-[10px]', isDark ? 'text-gray-600' : 'text-gray-300')}>·</span>
-                      <span className={cn('text-[10px] truncate', isDark ? 'text-gray-500' : 'text-gray-400')}>
+                      <span className={cn('text-[10px] shrink-0', isDark ? 'text-gray-600' : 'text-gray-300')}>·</span>
+                      <span className={cn('text-[10px] truncate min-w-0', isDark ? 'text-gray-500' : 'text-gray-400')}>
                         {getCustomerLabel(order)}
                       </span>
                     </div>
                   </div>
-                  <span className={cn('font-mono text-xs font-bold shrink-0', isDark ? 'text-emerald-400' : 'text-emerald-600')}>
+                  <span className={cn(
+                    'font-mono text-xs font-bold shrink-0 whitespace-nowrap pl-1',
+                    total < 0 ? 'text-orange-500' : (isDark ? 'text-emerald-400' : 'text-emerald-600'),
+                  )}>
                     Rs.{formatAmount(total)}
                   </span>
                 </button>
@@ -788,6 +1245,12 @@ const Top5LiveBadge = memo(({
               'px-3.5 py-2 border-t text-[10px]',
               isDark ? 'border-amber-500/15 text-gray-600' : 'border-gray-100 text-gray-400',
             )}>
+              {branchName && (
+                <span className={cn('font-semibold', isDark ? 'text-amber-400/80' : 'text-amber-700')}>
+                  {branchName}
+                  {' · '}
+                </span>
+              )}
               {t.lastUpdated} {relativeTime(lastSync)}
             </div>
           )}
@@ -797,123 +1260,6 @@ const Top5LiveBadge = memo(({
   );
 });
 Top5LiveBadge.displayName = 'Top5LiveBadge';
-
-// ══════════════════════════════════════════════════════════════
-// INVOICE MODAL
-// ══════════════════════════════════════════════════════════════
-const InvoiceModal = memo(({ order, store, onClose, isDark, t, rtl }) => {
-  if (!order) return null;
-
-  return (
-    <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      className="fixed inset-0 z-[500] flex items-center justify-center p-4"
-      style={{ background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(8px)' }}
-      onClick={onClose}
-      dir={rtl ? 'rtl' : 'ltr'}
-    >
-      <motion.div
-        initial={{ scale: 0.92, opacity: 0, y: 20 }}
-        animate={{ scale: 1, opacity: 1, y: 0 }}
-        exit={{ scale: 0.92, opacity: 0, y: 20 }}
-        transition={{ type: 'spring', stiffness: 300, damping: 25 }}
-        onClick={(e) => e.stopPropagation()}
-        className={cn(
-          'w-full max-w-md rounded-2xl border shadow-2xl overflow-hidden',
-          isDark ? 'bg-[#1a1a1a] border-amber-500/30' : 'bg-white border-gray-200',
-        )}
-      >
-        <DropdownHeader
-          icon={Receipt}
-          title={t.invoice}
-          subtitle={order.serialNo || order.billSerial || order.billNo || '—'}
-          isDark={isDark}
-          rtl={rtl}
-          right={
-            <button type="button" onClick={onClose}
-              className={cn('rounded-lg p-1 transition', isDark ? 'hover:bg-white/10 text-gray-400' : 'hover:bg-gray-100 text-gray-500')}>
-              <X size={16} />
-            </button>
-          }
-        />
-
-        <div className="p-4 space-y-3">
-          <div className={cn('rounded-xl p-3', isDark ? 'bg-white/[0.04]' : 'bg-gray-50')}>
-            <p className={cn('text-[10px] uppercase font-bold mb-1', isDark ? 'text-gray-500' : 'text-gray-400')}>
-              {t.customer}
-            </p>
-            <p className={cn('font-semibold text-sm', isDark ? 'text-white' : 'text-gray-900')}>
-              {getCustomerLabel(order)}
-            </p>
-            {order.customer?.phone && (
-              <p className={cn('text-xs flex items-center gap-1 mt-0.5', isDark ? 'text-gray-400' : 'text-gray-500')}>
-                <Phone size={9} /> {order.customer.phone}
-              </p>
-            )}
-          </div>
-
-          {order.items?.length > 0 && (
-            <div>
-              <p className={cn('text-[10px] uppercase font-bold mb-1.5', isDark ? 'text-gray-500' : 'text-gray-400')}>
-                {t.items} ({order.items.length})
-              </p>
-              <div className="space-y-1 max-h-40 overflow-y-auto">
-                {order.items.map((item, i) => (
-                  <div key={i} className={cn(
-                    'flex items-center justify-between text-xs rounded-lg px-2.5 py-1.5',
-                    isDark ? 'bg-white/[0.03]' : 'bg-gray-50',
-                  )}>
-                    <span className={cn('flex-1 truncate', isDark ? 'text-gray-300' : 'text-gray-700')}>
-                      {item.productName || `Item ${i + 1}`}
-                      {item.qty > 1 && <span className="ml-1 opacity-50">×{item.qty}</span>}
-                    </span>
-                    <span className={cn('font-mono font-bold shrink-0 ml-2', isDark ? 'text-emerald-400' : 'text-emerald-600')}>
-                      Rs.{formatAmount(item.amount || item.price * (item.qty || 1))}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          <div className={cn(
-            'rounded-xl p-3 space-y-1.5',
-            isDark ? 'bg-amber-500/8 border border-amber-500/20' : 'bg-amber-50 border border-amber-200',
-          )}>
-            {order.discount > 0 && (
-              <div className="flex justify-between text-xs">
-                <span className={isDark ? 'text-gray-400' : 'text-gray-500'}>{t.discount}</span>
-                <span className="text-red-400 font-mono">−Rs.{formatAmount(order.discount)}</span>
-              </div>
-            )}
-            <div className="flex justify-between items-center">
-              <span className={cn('font-bold text-sm', isDark ? 'text-white' : 'text-gray-900')}>{t.total}</span>
-              <span className={cn('font-mono font-bold text-lg', isDark ? 'text-emerald-400' : 'text-emerald-600')}>
-                Rs.{formatAmount(order.grandTotal || order.totalAmount || order.total)}
-              </span>
-            </div>
-          </div>
-        </div>
-
-        <div className={cn('flex gap-2 border-t px-4 py-3', isDark ? 'border-amber-500/15' : 'border-gray-100')}>
-          <button type="button" onClick={() => window.print()}
-            className={cn('flex-1 rounded-xl py-2.5 text-xs font-bold transition',
-              isDark ? 'bg-amber-500/15 text-amber-400 hover:bg-amber-500/25' : 'bg-amber-50 text-amber-700 hover:bg-amber-100')}>
-            🖨️ {t.print}
-          </button>
-          <button type="button" onClick={onClose}
-            className={cn('flex-1 rounded-xl py-2.5 text-xs font-bold transition',
-              isDark ? 'bg-white/5 text-gray-400 hover:bg-white/10' : 'bg-gray-100 text-gray-600 hover:bg-gray-200')}>
-            {t.close}
-          </button>
-        </div>
-      </motion.div>
-    </motion.div>
-  );
-});
-InvoiceModal.displayName = 'InvoiceModal';
 
 // ══════════════════════════════════════════════════════════════
 // STORE FETCH HOOK
@@ -930,7 +1276,7 @@ const useStoreData = (storeId, storeProp) => {
 
   useEffect(() => {
     if (storeProp?.storeName || storeProp?.name) { setStoreData(storeProp); return; }
-    if (!storeId || storeId === 'default' || !navigator.onLine) return;
+    if (!storeId || storeId === 'default' || !getHasInternet()) return;
     const unsub = onSnapshot(
       doc(db, 'stores', storeId),
       (snap) => {
@@ -1037,7 +1383,7 @@ const SearchOverlay = memo(({
       const sid = storeId || 'default';
       let res = cacheSearch(q, sid);
       if (!res.length) { await cacheLoad(sid, false); res = cacheSearch(q, sid); }
-      if (!res.length && navigator.onLine) {
+      if (!res.length && getHasInternet()) {
         const fbResults = [];
         const digits = q.replace(/\D/g, '');
         if (digits.length >= 3) {
@@ -1195,6 +1541,7 @@ SearchOverlay.displayName = 'SearchOverlay';
 // ★ MAIN COMPONENT — BillerHeader
 // ══════════════════════════════════════════════════════════════
 const BillerHeader = ({
+  hideChrome = false,
   currentBillSerial,
   nextPreviewSerial: nextPreviewSerialProp,
   screenLocked,
@@ -1216,7 +1563,7 @@ const BillerHeader = ({
   onToggleCashierMode,
   isSuperAdmin: isSuperAdminProp,
   showDualButton = true,
-  dualModeEnabled = true,
+  dualModeEnabled = false,
   tabs,
   activeTabId,
   onSwitchTab,
@@ -1236,10 +1583,19 @@ const BillerHeader = ({
   setCountingEnabled = () => {},
   countingLang = 'ur',
   setCountingLang = () => {},
+  countingSpeed = 1.22,
+  setCountingSpeed = () => {},
+  countingSpeedMin = 0.75,
+  countingSpeedMax = 1.75,
+  countingSpeedDefault = 1.22,
+  onPreviewCounting = null,
+  showProductName = false,
 }) => {
 
   const { isDark, toggleTheme } = useTheme();
   const { language, toggleLanguage } = useLanguage();
+  const { settings } = useSettings();
+  const invoiceFontSize = settings?.fonts?.invoiceFontSize || 14;
   const t = useT(language);
   const rtl = language === 'ur';
 
@@ -1253,15 +1609,31 @@ const BillerHeader = ({
 
   // ── Derived ────────────────────────────────────────────────
   const isOnline = isOnlineProp !== undefined ? isOnlineProp : isOnlineHook;
+  const [syncedFlash, setSyncedFlash] = useState(false);
+  const syncedFlashTimerRef = useRef(null);
   const isSuperAdmin = isSuperAdminProp ?? authIsSuperAdmin ?? false;
   const activeUser = userData || currentUser || null;
-  const resolvedStoreId = storeId || userData?.primaryStore || userData?.storeId || 'default';
-  const resolvedStore = useStoreData(resolvedStoreId, storeProp);
+  const storesMap = useStoresMap();
+  const resolvedStoreId = storeId || userData?.primaryStore || userData?.storeId || '';
+  const resolvedFirestoreStoreId = useMemo(
+    () => resolveEffectiveStoreId(resolvedStoreId, storesMap),
+    [resolvedStoreId, storesMap],
+  );
+  const storeAliasSet = useMemo(
+    () => _storeIdAliases(resolvedStoreId, storesMap),
+    [resolvedStoreId, storesMap],
+  );
+  const resolvedStore = useStoreData(resolvedFirestoreStoreId, storeProp);
+  const branchLabel = useMemo(() => {
+    const fromLive = getStoreDisplayName(resolvedStore);
+    if (fromLive) return fromLive;
+    const fromMap = resolveStoreName(resolvedFirestoreStoreId, storesMap, '');
+    if (fromMap && fromMap !== resolvedFirestoreStoreId) return fromMap;
+    return resolveStoreName(resolvedStoreId, storesMap, resolvedStoreId || '');
+  }, [resolvedStore, resolvedFirestoreStoreId, resolvedStoreId, storesMap]);
 
-  const { serial: liveSerial, ready: serialReady } = useNextSerial({
-    storeId: resolvedStoreId, user: activeUser, enabled: true,
-  });
-  const nextPreviewSerial = liveSerial || nextPreviewSerialProp || null;
+  const nextPreviewSerial = nextPreviewSerialProp || null;
+  const serialReady = Boolean(nextPreviewSerial);
 
   const userRoles = useMemo(() => {
     if (Array.isArray(userData?.roles) && userData.roles.length > 0) return userData.roles;
@@ -1294,19 +1666,41 @@ const BillerHeader = ({
   const [showSettings, setShowSettings] = useState(false);
   const [showSound, setShowSound] = useState(false);
   const [showCustomer, setShowCustomer] = useState(false);
-  const [showProductNames, setShowProductNames] = useState(false);
   const [invoiceOrder, setInvoiceOrder] = useState(null);
+  const [invoiceSeq, setInvoiceSeq] = useState(0);
   const [deferredPrompt, setDeferredPrompt] = useState(null);
   const [showInstall, setShowInstall] = useState(false);
   const [time, setTime] = useState(new Date());
   const [dualButtonDisabled, setDualButtonDisabled] = useState(true);
 
   // ── Permission validation ──────────────────────────────────
+  // Button VISIBLE when user has dual-role permission.
+  // Button CLICKABLE only when Super Admin has enabled global dualMode.
   useEffect(() => {
-    // Disabled when user lacks permission OR dual-mode is globally disabled
-    if (canToggleCashierMode && dualModeEnabled) setDualButtonDisabled(false);
-    else setDualButtonDisabled(true);
+    setDualButtonDisabled(!(canToggleCashierMode && dualModeEnabled));
   }, [canToggleCashierMode, dualModeEnabled]);
+
+  const handleDualToggle = useCallback(() => {
+    if (dualButtonDisabled) return;
+    onToggleCashierMode?.();
+  }, [dualButtonDisabled, onToggleCashierMode]);
+
+  const handlePreviewCounting = useCallback(async () => {
+    try {
+      const lang = String(countingLang || 'ur').toLowerCase().startsWith('ur') ? 'ur' : 'en';
+      if (typeof onPreviewCounting === 'function') {
+        onPreviewCounting();
+        return;
+      }
+      const loadVoices = lang === 'ur' ? ensureUrduVoicesReady : ensureSpeechVoices;
+      await loadVoices();
+      primeSpeechEngine();
+      const opts = resolveCountingSpeechOpts(lang, { rate: countingSpeed });
+      await previewCountingSpeech(lang, opts);
+    } catch (err) {
+      console.warn('[Counting] Preview failed:', err);
+    }
+  }, [countingLang, countingSpeed, onPreviewCounting]);
 
   const bcRef = useRef(null);
 
@@ -1322,7 +1716,20 @@ const BillerHeader = ({
   useEffect(() => {
     if (typeof BroadcastChannel === 'undefined') return;
     bcRef.current = new BroadcastChannel(ORDERS_CHANNEL);
-    return () => bcRef.current?.close();
+    const onSync = (ev) => {
+      const type = ev?.data?.type;
+      if (type === 'SYNC_BATCH_COMPLETE' || type === 'SYNC_COMPLETE') {
+        setSyncedFlash(true);
+        if (syncedFlashTimerRef.current) clearTimeout(syncedFlashTimerRef.current);
+        syncedFlashTimerRef.current = setTimeout(() => setSyncedFlash(false), 3500);
+      }
+    };
+    bcRef.current.addEventListener('message', onSync);
+    return () => {
+      bcRef.current?.removeEventListener('message', onSync);
+      bcRef.current?.close();
+      if (syncedFlashTimerRef.current) clearTimeout(syncedFlashTimerRef.current);
+    };
   }, []);
 
   // ── Dev helper: expose a safe delete helper to the window for quick testing
@@ -1420,10 +1827,18 @@ const BillerHeader = ({
     } catch { toast.error(t.logoutFailed); }
   }, [signOut, navigate, t]);
 
-  const handleViewInvoice = useCallback((order) => {
-    if (onViewInvoice) onViewInvoice(order);
-    else setInvoiceOrder(order);
-  }, [onViewInvoice]);
+  const handleViewInvoice = useCallback(async (order) => {
+    let hydrated = order;
+    try {
+      const { hydrateOrderForInvoice } = await import('../../utils/invoiceUtils');
+      hydrated = await hydrateOrderForInvoice(order, resolvedFirestoreStoreId || storeId);
+    } catch { /* ignore */ }
+    if (onViewInvoice) onViewInvoice(hydrated);
+    else {
+      setInvoiceSeq((n) => n + 1);
+      setInvoiceOrder(hydrated);
+    }
+  }, [onViewInvoice, resolvedFirestoreStoreId, storeId]);
 
   const handleRoleSwitch = useCallback((newRole) => {
     if (!setActiveRole) return;
@@ -1454,6 +1869,48 @@ const BillerHeader = ({
   // ══════════════════════════════════════════════════════════
   return (
     <>
+      {!hideChrome && !isOnline && (
+        <div className={cn(
+          'sticky top-0 z-50 text-center text-[11px] py-1.5 font-bold flex items-center justify-center gap-2',
+          isDark ? 'bg-red-950 text-red-200 border-b border-red-500/30' : 'bg-red-600 text-white',
+        )}>
+          <WifiOff size={12} />
+          <span>
+            OFFLINE MODE — Bills local save ho rahi hain
+            {offlineCount > 0 ? ` · ${offlineCount} pending sync` : ''}
+          </span>
+        </div>
+      )}
+      {!hideChrome && syncedFlash && isOnline && (
+        <div className={cn(
+          'sticky top-0 z-50 text-center text-[11px] py-1 font-bold flex items-center justify-center gap-1.5',
+          isDark ? 'bg-emerald-950 text-emerald-300 border-b border-emerald-500/30' : 'bg-emerald-600 text-white',
+        )}>
+          <CheckCircle size={12} />
+          Synced
+        </div>
+      )}
+      {hideChrome ? (
+        <div
+          className={cn(
+            'fixed top-2 z-40 flex items-center gap-1.5',
+            rtl ? 'left-2' : 'right-2',
+          )}
+          dir={rtl ? 'rtl' : 'ltr'}
+        >
+          <Top5LiveBadge
+            storeId={resolvedFirestoreStoreId}
+            billerId={billerId}
+            branchLabel={branchLabel}
+            storeAliases={storeAliasSet}
+            isDark={isDark}
+            isOnline={isOnline}
+            onViewInvoice={handleViewInvoice}
+            t={t}
+            rtl={rtl}
+          />
+        </div>
+      ) : (
       <header
         className={cn(
           'sticky top-0 z-40 flex-shrink-0 select-none',
@@ -1501,12 +1958,12 @@ const BillerHeader = ({
             <div className={cn('hidden md:block h-6 w-px',
               isDark ? 'bg-amber-500/20' : 'bg-gray-200')} />
 
-            {/* Branch */}
-            {resolvedStore && (
-              <Chip color="blue" isDark={isDark} className="hidden md:inline-flex">
+            {/* Branch — assigned branch, not global shop settings */}
+            {(branchLabel || resolvedStore) && (
+              <Chip color="blue" isDark={isDark} className="inline-flex max-w-[140px]">
                 <Building2 size={9} />
-                <span className="max-w-[80px] truncate">
-                  {resolvedStore.storeName || resolvedStore.name}
+                <span className="truncate" title={branchLabel || resolvedStore?.storeName || resolvedStore?.name}>
+                  {branchLabel || resolvedStore?.storeName || resolvedStore?.name}
                 </span>
               </Chip>
             )}
@@ -1517,7 +1974,7 @@ const BillerHeader = ({
               isDark ? 'bg-amber-500/[0.06] border-amber-500/20' : 'bg-amber-50 border-amber-200',
             )}>
               <Hash size={11} className={isDark ? 'text-amber-400' : 'text-amber-600'} />
-              <span className={cn('font-mono text-[11px] font-bold',
+              <span className={cn('font-mono text-[10px] font-bold whitespace-nowrap',
                 isDark ? 'text-amber-400' : 'text-amber-700')}>
                 {isPlaceholder ? (
                   <span className="opacity-60 text-[10px]">
@@ -1531,14 +1988,9 @@ const BillerHeader = ({
               </span>
             </div>
 
-            {/* Status */}
-            {screenLocked ? (
-              <Chip color="red" isDark={isDark} className="hidden sm:inline-flex">
-                <Lock size={8} /> {t.locked}
-              </Chip>
-            ) : (
-              <Chip color="green" isDark={isDark} className="hidden sm:inline-flex">
-                <Unlock size={8} /> {t.active}
+            {showProductName && (
+              <Chip color="amber" isDark={isDark} className="hidden sm:inline-flex" title="Product name field ON">
+                <Package size={10} /> {t.names || 'Product'}
               </Chip>
             )}
 
@@ -1583,8 +2035,10 @@ const BillerHeader = ({
 
             {/* Orders with label */}
             <Top5LiveBadge
-              storeId={resolvedStoreId}
+              storeId={resolvedFirestoreStoreId}
               billerId={billerId}
+              branchLabel={branchLabel}
+              storeAliases={storeAliasSet}
               isDark={isDark}
               isOnline={isOnline}
               onViewInvoice={handleViewInvoice}
@@ -1598,7 +2052,7 @@ const BillerHeader = ({
                 icon={Plus}
                 isDark={isDark}
                 onClick={onAddTab}
-                disabled={!canAddTab || screenLocked}
+                disabled={!canAddTab}
                 title={`${t.newTab} (${tabs?.length || 0}/${MAX_TABS})`}
                 badge={tabs?.length > 1 ? tabs.length : null}
               />
@@ -1627,7 +2081,6 @@ const BillerHeader = ({
                 <motion.button
                   type="button"
                   onClick={onOpenCustomerDialog}
-                  disabled={screenLocked}
                   whileHover={{ scale: 1.03 }}
                   whileTap={{ scale: 0.97 }}
                   className={cn(
@@ -1787,19 +2240,19 @@ const BillerHeader = ({
                     </div>
 
                     {/* Counting toggle: moved inside Sound dropdown to avoid header overlap */}
-                    <div className={cn('px-3 py-2.5 border-b flex items-center justify-between', isDark ? 'border-amber-500/15' : 'border-gray-100')}>
-                      <div className="flex items-center gap-2">
+                    <div className={cn('px-3 py-2.5 border-b flex items-center justify-between', isDark ? 'border-amber-500/15' : 'border-gray-100', rtl && 'flex-row-reverse')}>
+                      <div className={cn('flex items-center gap-2', rtl && 'flex-row-reverse')}>
                         <Calculator size={14} className={isDark ? 'text-amber-400' : 'text-amber-600'} />
-                        <span className="text-[13px] font-semibold">{countingEnabled ? 'Counting: ON' : 'Counting: OFF'}</span>
+                        <span className="text-[13px] font-semibold">{countingEnabled ? t.countingOn : t.countingOff}</span>
                       </div>
                       <button
                         type="button"
                         onClick={() => { setCountingEnabled(!countingEnabled); }}
                         className={cn(
-                          'h-5 w-9 rounded-full transition-all duration-200 relative',
+                          'h-5 w-9 rounded-full transition-all duration-200 relative shrink-0',
                           countingEnabled ? 'bg-amber-500' : isDark ? 'bg-gray-700' : 'bg-gray-300',
                         )}
-                        title={countingEnabled ? 'Disable counting' : 'Enable counting'}
+                        title={countingEnabled ? t.disableCounting : t.enableCounting}
                       >
                         <div className={cn(
                           'absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-all duration-200',
@@ -1809,20 +2262,25 @@ const BillerHeader = ({
                     </div>
 
                     {countingEnabled && (
-                      <div className={cn('px-3 py-2 border-b flex items-center justify-between', isDark ? 'border-amber-500/15' : 'border-gray-100')}>
-                        <span className="text-[11px] font-semibold flex items-center gap-1">
+                      <>
+                      <div className={cn('px-3 py-2 border-b flex items-center justify-between gap-2', isDark ? 'border-amber-500/15' : 'border-gray-100', rtl && 'flex-row-reverse')}>
+                        <span className={cn('text-[11px] font-semibold flex items-center gap-1', rtl && 'flex-row-reverse')}>
                           <Languages size={11} className={isDark ? 'text-amber-400' : 'text-amber-600'} />
-                          <span>Voice Language / زبان</span>
+                          <span>{t.voiceLanguage}</span>
                         </span>
-                        <div className={cn('flex gap-1 border rounded-lg p-0.5', isDark ? 'border-gray-700 bg-black/20' : 'border-gray-200 bg-gray-50')}>
+                        <div className={cn('flex gap-1 border rounded-lg p-0.5 shrink-0', isDark ? 'border-gray-700 bg-black/20' : 'border-gray-200 bg-gray-50')}>
                           <button
                             type="button"
-                            onClick={() => setCountingLang("ur")}
+                            onClick={() => setCountingLang('ur')}
                             className={cn(
                               "px-2 py-0.5 text-[10px] rounded-md transition-all font-semibold",
                               countingLang === "ur"
-                                ? "bg-amber-50 text-white shadow-sm"
-                                : isDark ? "text-gray-400 hover:bg-white/[0.04]" : "text-gray-600 hover:bg-gray-200"
+                                ? isDark
+                                  ? "bg-amber-500 text-white shadow-sm"
+                                  : "bg-amber-500 text-white shadow-sm"
+                                : isDark
+                                  ? "text-gray-400 hover:bg-white/[0.08] hover:text-amber-300"
+                                  : "text-gray-600 hover:bg-amber-100 hover:text-amber-800"
                             )}
                           >
                             اردو
@@ -1833,14 +2291,87 @@ const BillerHeader = ({
                             className={cn(
                               "px-2 py-0.5 text-[10px] rounded-md transition-all font-semibold",
                               countingLang === "en"
-                                ? "bg-amber-50 text-white shadow-sm"
-                                : isDark ? "text-gray-400 hover:bg-white/[0.04]" : "text-gray-600 hover:bg-gray-200"
+                                ? isDark
+                                  ? "bg-amber-500 text-white shadow-sm"
+                                  : "bg-amber-500 text-white shadow-sm"
+                                : isDark
+                                  ? "text-gray-400 hover:bg-white/[0.08] hover:text-amber-300"
+                                  : "text-gray-600 hover:bg-amber-100 hover:text-amber-800"
                             )}
                           >
                             EN
                           </button>
                         </div>
                       </div>
+
+                      <div className={cn('px-3 py-2.5 border-b space-y-2', isDark ? 'border-amber-500/15' : 'border-gray-100')}>
+                        <div className={cn('flex items-center justify-between gap-2', rtl && 'flex-row-reverse')}>
+                          <span className={cn('text-[11px] font-semibold flex items-center gap-1', rtl && 'flex-row-reverse')}>
+                            <Zap size={11} className={isDark ? 'text-amber-400' : 'text-amber-600'} />
+                            <span>{t.voiceSpeed}</span>
+                          </span>
+                          <span className={cn('text-[10px] font-mono tabular-nums', isDark ? 'text-amber-400' : 'text-amber-700')}>
+                            {Number(countingSpeed).toFixed(2)}×
+                          </span>
+                        </div>
+
+                        <input
+                          type="range"
+                          min={countingSpeedMin}
+                          max={countingSpeedMax}
+                          step={0.05}
+                          value={countingSpeed}
+                          onChange={(e) => setCountingSpeed(parseFloat(e.target.value))}
+                          className={cn(
+                            'w-full h-1.5 rounded-full appearance-none cursor-pointer',
+                            isDark ? 'accent-amber-500 bg-gray-700' : 'accent-amber-600 bg-gray-200',
+                          )}
+                        />
+
+                        <div className={cn('flex gap-1', rtl && 'flex-row-reverse')}>
+                          {[
+                            { key: 'slow', val: 1.0, label: t.speedSlow },
+                            { key: 'normal', val: countingSpeedDefault, label: t.speedNormal },
+                            { key: 'fast', val: 1.45, label: t.speedFast },
+                          ].map(({ key, val, label }) => (
+                            <button
+                              key={key}
+                              type="button"
+                              onClick={() => setCountingSpeed(val)}
+                              className={cn(
+                                'flex-1 rounded-md py-1 text-[10px] font-semibold transition-colors border',
+                                Math.abs(countingSpeed - val) < 0.03
+                                  ? isDark
+                                    ? 'bg-amber-500/20 text-amber-400 border-amber-500/40'
+                                    : 'bg-amber-50 text-amber-700 border-amber-300'
+                                  : isDark
+                                    ? 'text-gray-500 border-gray-700 hover:bg-white/[0.04]'
+                                    : 'text-gray-500 border-gray-200 hover:bg-gray-50',
+                              )}
+                            >
+                              {label}
+                            </button>
+                          ))}
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={handlePreviewCounting}
+                          className={cn(
+                            'flex w-full items-center justify-center gap-1.5 rounded-lg py-1.5 text-[11px] font-semibold transition-colors border',
+                            isDark
+                              ? 'border-amber-500/30 text-amber-400 hover:bg-amber-500/10'
+                              : 'border-amber-200 text-amber-700 hover:bg-amber-50',
+                          )}
+                        >
+                          <Volume2 size={12} />
+                          {t.testVoice}
+                          <span className={cn('text-[9px] font-normal', isDark ? 'text-gray-500' : 'text-gray-400')}>
+                            ({t.speedHint})
+                          </span>
+                        </button>
+                      </div>
+                      </>
                     )}
                   </div>
 
@@ -1861,7 +2392,7 @@ const BillerHeader = ({
               <motion.button
                 type="button"
                 disabled={dualButtonDisabled}
-                onClick={onToggleCashierMode}
+                onClick={handleDualToggle}
                 whileHover={dualButtonDisabled ? undefined : { scale: 1.03 }}
                 whileTap={dualButtonDisabled ? undefined : { scale: 0.97 }}
                 className={cn(
@@ -1890,17 +2421,14 @@ const BillerHeader = ({
               </motion.button>
             )}
 
-            {/* SA: Name toggle */}
-            {isSuperAdmin && (
+            {/* SA: product name mode indicator */}
+            {isSuperAdmin && showProductName && (
               <IconBtn
-                icon={showProductNames ? Eye : EyeOff}
+                icon={Package}
                 isDark={isDark}
-                active={showProductNames}
-                onClick={() => {
-                  setShowProductNames((p) => !p);
-                  toast(showProductNames ? t.namesHidden : t.namesVisible, { duration: 1200 });
-                }}
-                title={t.names}
+                active
+                onClick={() => toast('Product name ON — table + invoice me save hoga', { duration: 1800, icon: '📦' })}
+                title="Product name enabled"
               />
             )}
 
@@ -1919,9 +2447,14 @@ const BillerHeader = ({
 
             {/* Settings dropdown */}
             <div className="relative">
-              <IconBtn icon={Settings} isDark={isDark} active={showSettings}
+              <IconBtn
+                icon={Settings}
+                isDark={isDark}
+                active={showSettings}
                 onClick={() => { closeAll(); setShowSettings((p) => !p); }}
-                title={t.settings} />
+                title={t.settings}
+                size={16}
+              />
               <Dropdown open={showSettings} onClose={() => setShowSettings(false)}>
                 <DropdownPanel isDark={isDark} width="w-52">
                   <DropdownHeader icon={Settings} title={t.settings} isDark={isDark} rtl={rtl} />
@@ -2057,13 +2590,13 @@ const BillerHeader = ({
                     </div>
                   </div>
 
-                  {/* Store info */}
-                  {resolvedStore && (
+                  {/* Store info — assigned branch */}
+                  {(branchLabel || resolvedStore) && (
                     <div className={cn('px-4 py-2.5 border-b', isDark ? 'border-amber-500/15' : 'border-gray-100')}>
                       <div className={cn('flex items-center gap-2', rtl && 'flex-row-reverse')}>
                         <Building2 size={12} className="text-blue-500 shrink-0" />
                         <span className={cn('text-xs font-semibold', isDark ? 'text-white' : 'text-gray-900')}>
-                          {resolvedStore.storeName || resolvedStore.name}
+                          {branchLabel || resolvedStore?.storeName || resolvedStore?.name}
                         </span>
                         {(resolvedStore.location || resolvedStore.city) && (
                           <span className={cn('text-[10px]', isDark ? 'text-gray-600' : 'text-gray-400')}>
@@ -2121,7 +2654,7 @@ const BillerHeader = ({
         <SearchOverlay
           show={showSearch}
           onClose={() => setShowSearch(false)}
-          storeId={resolvedStoreId}
+          storeId={resolvedFirestoreStoreId}
           isDark={isDark}
           setCustomer={setCustomer}
           onOpenCustomerDialog={onOpenCustomerDialog}
@@ -2129,20 +2662,21 @@ const BillerHeader = ({
           rtl={rtl}
         />
       </header>
+      )}
 
-      {/* ══ INVOICE MODAL ═══════════════════════════════════ */}
-      <AnimatePresence>
-        {invoiceOrder && (
-          <InvoiceModal
-            order={invoiceOrder}
-            store={resolvedStore}
-            isDark={isDark}
-            onClose={() => setInvoiceOrder(null)}
-            t={t}
-            rtl={rtl}
-          />
-        )}
-      </AnimatePresence>
+      {/* ══ INVOICE — same UI as biller print modal ═════════ */}
+      {invoiceOrder && (
+        <InvoicePrint
+          key={`hdr-inv-${invoiceSeq}-${invoiceOrder.billSerial || invoiceOrder.serialNo || invoiceOrder.id}`}
+          {...buildInvoicePrintProps({
+            order: invoiceOrder,
+            store: resolvedStore,
+            onClose: () => setInvoiceOrder(null),
+            settings,
+            extra: { isReprint: true },
+          })}
+        />
+      )}
     </>
   );
 };

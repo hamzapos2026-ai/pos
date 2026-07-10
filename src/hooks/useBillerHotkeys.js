@@ -9,9 +9,9 @@ import { useEffect, useCallback, useRef } from "react";
 // ─── Hotkey Configuration ──────────────────────────────
 export const HOTKEYS = {
   // Item management
-  ADD_ITEM: { key: "F2", name: "Add Item" },
+  ADD_ITEM: { key: "__DISABLED__", name: "Add Item" },
   DUPLICATE_ITEM: { key: "d", ctrl: true, name: "Duplicate Item" },
-  DELETE_ITEM: { key: "Delete", name: "Delete Item" },
+  DELETE_ITEM: { key: "__DISABLED__", name: "Delete Last Row (−)" },
   EDIT_ITEM: { key: "e", name: "Edit Item" },
 
   // Bill actions
@@ -33,7 +33,7 @@ export const HOTKEYS = {
 
 // ─── Debounce configuration ───────────────────────────
 const HOTKEY_DEBOUNCE = {
-  ADD_ITEM: 300,
+  ADD_ITEM: 80,
   DELETE_ITEM: 500,
   SAVE_BILL: 1000,
   PRINT_BILL: 1000,
@@ -56,6 +56,8 @@ export const useBillerHotkeys = (handlers = {}, options = {}) => {
   } = options;
 
   const lastPressRef = useRef({});
+  const handlersRef = useRef(handlers);
+  handlersRef.current = handlers;
 
   // ─── Check if hotkey is debounced ──────────────────────
   const isDebounced = useCallback((hotkeyName) => {
@@ -132,6 +134,28 @@ export const useBillerHotkeys = (handlers = {}, options = {}) => {
       // 🔧 HOTKEY: primary useKeyboardShortcuts may already handle calculator-speed keys.
       if (event.defaultPrevented) return;
 
+      // Enter / NumpadEnter on bill entry fields → ADD_ITEM (calculator speed)
+      if (
+        (event.key === "Enter" || event.code === "NumpadEnter")
+        && !event.ctrlKey && !event.metaKey && !event.altKey
+      ) {
+        const active = document.activeElement;
+        if (active?.getAttribute?.("data-bill-input") === "true") {
+          const entryField = active?.getAttribute?.("data-entry-field") || "";
+          const hasProductField = Boolean(
+            document.querySelector('[data-entry-field="product"]:not([disabled])'),
+          );
+          if (entryField === "product") return;
+          if (entryField === "price" && hasProductField) return;
+          if (!isDebounced("ADD_ITEM")) {
+            event.preventDefault();
+            const fn = handlersRef.current.ADD_ITEM;
+            if (typeof fn === "function") fn(event);
+          }
+          return;
+        }
+      }
+
       const hotkeyName = findMatchingHotkey(event);
 
       if (!hotkeyName) return;
@@ -153,7 +177,7 @@ export const useBillerHotkeys = (handlers = {}, options = {}) => {
       }
 
       // Fire callback if exists
-      const handler = handlers[hotkeyName];
+      const handler = handlersRef.current[hotkeyName];
       if (handler && typeof handler === "function") {
         event.preventDefault();
         handler(event);
@@ -164,7 +188,6 @@ export const useBillerHotkeys = (handlers = {}, options = {}) => {
     return () => window.removeEventListener("keydown", handleKeyDown, true);
   }, [
     enabled,
-    handlers,
     blockInInputs,
     isInputFocused,
     isDebounced,
@@ -196,7 +219,6 @@ export const useBillerHotkeys = (handlers = {}, options = {}) => {
 export const useHotkeysInfo = () => {
   return {
     items: [
-      { name: HOTKEYS.ADD_ITEM.name, keys: "F2" },
       { name: HOTKEYS.EDIT_ITEM.name, keys: "E" },
       { name: HOTKEYS.DUPLICATE_ITEM.name, keys: "Ctrl+D" },
       { name: HOTKEYS.DELETE_ITEM.name, keys: "Delete" },

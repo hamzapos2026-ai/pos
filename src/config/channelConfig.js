@@ -8,6 +8,7 @@ export const BROADCAST_CHANNELS = {
   SERIAL: 'aone_serial_sync',
   REFRESH: 'aone_pos_refresh',
   BILLS: 'aone_pos_bills',
+  DELETED_BILLS: 'aone_pos_deleted_bills',
 };
 
 export default BROADCAST_CHANNELS;

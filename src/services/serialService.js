@@ -1,6 +1,6 @@
 // src/services/serialService.js
 // ✅ PRODUCTION FINAL v21 - Global Lifetime Counter + Auto-Setup
-// ✅ Format: AON-BIL-170526-000001 (STORE-BIL-DDMMYY-000001)
+// ✅ Format: JMJ-BIL-020726-000867 (STORE-BIL-DDMMYY-000001)
 // ✅ Auto-creates globalCounters/billSerial document if missing
 // ✅ All required fields: lastNumber, lastUpdatedAt, lastStoreCode,
 //    lastSerial, lastUpdatedBy, createdAt
@@ -27,17 +27,34 @@ import {
   Timestamp,
 } from "firebase/firestore";
 import { db } from "./firebase";
-import { buildBillSerial, pad6, getShortDatePK, getDeviceId } from "../utils/billIdGenerator";
+import { pad6, getShortDatePK, getDeviceId, buildBillSerial } from "../utils/billIdGenerator";
+import { getHasInternet } from "../utils/networkReachability";
 
 // ══════════════════════════════════════════════════════════════
 // CONSTANTS
 // ══════════════════════════════════════════════════════════════
 const GLOBAL_COUNTER_PATH = "globalCounters/billSerial";
 const STORE_CACHE_KEY = (sid) => `pos_store_${sid}`;
+const STORE_CODE_CACHE_KEY = (sid) => `pos_store_code_${sid}`;
 const LOCAL_COUNTER_KEY = "pos_global_serial_counter";
+const LAST_SERVER_COUNTER_KEY = "pos_last_known_server_serial";
 const PENDING_BILLS_KEY = "pos_pending_serials";
 const STORE_CACHE_MS = 5 * 60 * 1000; // 5 min
 const MAX_RETRY = 5;
+
+// Offline-first guard: never let a flaky/ambiguous network freeze the POS.
+// If Firestore doesn't respond within this window, we fall back to an offline serial.
+const ONLINE_CLAIM_TIMEOUT_MS = 3500;
+
+/** Reject after `ms` if `promise` hasn't settled — prevents Firestore hangs from freezing the UI. */
+const _withTimeout = (promise, ms, label = "operation") =>
+  new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+    Promise.resolve(promise).then(
+      (v) => { clearTimeout(timer); resolve(v); },
+      (e) => { clearTimeout(timer); reject(e); },
+    );
+  });
 
 // ══════════════════════════════════════════════════════════════
 // MODULE STATE
@@ -50,7 +67,8 @@ let _state = {
   
   // Store info
   storeId: null,
-  storeCode: null,         // From SuperAdmin (AON, MEG, etc.)
+  storeCode: null,         // Serial prefix (JM1, JM2, JMJ…)
+  branchHint: null,        // User branch label (JM-1, JM-2)
   
   // User info
   userId: null,
@@ -66,6 +84,7 @@ let _state = {
 
 // ── Lock mechanism (prevents race conditions) ──
 let _claimLock = false;
+let _offlineClaimLock = false;
 const _claimQueue = [];
 
 const _acquireLock = () => new Promise((resolve) => {
@@ -153,13 +172,186 @@ const _loadLocalCounter = () => {
   }
 };
 
+/** Last Firebase global counter seen on this device — offline claims must stay above this. */
+const _saveLastKnownServerCounter = (counter) => {
+  const n = Number(counter) || 0;
+  if (n < 1) return;
+  try {
+    localStorage.setItem(LAST_SERVER_COUNTER_KEY, JSON.stringify({
+      counter: n,
+      timestamp: Date.now(),
+      deviceId: getDeviceId(),
+    }));
+  } catch { /* ignore */ }
+};
+
+/** STORE-BIL-DDMMYY-000001 — same format online, offline, biller & cashier */
+const _buildSerial = (counter) => buildBillSerial(_state.storeCode || 'XXX', counter);
+
+export const buildSerialPreview = (config = {}, counter = null, storeCodeOverride = '') => {
+  const code = String(storeCodeOverride || config?.storeCode || _state.storeCode || 'JMJ').toUpperCase();
+  const branchCode = _branchAliasPrefix(code) || _normalizeSerialPrefix(code) || 'JMJ';
+  const value = Math.max(1, Number(counter ?? config?.currentSerialNumber) || 1);
+  return buildBillSerial(branchCode, value);
+};
+
+export const setInvoiceSerialConfig = () => ({ storeCode: _state.storeCode });
+
+export const getInvoiceSerialConfig = () => ({ storeCode: _state.storeCode });
+
+const _loadLastKnownServerCounter = () => {
+  try {
+    const raw = localStorage.getItem(LAST_SERVER_COUNTER_KEY);
+    if (!raw) return 0;
+    return Number(JSON.parse(raw).counter) || 0;
+  } catch {
+    return 0;
+  }
+};
+
+/** Drop pending-serial entries for bills already saved locally. */
+const _pruneStalePendingBills = async () => {
+  const pending = _getPendingBills();
+  if (!pending.length) return;
+  try {
+    const { db: localDb, ensureDbReady } = await import("../db/index");
+    const { normalizeSerial } = await import("../utils/serialMatch");
+    await ensureDbReady();
+    const rows = await localDb.orders.toArray();
+    const saved = new Set(
+      rows
+        .filter((o) => !o?.isDeleted)
+        .map((o) => normalizeSerial(_serialFromOrder(o)))
+        .filter(Boolean),
+    );
+    const kept = pending.filter((p) => !saved.has(normalizeSerial(p.serial)));
+    if (kept.length !== pending.length) {
+      localStorage.setItem(PENDING_BILLS_KEY, JSON.stringify(kept.slice(-100)));
+      _state.pendingOffline = kept.length;
+      console.log(`[serial] 🧹 Pruned ${pending.length - kept.length} stale pending serial(s)`);
+    }
+  } catch { /* ignore */ }
+};
+
+/**
+ * Align local counter with server + saved bills before any claim (online or offline).
+ * Prevents stale PC counter (e.g. 364) when cloud is already at 383+.
+ */
+const _reconcileCounterBeforeClaim = async (storeId, options = {}) => {
+  const { timeoutMs = 3500, allowNetwork = true } = options;
+  const sid = storeId || _state.storeId;
+
+  await _pruneStalePendingBills();
+
+  const pending = _getPendingBills();
+  const pendingMax = pending.reduce((m, p) => Math.max(m, Number(p.counter) || 0), 0);
+  const broadcastMax = _readBroadcastMax(sid);
+  const lastKnownServer = _loadLastKnownServerCounter();
+
+  let ordersMax = Number(_ordersMaxCache) || 0;
+  try {
+    const { db: localDb, ensureDbReady } = await import("../db/index");
+    await ensureDbReady();
+    const rows = await localDb.orders.toArray();
+    rows.forEach((o) => {
+      if (o?.isDeleted) return;
+      if (sid && o.storeId && o.storeId !== sid) return;
+      const n = extractSerialNumber(_serialFromOrder(o));
+      if (n > ordersMax) ordersMax = n;
+    });
+  } catch { /* ignore */ }
+  _ordersMaxCache = ordersMax;
+
+  let serverCounter = Math.max(lastKnownServer, Number(_state.serverCounter) || 0);
+
+  if (allowNetwork && getHasInternet()) {
+    try {
+      const fetched = await _withTimeout(_fetchServerCounter(), timeoutMs, "server-counter");
+      serverCounter = Math.max(serverCounter, Number(fetched) || 0);
+      _saveLastKnownServerCounter(serverCounter);
+    } catch (err) {
+      console.warn("[serial] reconcile server fetch skipped:", err?.message || err);
+    }
+
+    try {
+      const remoteMax = await _withTimeout(_fetchMaxSerialFromOrders(), timeoutMs, "orders-max");
+      ordersMax = Math.max(ordersMax, Number(remoteMax) || 0);
+      _ordersMaxCache = ordersMax;
+    } catch (err) {
+      console.warn("[serial] reconcile orders scan skipped:", err?.message || err);
+    }
+
+    if (ordersMax > serverCounter && _state.storeCode) {
+      try {
+        const reconciled = await _reconcileCounterWithOrders(serverCounter, _state.storeCode);
+        serverCounter = Math.max(serverCounter, reconciled.serverCounter || 0, reconciled.ordersMax || 0);
+        _saveLastKnownServerCounter(serverCounter);
+      } catch { /* ignore */ }
+    }
+  }
+
+  const floor = Math.max(
+    serverCounter,
+    ordersMax,
+    broadcastMax,
+    pendingMax,
+    _loadLocalCounter(),
+    Number(_state.localCounter) || 0,
+  );
+
+  if (floor > _state.localCounter || floor > _state.serverCounter) {
+    _state.localCounter = floor;
+    _state.serverCounter = Math.max(_state.serverCounter, serverCounter, floor);
+    _saveLocalCounter(floor);
+    _saveLastKnownServerCounter(Math.max(serverCounter, floor));
+    _notifySubscribers();
+    console.log(`[serial] 🔄 Reconciled before claim → floor ${floor} (server ${serverCounter}, orders ${ordersMax})`);
+  }
+
+  return floor;
+};
+
 const _savePendingBill = (serial, counter, storeCode) => {
   try {
     const raw = localStorage.getItem(PENDING_BILLS_KEY);
     const list = raw ? JSON.parse(raw) : [];
-    list.push({ serial, counter, storeCode, timestamp: Date.now() });
+    list.push({
+      serial,
+      counter,
+      storeCode,
+      deviceId: getDeviceId(),
+      timestamp: Date.now(),
+    });
     localStorage.setItem(PENDING_BILLS_KEY, JSON.stringify(list.slice(-100)));
+    void _recordSerialClaimInDexie(serial, counter, storeCode);
   } catch {}
+};
+
+const _recordSerialClaimInDexie = async (serial, counter, storeId) => {
+  try {
+    const { db: localDb, ensureDbReady } = await import('../db/index');
+    await ensureDbReady();
+    if (!localDb.serial_claims) return;
+    await localDb.serial_claims.add({
+      serial,
+      counter: Number(counter) || 0,
+      storeId: storeId || _state.storeId || '',
+      deviceId: getDeviceId(),
+      claimedAt: new Date().toISOString(),
+    });
+  } catch { /* non-critical */ }
+};
+
+const _deviceSerialSuffix = () => {
+  const tail = String(getDeviceId() || 'X').replace(/[^A-Z0-9]/gi, '').slice(-1).toUpperCase();
+  return tail || 'X';
+};
+
+const _withDeviceSuffix = (serial) => {
+  const base = String(serial || '').trim();
+  if (!base) return base;
+  if (/[-][A-Z]$/.test(base)) return base;
+  return `${base}-${_deviceSerialSuffix()}`;
 };
 
 const _removePendingBill = (serial) => {
@@ -181,80 +373,249 @@ const _getPendingBills = () => {
   }
 };
 
-// ══════════════════════════════════════════════════════════════
-// STORE FETCH (with caching)
-// ══════════════════════════════════════════════════════════════
-const _fetchStore = async (storeId) => {
-  if (!storeId) return null;
-  
-  // Try cache first (instant)
+/** Last successfully saved bill number (biller broadcast) — keeps preview in sync with cashier. */
+let _ordersMaxCache = 0;
+
+const _readBroadcastMax = (storeId) => {
+  if (!storeId) return 0;
   try {
-    const raw = localStorage.getItem(STORE_CACHE_KEY(storeId));
-    if (raw) {
-      const cached = JSON.parse(raw);
-      if (cached._cachedAt && Date.now() - cached._cachedAt < STORE_CACHE_MS) {
-        return cached;
-      }
+    const raw = localStorage.getItem(`pos_serialBroadcast_${storeId}`);
+    if (!raw) return 0;
+    return Number(JSON.parse(raw).max) || 0;
+  } catch {
+    return 0;
+  }
+};
+
+const _effectiveUsedCounter = () => {
+  const broadcast = _readBroadcastMax(_state.storeId);
+  return Math.max(
+    Number(_state.serverCounter) || 0,
+    Number(_ordersMaxCache) || 0,
+    Number(broadcast) || 0,
+    _loadLastKnownServerCounter(),
+  );
+};
+
+/** Next serial number — aligned with last SAVED bill, not orphan claims. */
+const _nextSerialNumber = () => {
+  const used = _effectiveUsedCounter();
+  const pending = _getPendingBills();
+  const pendingMax = pending.length
+    ? Math.max(...pending.map((p) => Number(p.counter) || 0))
+    : 0;
+
+  if (_state.localCounter > used && pendingMax <= used) {
+    _state.localCounter = used;
+    _state.pendingOffline = pending.length;
+    _saveLocalCounter(used);
+  }
+
+  return Math.max(_state.localCounter, used, pendingMax) + 1;
+};
+
+export const refreshOrdersMaxCache = async (storeId) => {
+  const max = await _fetchMaxSerialFromOrders();
+  const broadcast = _readBroadcastMax(storeId || _state.storeId);
+  _ordersMaxCache = Math.max(max || 0, broadcast || 0);
+  const used = _effectiveUsedCounter();
+  if (_state.localCounter > used + 2) {
+    const pendingMax = _getPendingBills().reduce((m, p) => Math.max(m, Number(p.counter) || 0), 0);
+    if (pendingMax <= used) {
+      _state.localCounter = used;
+      _saveLocalCounter(used);
     }
-  } catch {}
-  
-  // Fetch from Firebase if online
-  if (!navigator.onLine) {
-    // Try stale cache
-    try {
-      const raw = localStorage.getItem(STORE_CACHE_KEY(storeId));
-      if (raw) return JSON.parse(raw);
-    } catch {}
-    return null;
   }
-  
-  try {
-    const snap = await getDoc(doc(db, "stores", storeId));
-    if (!snap.exists()) return null;
-    
-    const storeData = {
-      id: snap.id,
-      ...snap.data(),
-      _cachedAt: Date.now(),
-    };
-    
-    try {
-      localStorage.setItem(STORE_CACHE_KEY(storeId), JSON.stringify(storeData));
-    } catch {}
-    
-    return storeData;
-  } catch (err) {
-    console.warn("[serial] fetchStore failed:", err.message);
-    return null;
-  }
+  _notifySubscribers();
+  return _ordersMaxCache;
 };
 
-/**
- * Extract storeCode from store data
- * Priority: shortCode → first 3 letters of name
- */
-const _extractStoreCode = (store) => {
-  if (!store) return "XXX";
-  
-  // ✅ Priority 1: shortCode field from SuperAdmin
-  if (store.shortCode && /^[A-Z]{2,5}$/i.test(store.shortCode)) {
-    return store.shortCode.toUpperCase();
+/** Roll back a serial claim when bill save fails (fixes 047 / 048 / 050 gaps). */
+export const releaseSerialClaim = (serial) => {
+  const num = extractSerialNumber(serial);
+  if (!num) return;
+  _removePendingBill(serial);
+  _state.pendingOffline = _getPendingBills().length;
+  const used = _effectiveUsedCounter();
+  if (_state.localCounter >= num && num > used) {
+    _state.localCounter = Math.max(used, num - 1);
+    _saveLocalCounter(_state.localCounter);
   }
-  
-  // Priority 2: Fallback to first letters of name
-  const name = store.storeName || store.name || "";
-  const code = name.toUpperCase().replace(/[^A-Z]/g, "").slice(0, 3);
+  _notifySubscribers();
+};
+
+// ══════════════════════════════════════════════════════════════
+// STORE CODE HELPERS
+// ══════════════════════════════════════════════════════════════
+/** Valid bill prefix: JMJ / AON (letters) or JM1 / JM2 (branch alias) — never Firebase doc ids like A3G13 */
+const _isValidSerialPrefix = (s) => {
+  const v = String(s || '').trim().toUpperCase();
+  if (!v || v.length < 2 || v.length > 5) return false;
+  if (/^JM\d$/.test(v)) return true;
+  if (/^[A-Z]{2,5}$/.test(v)) return true;
+  return false;
+};
+
+const _normalizeSerialPrefix = (raw) => {
+  const s = String(raw || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (_isValidSerialPrefix(s)) return s;
+  return '';
+};
+
+/** JM-1 / JM-2 style branch ids → JM1 / JM2 serial prefix */
+const _branchAliasPrefix = (...fields) => {
+  for (const field of fields) {
+    if (!field) continue;
+    const raw = String(field).trim();
+    if (/^[A-Z]{1,4}-\d+$/i.test(raw)) {
+      const prefix = _normalizeSerialPrefix(raw);
+      if (prefix) return prefix;
+    }
+  }
+  return '';
+};
+
+const _branchLabelFromStore = (store) => {
+  if (!store) return '';
+  for (const field of [store.legacyId, store.branchCode, store.code]) {
+    const prefix = _branchAliasPrefix(field);
+    if (prefix) return prefix;
+  }
+  const stripBrand = (s) => String(s || '')
+    .replace(/^A One Jewelry\s*-\s*/i, '')
+    .replace(/^A One Jewellery\s*-\s*/i, '')
+    .trim();
+  const display = stripBrand(store.storeName || store.name || '');
+  if (/^[A-Z]{1,4}-\d+$/i.test(display)) {
+    const prefix = _branchAliasPrefix(display);
+    if (prefix) return prefix;
+  }
+  const nameMatch = String(store.storeName || store.name || '').match(/\b([A-Z]{1,4}-\d+)\b/i);
+  if (nameMatch) {
+    const prefix = _branchAliasPrefix(nameMatch[1]);
+    if (prefix) return prefix;
+  }
+  return '';
+};
+
+const _extractStoreCode = (store, storeIdHint = '') => {
+  const fromBranch = _branchAliasPrefix(
+    storeIdHint,
+    store?.branchCode,
+    store?.code,
+    store?.legacyId,
+  );
+  if (fromBranch) return fromBranch;
+
+  const fromStoreLabel = _branchLabelFromStore(store);
+  if (fromStoreLabel) return fromStoreLabel;
+
+  if (store?.shortCode) {
+    const fromShort = _normalizeSerialPrefix(store.shortCode);
+    if (fromShort) return fromShort;
+  }
+
+  for (const field of [store?.branchCode, store?.code, store?.legacyId]) {
+    const fromAlias = _branchAliasPrefix(field);
+    if (fromAlias) return fromAlias;
+    const prefix = _normalizeSerialPrefix(field);
+    if (prefix) return prefix;
+  }
+
+  const fromId = _branchAliasPrefix(store?.id);
+  if (fromId) return fromId;
+
+  const name = store?.storeName || store?.name || '';
+  const code = name.toUpperCase().replace(/[^A-Z]/g, '').slice(0, 3);
   if (code.length >= 2) return code.padEnd(3, code[0]);
-  
-  return "XXX";
+
+  const hint = _normalizeSerialPrefix(storeIdHint);
+  return hint || 'XXX';
 };
 
-/**
- * Extract userCode from user data
- */
+const _resolveSerialPrefix = (storeId, branchHint = '') => {
+  const hint = String(branchHint || _state.branchHint || '').trim();
+
+  const fromBranch = _branchAliasPrefix(hint);
+  if (fromBranch) return fromBranch;
+
+  const cachedStore = _getCachedStoreSync(storeId);
+  if (cachedStore) {
+    const fromStore = _extractStoreCode(cachedStore, hint);
+    if (fromStore && fromStore !== 'XXX') return fromStore;
+  }
+
+  try {
+    const code = localStorage.getItem(STORE_CODE_CACHE_KEY(storeId));
+    const normalized = _normalizeSerialPrefix(code);
+    if (normalized) return normalized;
+    if (code) localStorage.removeItem(STORE_CODE_CACHE_KEY(storeId));
+  } catch { /* ignore */ }
+
+  return _normalizeSerialPrefix(hint) || null;
+};
+
 const _extractUserCode = (user) => {
   if (!user) return null;
   return user.userCode || user.posCode || null;
+};
+
+// ══════════════════════════════════════════════════════════════
+// STORE FETCH (with caching)
+// ══════════════════════════════════════════════════════════════
+const _getCachedStoreSync = (storeId) => {
+  if (!storeId) return null;
+  try {
+    const raw = localStorage.getItem(STORE_CACHE_KEY(storeId));
+    if (raw) return JSON.parse(raw);
+  } catch { /* ignore */ }
+  return null;
+};
+
+const _loadCachedStoreCode = (storeId, branchHint = '') =>
+  _resolveSerialPrefix(storeId, branchHint);
+
+const _saveStoreCodeCache = (storeId, storeCode) => {
+  if (!storeId || !storeCode || storeCode === "XXX" || !_isValidSerialPrefix(storeCode)) return;
+  try {
+    localStorage.setItem(STORE_CODE_CACHE_KEY(storeId), storeCode);
+  } catch { /* ignore */ }
+};
+
+const _fetchStore = async (storeId) => {
+  if (!storeId) return null;
+
+  const stale = _getCachedStoreSync(storeId);
+
+  // Fresh cache — instant return
+  if (stale?._cachedAt && Date.now() - stale._cachedAt < STORE_CACHE_MS) {
+    return stale;
+  }
+
+  if (!getHasInternet()) return stale;
+
+  try {
+    const { getStoreById } = await import('./storeService');
+    const hit = await getStoreById(storeId);
+    if (!hit) return stale;
+
+    const storeData = {
+      id: hit.id || storeId,
+      ...hit,
+      _cachedAt: Date.now(),
+    };
+
+    try {
+      localStorage.setItem(STORE_CACHE_KEY(storeId), JSON.stringify(storeData));
+      const extracted = _extractStoreCode(storeData, _resolveCodeHint(storeId, _state.branchHint));
+      _saveStoreCodeCache(storeId, extracted);
+    } catch { /* ignore */ }
+
+    return storeData;
+  } catch (err) {
+    console.warn("[serial] fetchStore failed:", err.message);
+    return stale;
+  }
 };
 
 // ══════════════════════════════════════════════════════════════
@@ -263,16 +624,106 @@ const _extractUserCode = (user) => {
 export const extractSerialNumber = (serial) => {
   if (!serial) return 0;
   if (typeof serial === "number") return serial;
-  
-  const s = String(serial).trim();
+
+  const s = String(serial).trim().toUpperCase();
   if (!s) return 0;
-  
-  // Get last segment after last dash
+
+  // New format: BRANCH-BILLER-DEVICE[-DATE]-SERIAL[-SUFFIX]-STATUS
+  const enterprise = s.match(/-(\d{4,12})(?:[A-Z]*)-(?:0|1)$/);
+  if (enterprise) return parseInt(enterprise[1], 10) || 0;
+
+  // Legacy formats: JMJ-BIL-250626-000042 or JMJ-BIL-250626-000042-H
+  const structured = s.match(/-(\d{6})-(\d{1,6})(?:-[A-Z])?$/);
+  if (structured) return parseInt(structured[2], 10) || 0;
+
+  const glued = s.match(/-(\d{6})-(\d+)([A-Z])$/);
+  if (glued) return parseInt(glued[2], 10) || 0;
+
   const parts = s.split("-");
-  const last = parts[parts.length - 1];
+  let last = parts[parts.length - 1] || "";
+  if (/^\d+[A-Z]$/.test(last)) last = last.slice(0, -1);
   const n = parseInt(last, 10);
-  
-  return isNaN(n) ? 0 : n;
+  return Number.isNaN(n) ? 0 : n;
+};
+
+const _serialFromOrder = (order) =>
+  order?.billSerial || order?.serialNo || order?.billNo || "";
+
+/** Highest numeric serial from Firestore + local Dexie (fixes stale global counter) */
+const _fetchMaxSerialFromOrders = async () => {
+  let max = 0;
+
+  if (getHasInternet()) {
+    try {
+      const { getDocsFromServer } = await import("firebase/firestore");
+      const scanSnap = (snap) => {
+        snap.forEach((d) => {
+          const n = extractSerialNumber(_serialFromOrder(d.data()));
+          if (n > max) max = n;
+        });
+      };
+      try {
+        scanSnap(await getDocsFromServer(query(
+          collection(db, "orders"),
+          orderBy("createdAt", "desc"),
+          limit(100),
+        )));
+      } catch (err) {
+        console.warn("[serial] sorted orders scan failed:", err?.message || err);
+      }
+      try {
+        scanSnap(await getDocsFromServer(query(
+          collection(db, "orders"),
+          limit(200),
+        )));
+      } catch (err) {
+        console.warn("[serial] plain orders scan failed:", err?.message || err);
+      }
+    } catch (err) {
+      console.warn("[serial] Firestore orders scan failed:", err?.message || err);
+    }
+  }
+
+  try {
+    const { db: localDb, ensureDbReady } = await import("../db/index");
+    await ensureDbReady();
+    const localOrders = await localDb.orders.toArray();
+    localOrders.forEach((o) => {
+      if (o?.isDeleted) return;
+      const n = extractSerialNumber(_serialFromOrder(o));
+      if (n > max) max = n;
+    });
+  } catch (err) {
+    console.warn("[serial] Local orders scan failed:", err?.message || err);
+  }
+
+  return max;
+};
+
+const _reconcileCounterWithOrders = async (serverCounter, storeCode) => {
+  const ordersMax = await _fetchMaxSerialFromOrders();
+  if (!ordersMax || ordersMax <= serverCounter) {
+    return { serverCounter, ordersMax };
+  }
+
+  console.log("[serial] ⚠️ Counter behind saved bills:", serverCounter, "→", ordersMax);
+
+  if (getHasInternet() && storeCode) {
+    try {
+      const counterRef = doc(db, GLOBAL_COUNTER_PATH);
+      await setDoc(counterRef, {
+        lastNumber: ordersMax,
+        lastSerial: _buildSerial(ordersMax),
+        lastUpdatedAt: serverTimestamp(),
+        lastUpdatedBy: _state.userId || "orders-reconcile",
+        lastStoreCode: storeCode,
+      }, { merge: true });
+    } catch (err) {
+      console.warn("[serial] Counter reconcile write failed:", err?.message || err);
+    }
+  }
+
+  return { serverCounter: ordersMax, ordersMax };
 };
 
 // ==============================================================
@@ -281,7 +732,7 @@ export const extractSerialNumber = (serial) => {
 // ✅ Back-fills missing fields in existing documents
 // ==============================================================
 const _fetchServerCounter = async () => {
-  if (!navigator.onLine) return _state.serverCounter;
+  if (!getHasInternet()) return _state.serverCounter || _loadLastKnownServerCounter();
 
   try {
     const counterRef = doc(db, GLOBAL_COUNTER_PATH);
@@ -323,10 +774,12 @@ const _fetchServerCounter = async () => {
       console.log("[serial] 🔧 Back-filling missing fields:", Object.keys(missingFields).join(", "));
     }
 
-    return Number(data.lastNumber) || 0;
+    const lastNumber = Number(data.lastNumber) || 0;
+    _saveLastKnownServerCounter(lastNumber);
+    return lastNumber;
   } catch (err) {
     console.warn("[serial] fetchServerCounter failed:", err.message);
-    return _state.serverCounter;
+    return _state.serverCounter || _loadLastKnownServerCounter();
   }
 };
 
@@ -348,7 +801,7 @@ const _atomicIncrementCounter = async (offlineGeneratedCount = 1) => {
         const current = isFirstCreate ? 0 : (Number(snap.data().lastNumber) || 0);
 
         const newNumber = current + offlineGeneratedCount;
-        const newSerial = buildBillSerial(_state.storeCode || "XXX", newNumber);
+        const newSerial = _buildSerial(newNumber);
 
         const updateData = {
           lastNumber:     newNumber,
@@ -396,7 +849,7 @@ const _setupLiveListener = () => {
     _liveUnsub = null;
   }
 
-  if (!navigator.onLine) return;
+  if (!getHasInternet()) return;
 
   try {
     _liveUnsub = onSnapshot(
@@ -411,6 +864,7 @@ const _setupLiveListener = () => {
 
         const data = snap.data();
         const serverCounter = Number(data.lastNumber) || 0;
+        _saveLastKnownServerCounter(serverCounter);
 
         // Log when another user/device updates the counter
         if (serverCounter > _state.serverCounter) {
@@ -420,15 +874,17 @@ const _setupLiveListener = () => {
           );
         }
 
-        // Update local if server is ahead
         if (serverCounter > _state.serverCounter) {
           _state.serverCounter = serverCounter;
-
-          // Update local counter if no pending offline bills
-          if (_state.pendingOffline === 0 && serverCounter > _state.localCounter) {
-            _state.localCounter = serverCounter;
-            _saveLocalCounter(serverCounter);
-            _broadcast(serverCounter);
+          const pendingMax = _getPendingBills().reduce(
+            (m, p) => Math.max(m, Number(p.counter) || 0),
+            0,
+          );
+          const nextLocal = Math.max(_state.localCounter, serverCounter, pendingMax);
+          if (nextLocal > _state.localCounter) {
+            _state.localCounter = nextLocal;
+            _saveLocalCounter(nextLocal);
+            _broadcast(nextLocal);
             _notifySubscribers();
           }
         }
@@ -445,15 +901,48 @@ const _setupLiveListener = () => {
   }
 };
 
+// ─────────────────────────────────────────────────────────────────
+// OFFLINE HANDLER — align local counter when connectivity is lost
+// Ensures offline claims start from the last-known server/order/broadcast
+// floor instead of falling back to too-low counters like 1.
+// ─────────────────────────────────────────────────────────────────
+const _handleOfflineEvent = () => {
+  try {
+    const lastKnownServer = _loadLastKnownServerCounter() || 0;
+    const broadcastMax = _readBroadcastMax(_state.storeId) || 0;
+    const floor = Math.max(
+      Number(_state.serverCounter) || 0,
+      Number(_ordersMaxCache) || 0,
+      Number(broadcastMax) || 0,
+      Number(lastKnownServer) || 0,
+    );
+
+    if (Number.isFinite(floor) && floor > _state.localCounter) {
+      _state.localCounter = floor;
+      try { _saveLocalCounter(_state.localCounter); } catch (e) { /* ignore */ }
+      try { _notifySubscribers(); } catch (e) { /* ignore */ }
+      console.log('[serial] 📴 Offline detected — aligned local counter to', _state.localCounter);
+    }
+  } catch (err) {
+    /* ignore */
+  }
+};
+
+if (typeof window !== 'undefined' && window && typeof window.addEventListener === 'function') {
+  try {
+    window.addEventListener('offline', _handleOfflineEvent, { passive: true });
+  } catch (e) { /* ignore */ }
+}
+
 // ══════════════════════════════════════════════════════════════
 // SUBSCRIBERS (UI updates)
 // ══════════════════════════════════════════════════════════════
 const _notifySubscribers = () => {
   if (!_subscribers.size) return;
-  
-  const next = _state.localCounter + 1;
-  const serial = _state.storeCode 
-    ? buildBillSerial(_state.storeCode, next)
+
+  const next = _nextSerialNumber();
+  const serial = _state.storeCode
+    ? _buildSerial(next)
     : null;
   
   _subscribers.forEach((cb) => {
@@ -473,13 +962,173 @@ export const subscribeNextSerial = (cb) => {
   if (typeof cb !== "function") return () => {};
   _subscribers.add(cb);
   
-  if (_state.initialized) {
+  if (_state.initialized && _state.storeCode) {
     _notifySubscribers();
   } else {
-    cb({ serial: null, counter: null, ready: false });
+    cb({ serial: null, counter: null, ready: false, storeCode: null, pendingOffline: 0 });
   }
   
   return () => _subscribers.delete(cb);
+};
+
+const _resolveCodeHint = (storeId, branchHint = '') => {
+  const raw = String(branchHint || _state.branchHint || '').trim();
+  if (raw && (_branchAliasPrefix(raw) || _normalizeSerialPrefix(raw))) return raw;
+
+  const cached = _getCachedStoreSync(storeId);
+  if (cached) {
+    for (const field of [cached.legacyId, cached.branchCode, cached.code]) {
+      if (field && _branchAliasPrefix(field)) return String(field).trim();
+    }
+    const fromLabel = _branchLabelFromStore(cached);
+    if (fromLabel) return fromLabel;
+    if (cached.shortCode && _normalizeSerialPrefix(cached.shortCode)) {
+      return String(cached.shortCode).trim();
+    }
+  }
+  return raw;
+};
+
+/** Instant serial from localStorage — no network (call before subscribe) */
+export const bootstrapNextSerial = (storeId, user = null, branchHint = '') => {
+  if (!storeId) return null;
+
+  if (
+    _state.initialized
+    && _state.storeId === storeId
+    && _isValidSerialPrefix(_state.storeCode)
+  ) {
+    const refreshed = _resolveSerialPrefix(storeId, branchHint);
+    if (refreshed && refreshed !== _state.storeCode) {
+      _state.storeCode = refreshed;
+      _saveStoreCodeCache(storeId, refreshed);
+    }
+    _notifySubscribers();
+    return _buildSerial(_nextSerialNumber());
+  }
+
+  if (_state.storeId !== storeId) {
+    _state.storeCode = null;
+    _state.initialized = false;
+  }
+
+  _state.storeId = storeId;
+  _state.branchHint = branchHint || _state.branchHint || null;
+  _state.userId = user?.uid || null;
+  _state.userCode = _extractUserCode(user);
+  _state.userName = user?.name || user?.displayName || "Unknown";
+
+  _state.storeCode = _resolveSerialPrefix(storeId, branchHint);
+
+  const localCounter = _loadLocalCounter();
+  const lastKnownServer = _loadLastKnownServerCounter();
+  _state.localCounter = localCounter;
+  _state.serverCounter = Math.max(_state.serverCounter || 0, localCounter, lastKnownServer);
+  _state.pendingOffline = _getPendingBills().length;
+
+  if (_state.storeCode && _state.storeCode !== "XXX") {
+    _state.initialized = true;
+    _notifySubscribers();
+    const serial = _buildSerial(_nextSerialNumber());
+    _runBackgroundSync(storeId, user).catch(() => {});
+    return serial;
+  }
+
+  _runBackgroundSync(storeId, user).catch(() => {});
+  return null;
+};
+
+let _bgSyncPromise = null;
+let _lastBgSyncAt = 0;
+const BG_SYNC_MIN_MS = 2500;
+
+const _runBackgroundSyncInner = async (storeId, user) => {
+  try {
+    const store = await _fetchStore(storeId);
+    const resolved = _resolveSerialPrefix(storeId, _state.branchHint);
+    if (resolved) {
+      _state.storeCode = resolved;
+      _saveStoreCodeCache(storeId, resolved);
+    } else if (store) {
+      const code = _extractStoreCode(store, _resolveCodeHint(storeId, _state.branchHint));
+      if (code && code !== 'XXX') {
+        _state.storeCode = code;
+        _saveStoreCodeCache(storeId, code);
+      }
+    }
+
+    if (!getHasInternet()) {
+      if (_state.storeCode) {
+        _state.initialized = true;
+        _notifySubscribers();
+      }
+      return _state.localCounter;
+    }
+
+    let serverCounter = await _fetchServerCounter();
+    if ((serverCounter || 0) < 1) {
+      try {
+        const repairRes = await repairServerCounter();
+        if (repairRes?.repaired) serverCounter = await _fetchServerCounter();
+      } catch { /* ignore */ }
+    }
+    _saveLastKnownServerCounter(serverCounter);
+
+    const localCounter = _loadLocalCounter();
+    const lastKnown = _loadLastKnownServerCounter();
+    const maxCounter = Math.max(serverCounter || 0, localCounter || 0, _state.localCounter || 0, lastKnown || 0);
+    _state.localCounter = maxCounter;
+    _state.serverCounter = maxCounter;
+    _saveLocalCounter(maxCounter);
+    _saveLastKnownServerCounter(maxCounter);
+    _state.lastServerSync = Date.now();
+
+    if (_state.storeCode) _state.initialized = true;
+    _setupLiveListener();
+    _notifySubscribers();
+
+    // Heavy reconcile — never blocks first paint
+    if (_state.storeCode) {
+      _pruneStalePendingBills().catch(() => {});
+      _reconcileCounterWithOrders(serverCounter, _state.storeCode)
+        .then(({ serverCounter: reconciled, ordersMax }) => {
+          const next = Math.max(reconciled || 0, ordersMax || 0, _state.localCounter || 0);
+          if (next > _state.localCounter) {
+            _state.localCounter = next;
+            _state.serverCounter = next;
+            _ordersMaxCache = Math.max(_ordersMaxCache, ordersMax || 0);
+            _saveLocalCounter(next);
+            _saveLastKnownServerCounter(next);
+            _notifySubscribers();
+          }
+        })
+        .catch(() => {});
+    }
+
+    refreshOrdersMaxCache(storeId).catch(() => {});
+    return _state.localCounter;
+  } catch (err) {
+    console.warn("[serial] background sync failed:", err?.message || err);
+    return _state.localCounter;
+  }
+};
+
+const _runBackgroundSync = (storeId, user) => {
+  const now = Date.now();
+  if (_bgSyncPromise) return _bgSyncPromise;
+  if (
+    _state.initialized
+    && _state.storeId === storeId
+    && now - _lastBgSyncAt < BG_SYNC_MIN_MS
+  ) {
+    return Promise.resolve(_state.localCounter);
+  }
+
+  _bgSyncPromise = _runBackgroundSyncInner(storeId, user).finally(() => {
+    _bgSyncPromise = null;
+    _lastBgSyncAt = Date.now();
+  });
+  return _bgSyncPromise;
 };
 
 // ══════════════════════════════════════════════════════════════
@@ -488,93 +1137,26 @@ export const subscribeNextSerial = (cb) => {
 // ══════════════════════════════════════════════════════════════
 const _init = async (storeId, user) => {
   console.log("[serial] 🔄 Initializing...", { storeId, userId: user?.uid });
-  
-  // 1. Fetch store data
-  const store = await _fetchStore(storeId);
-  
-  if (!store) {
-    console.warn("[serial] ⚠️ Store not found, using fallback");
-  }
-  
-  // 2. Extract codes
-  const storeCode = _extractStoreCode(store);
-  const userCode = _extractUserCode(user);
-  
+
   _state.storeId = storeId;
-  _state.storeCode = storeCode;
   _state.userId = user?.uid || null;
-  _state.userCode = userCode;
+  _state.userCode = _extractUserCode(user);
   _state.userName = user?.name || user?.displayName || "Unknown";
-  
-  // 3. ✅ ALWAYS fetch server counter first (multi-user sync)
-  let serverCounter = 0;
-  if (navigator.onLine) {
-    try {
-      serverCounter = await _fetchServerCounter();
-      // If serverCounter looks stale (e.g. 0) try a safe repair using lastSerial
-      _state.serverCounter = serverCounter;
-      try {
-        if ((serverCounter || 0) < 1) {
-          const repairRes = await repairServerCounter();
-          if (repairRes && repairRes.repaired) {
-            // Re-fetch after repair
-            serverCounter = await _fetchServerCounter();
-            _state.serverCounter = serverCounter;
-            console.log('[serial] repair applied, new serverCounter:', serverCounter);
-          }
-        }
-      } catch (repairErr) {
-        console.warn('[serial] repair attempt failed:', repairErr?.message || repairErr);
-      }
-      _state.lastServerSync = Date.now();
-      console.log("[serial] 📡 Fetched server counter:", serverCounter);
-    } catch (err) {
-      console.warn("[serial] Server fetch failed:", err.message);
-      // Fallback to last known server counter
-      serverCounter = _state.serverCounter || 0;
-    }
-  }
-  
-  // 4. Load local counter as backup
+
+  _state.storeCode = _resolveSerialPrefix(storeId, _state.branchHint);
+
   const localCounter = _loadLocalCounter();
-  
-  // 5. Count pending offline bills
-  const pendingBills = _getPendingBills();
-  _state.pendingOffline = pendingBills.length;
-  
-  // 6. ✅ Use the MAXIMUM across all sources to prevent regression
-  // This ensures:
-  // - Multi-user sessions see consistent counter
-  // - Offline bills are accounted for
-  // - No serial number goes backwards
-  const maxCounter = Math.max(
-    serverCounter || 0,
-    localCounter || 0,
-    _state.localCounter || 0
-  );
-  
-  _state.localCounter = maxCounter;
-  _state.serverCounter = maxCounter;
-  
-  // Save updated counter locally
-  _saveLocalCounter(maxCounter);
-  
-  _state.initialized = true;
-  
-  // 7. Setup live listener
-  if (navigator.onLine) {
-    _setupLiveListener();
+  const lastKnownServer = _loadLastKnownServerCounter();
+  _state.localCounter = localCounter;
+  _state.serverCounter = Math.max(_state.serverCounter || 0, localCounter, lastKnownServer);
+  _state.pendingOffline = _getPendingBills().length;
+
+  if (_state.storeCode && _state.storeCode !== "XXX") {
+    _state.initialized = true;
+    _notifySubscribers();
   }
-  
-  _notifySubscribers();
-  
-  console.log("[serial] ✅ Ready", {
-    storeCode: _state.storeCode,
-    localCounter: _state.localCounter,
-    serverCounter: _state.serverCounter,
-    pendingOffline: _state.pendingOffline,
-    nextSerial: buildBillSerial(_state.storeCode, _state.localCounter + 1),
-  });
+
+  return _runBackgroundSync(storeId, user);
 };
 
 const _ensureInit = async (storeId, user) => {
@@ -587,6 +1169,12 @@ const _ensureInit = async (storeId, user) => {
     _state.userId === newUserId
   ) {
     return;
+  }
+
+  if (_state.storeId !== storeId) {
+    console.log(`[serial] Branch switch: ${_state.storeId || '—'} → ${storeId}`);
+    _state.initialized = false;
+    _state.storeCode = null;
   }
 
   // ✅ NEW LOGIN DETECTED: Different user → force fresh Firebase sync
@@ -618,22 +1206,43 @@ const _ensureInit = async (storeId, user) => {
 // ══════════════════════════════════════════════════════════════
 // CLAIM NEXT SERIAL (Main API)
 // ══════════════════════════════════════════════════════════════
-export const claimNextSerial = async (storeId, isOnline = navigator.onLine, user = null) => {
+export const claimNextSerial = async (storeId, isOnline = getHasInternet(), user = null) => {
   if (!storeId) {
     throw new Error("storeId is required to claim serial");
   }
   
   const userObj = typeof user === "object" ? user : null;
   
-  // Ensure initialized
-  await _ensureInit(storeId, userObj);
+  // Ensure initialized — time-boxed so a hung network never blocks billing.
+  // Cached store code (from localStorage) lets us proceed offline even if init is slow.
+  try {
+    await _withTimeout(_ensureInit(storeId, userObj), ONLINE_CLAIM_TIMEOUT_MS, "serial-init");
+  } catch (initErr) {
+    console.warn("[serial] init slow/unreachable, using cached state:", initErr?.message || initErr);
+  }
   
+  if (!_state.storeCode || !_isValidSerialPrefix(_state.storeCode)) {
+    _state.storeCode = _resolveSerialPrefix(storeId, _state.branchHint);
+  }
   if (!_state.storeCode) {
     throw new Error("Store code not configured. Contact SuperAdmin to set shortCode.");
   }
+
+  try {
+    await _withTimeout(
+      _reconcileCounterBeforeClaim(storeId, {
+        allowNetwork: Boolean(isOnline && getHasInternet()),
+        timeoutMs: ONLINE_CLAIM_TIMEOUT_MS,
+      }),
+      ONLINE_CLAIM_TIMEOUT_MS,
+      "reconcile",
+    );
+  } catch (reconcileErr) {
+    console.warn("[serial] pre-claim reconcile skipped:", reconcileErr?.message || reconcileErr);
+  }
   
   // OFFLINE FLOW
-  if (!isOnline || !navigator.onLine) {
+  if (!isOnline || !getHasInternet()) {
     return _claimOfflineSerial();
   }
   
@@ -641,19 +1250,28 @@ export const claimNextSerial = async (storeId, isOnline = navigator.onLine, user
   await _acquireLock();
   
   try {
-    // Sync pending offline bills first if any
+    // Sync pending offline bills first if any (time-boxed — never blocks the claim)
     if (_state.pendingOffline > 0) {
-      await _syncPendingBills();
+      try {
+        await _withTimeout(_syncPendingBills(), ONLINE_CLAIM_TIMEOUT_MS, "pending-sync");
+      } catch (syncErr) {
+        console.warn("[serial] pending sync skipped (will retry later):", syncErr?.message || syncErr);
+      }
     }
     
-    // Atomic increment
-    const { startNumber } = await _atomicIncrementCounter(1);
+    // Atomic increment — time-boxed so an unreachable server can't freeze billing
+    const { startNumber } = await _withTimeout(
+      _atomicIncrementCounter(1),
+      ONLINE_CLAIM_TIMEOUT_MS,
+      "serial-claim",
+    );
     
     _state.localCounter = startNumber;
     _state.serverCounter = startNumber;
     _saveLocalCounter(startNumber);
+    _saveLastKnownServerCounter(startNumber);
     
-    const serial = buildBillSerial(_state.storeCode, startNumber);
+    const serial = _buildSerial(startNumber);
     
     _broadcast(startNumber);
     _notifySubscribers();
@@ -662,43 +1280,147 @@ export const claimNextSerial = async (storeId, isOnline = navigator.onLine, user
     return serial;
     
   } catch (err) {
-    console.error("[serial] Online claim failed, falling back to offline:", err.message);
+    console.error("[serial] Online claim failed/timed out, falling back to offline:", err.message);
     return _claimOfflineSerial();
   } finally {
     _releaseLock();
   }
 };
 
+/**
+ * Instant serial claim — zero network wait (offline-first checkout UX).
+ * Uses cached store code + local counter; Firebase sync happens on bill save.
+ */
+export const claimSerialInstant = (storeId, user = null) => {
+  const userObj = typeof user === "object" ? user : null;
+  bootstrapNextSerial(storeId, userObj);
+  if (!_state.storeCode || !_isValidSerialPrefix(_state.storeCode)) {
+    _state.storeCode = _resolveSerialPrefix(storeId, _state.branchHint);
+    if (_state.storeCode) _state.initialized = true;
+  }
+  if (!_state.storeCode || _state.storeCode === "XXX") {
+    throw new Error("Store code not configured. Contact SuperAdmin to set shortCode.");
+  }
+  return _claimOfflineSerial();
+};
+
+/** Async — prefers shop LAN server serial counter (multi-PC offline safe). */
+export const claimSerialInstantAsync = async (storeId, user = null) => {
+  const userObj = typeof user === "object" ? user : null;
+  bootstrapNextSerial(storeId, userObj);
+  if (!_state.storeCode || !_isValidSerialPrefix(_state.storeCode)) {
+    _state.storeCode = _resolveSerialPrefix(storeId, _state.branchHint);
+    if (_state.storeCode) _state.initialized = true;
+  }
+  if (!_state.storeCode || _state.storeCode === "XXX") {
+    throw new Error("Store code not configured. Contact SuperAdmin to set shortCode.");
+  }
+
+  try {
+    await _withTimeout(
+      _reconcileCounterBeforeClaim(storeId, {
+        allowNetwork: getHasInternet(),
+        timeoutMs: ONLINE_CLAIM_TIMEOUT_MS,
+      }),
+      ONLINE_CLAIM_TIMEOUT_MS,
+      "reconcile",
+    );
+  } catch (reconcileErr) {
+    console.warn("[serial] instant reconcile skipped:", reconcileErr?.message || reconcileErr);
+  }
+
+  try {
+    const { shopApiClaimSerial } = await import('./shopApiService.js');
+    const serial = await shopApiClaimSerial(storeId, _state.storeCode);
+    if (serial) {
+      const num = extractSerialNumber(serial);
+      if (num > _state.localCounter) {
+        _state.localCounter = num;
+        _state.serverCounter = num;
+        _saveLocalCounter(num);
+        _saveLastKnownServerCounter(num);
+      }
+      _broadcast(num);
+      _notifySubscribers();
+      console.log(`[serial] ✅ SHOP LAN CLAIMED: ${serial}`);
+      return serial;
+    }
+  } catch (e) {
+    console.warn('[serial] shop LAN claim fallback:', e?.message || e);
+  }
+
+  return _claimOfflineSerial();
+};
+
 // ══════════════════════════════════════════════════════════════
 // OFFLINE CLAIM
 // ══════════════════════════════════════════════════════════════
 const _claimOfflineSerial = () => {
-  // Use MAX of (local counter, server counter) + offline pending count
-  const base = Math.max(_state.localCounter, _state.serverCounter);
-  const nextNumber = base + 1;
-  
-  _state.localCounter = nextNumber;
-  _state.pendingOffline += 1;
-  
-  _saveLocalCounter(nextNumber);
-  
-  const serial = buildBillSerial(_state.storeCode, nextNumber);
-  
-  // Save to pending for later sync
-  _savePendingBill(serial, nextNumber, _state.storeCode);
-  
-  _broadcast(nextNumber);
-  _notifySubscribers();
-  
-  console.log(`[serial] 📡 OFFLINE CLAIMED: ${serial} (pending: ${_state.pendingOffline})`);
-  return serial;
+  // Ensure offline claims never step below any known server/order/broadcast floor
+  if (_offlineClaimLock) {
+    const bumped = Math.max(_state.localCounter, _effectiveUsedCounter()) + 1;
+    _state.localCounter = bumped;
+    console.warn('[serial] ⚠️ Offline claim contention — bumped to', bumped);
+  }
+  _offlineClaimLock = true;
+  try {
+    // Recompute a safe floor from all sources we can read locally
+    try {
+      const lastKnownServer = _loadLastKnownServerCounter();
+      const broadcastMax = _readBroadcastMax(_state.storeId) || 0;
+      const floor = Math.max(
+        Number(_state.serverCounter) || 0,
+        Number(_ordersMaxCache) || 0,
+        Number(broadcastMax) || 0,
+        Number(lastKnownServer) || 0,
+      );
+      if (floor > _state.localCounter) {
+        _state.localCounter = floor;
+        _saveLocalCounter(_state.localCounter);
+      }
+    } catch (e) {
+      // ignore local read failures — proceed conservatively
+    }
+
+    const nextNumber = _nextSerialNumber();
+
+    _state.localCounter = nextNumber;
+    _state.pendingOffline = _getPendingBills().length + 1;
+
+    _saveLocalCounter(nextNumber);
+
+    const serial = _buildSerial(nextNumber);
+
+    const pending = _getPendingBills();
+    if (pending.some((p) => p.serial === serial)) {
+      const retry = nextNumber + 1;
+      _state.localCounter = retry;
+      _saveLocalCounter(retry);
+      const retrySerial = _buildSerial(retry);
+      _savePendingBill(retrySerial, retry, _state.storeCode);
+      _broadcast(retry);
+      _notifySubscribers();
+      console.log(`[serial] 📡 OFFLINE CLAIMED (retry): ${retrySerial}`);
+      return retrySerial;
+    }
+
+    _savePendingBill(serial, nextNumber, _state.storeCode);
+
+    _broadcast(nextNumber);
+    _notifySubscribers();
+
+    console.log(`[serial] 📡 OFFLINE CLAIMED: ${serial} (pending: ${_state.pendingOffline})`);
+    return serial;
+  } finally {
+    _offlineClaimLock = false;
+  }
 };
 
 // ══════════════════════════════════════════════════════════════
 // SYNC PENDING OFFLINE BILLS (when online comes back)
 // ══════════════════════════════════════════════════════════════
 const _syncPendingBills = async () => {
-  if (!navigator.onLine) return;
+  if (!getHasInternet()) return;
   
   const pending = _getPendingBills();
   if (!pending.length) {
@@ -729,11 +1451,10 @@ const _syncPendingBills = async () => {
       // Atomic increment for all reassignments
       const { startNumber, endNumber } = await _atomicIncrementCounter(reassignments.length);
       
-      // Map old serials to new serials
       const reassignMap = new Map();
       reassignments.forEach((bill, idx) => {
         const newNumber = startNumber + idx;
-        const newSerial = buildBillSerial(_state.storeCode, newNumber);
+        const newSerial = _buildSerial(newNumber);
         reassignMap.set(bill.serial, { newSerial, newNumber });
       });
       
@@ -753,6 +1474,17 @@ const _syncPendingBills = async () => {
         } catch {}
       }
       
+      // Persist reassigned pending bills locally so UI and sync are consistent
+      try {
+        const pendingList = _getPendingBills();
+        const updated = pendingList.map((p) => {
+          const map = reassignMap.get(p.serial);
+          if (map) return { ...p, serial: map.newSerial, counter: map.newNumber };
+          return p;
+        });
+        localStorage.setItem(PENDING_BILLS_KEY, JSON.stringify(updated.slice(-100)));
+      } catch (e) { /* ignore */ }
+
       _state.localCounter = endNumber;
       _state.serverCounter = endNumber;
       _saveLocalCounter(endNumber);
@@ -793,9 +1525,14 @@ export const markSerialUsed = async (storeId, serial) => {
   _removePendingBill(serial);
   
   // Update local counter
+  if (num > _ordersMaxCache) _ordersMaxCache = num;
   if (num > _state.localCounter) {
     _state.localCounter = num;
+    _state.serverCounter = Math.max(_state.serverCounter, num);
     _saveLocalCounter(num);
+    _saveLastKnownServerCounter(Math.max(_state.serverCounter, num));
+    _broadcast(num);
+    _notifySubscribers();
   }
 };
 
@@ -804,26 +1541,35 @@ export const markSerialUsed = async (storeId, serial) => {
 // ══════════════════════════════════════════════════════════════
 export const getPlaceholderSerial = (storeId, user = null) => {
   if (!_state.storeCode) return null;
-  return buildBillSerial(_state.storeCode, _state.localCounter + 1);
+  return _buildSerial(_nextSerialNumber());
 };
 
 export const getCurrentNextSerial = () => {
   if (!_state.initialized || !_state.storeCode) return null;
-  return buildBillSerial(_state.storeCode, _state.localCounter + 1);
+  return _buildSerial(_nextSerialNumber());
 };
 
 // ══════════════════════════════════════════════════════════════
 // FORCE SYNC FROM FIREBASE
 // ══════════════════════════════════════════════════════════════
-export const syncSerialFromFirebase = async (storeId, user = null) => {
+export const syncSerialFromFirebase = async (storeId, user = null, branchHint = '') => {
   if (!storeId) return 0;
-  
+
   const userObj = typeof user === "object" ? user : null;
-  
-  // Reset and reinitialize
-  _state.initialized = false;
-  await _init(storeId, userObj);
-  
+  const uid = userObj?.uid || null;
+  if (branchHint) _state.branchHint = branchHint;
+
+  if (_state.storeId !== storeId) {
+    _state.storeCode = null;
+    _state.initialized = false;
+  }
+
+  // Already bootstrapped — soft background refresh (no reset / no spinner)
+  if (_state.initialized && _state.storeId === storeId && _state.userId === uid) {
+    return _runBackgroundSync(storeId, userObj);
+  }
+
+  await _ensureInit(storeId, userObj);
   return _state.localCounter;
 };
 
@@ -837,18 +1583,43 @@ export const resetItemSerialCounter = () => { _state.itemCounter = 0; };
 // CHECK DUPLICATE
 // ══════════════════════════════════════════════════════════════
 export const checkSerialDuplicate = async (storeId, serial) => {
-  if (!serial || !navigator.onLine) return false;
+  if (!serial || !getHasInternet()) return false;
   
   try {
-    const snap = await getDocs(query(
-      collection(db, "orders"),
-      where("billSerial", "==", serial),
-      limit(1),
-    ));
-    return !snap.empty;
+    for (const field of ["billSerial", "serialNo"]) {
+      const snap = await getDocs(query(
+        collection(db, "orders"),
+        where(field, "==", serial),
+        limit(1),
+      ));
+      if (!snap.empty) return true;
+    }
+    return false;
   } catch {
     return false;
   }
+};
+
+/** True if this bill serial already exists locally or in Firestore */
+export const orderExistsForSerial = async (serial) => {
+  const s = String(serial || "").trim().toUpperCase();
+  if (!s || s === "----") return false;
+
+  try {
+    const { db: localDb, ensureDbReady } = await import("../db/index");
+    await ensureDbReady();
+    const localHit = await localDb.orders
+      .filter((o) => {
+        if (o?.isDeleted) return false;
+        const os = String(_serialFromOrder(o) || "").toUpperCase();
+        return os === s;
+      })
+      .first();
+    if (localHit) return true;
+  } catch { /* ignore */ }
+
+  if (!getHasInternet()) return false;
+  return checkSerialDuplicate(_state.storeId, serial);
 };
 
 // ══════════════════════════════════════════════════════════════
@@ -857,8 +1628,8 @@ export const checkSerialDuplicate = async (storeId, serial) => {
 export const getSerialState = () => ({
   ..._state,
   deviceId: getDeviceId(),
-  nextSerial: _state.storeCode 
-    ? buildBillSerial(_state.storeCode, _state.localCounter + 1)
+  nextSerial: _state.storeCode
+    ? _buildSerial(_nextSerialNumber())
     : null,
 });
 
@@ -1031,15 +1802,69 @@ if (typeof window !== "undefined") {
 }
 
 // ══════════════════════════════════════════════════════════════
+// BILLING CHECKOUT — fast + safe (online atomic, offline/LAN fallback)
+// ══════════════════════════════════════════════════════════════
+const BILLING_CLAIM_TIMEOUT_MS = 1500;
+
+/**
+ * Primary serial claim for F8 checkout.
+ * Online: atomic Firebase counter (time-boxed). Offline: instant local (no network wait).
+ */
+export const claimSerialForBilling = async (storeId, user = null) => {
+  const userObj = typeof user === "object" ? user : null;
+  const online = getHasInternet();
+
+  if (!online) {
+    try {
+      const serial = await _withTimeout(
+        claimSerialInstantAsync(storeId, userObj),
+        600,
+        "billing-offline-lan",
+      );
+      if (serial && serial !== "----") return serial;
+    } catch {
+      /* instant fallback below */
+    }
+    return claimSerialInstant(storeId, userObj);
+  }
+
+  try {
+    const serial = await _withTimeout(
+      claimNextSerial(storeId, true, userObj),
+      BILLING_CLAIM_TIMEOUT_MS,
+      "billing-claim",
+    );
+    if (serial && serial !== "----") return serial;
+  } catch (err) {
+    console.warn("[serial] billing online claim timeout/fail, using instant path:", err?.message || err);
+  }
+
+  try {
+    const serial = await claimSerialInstantAsync(storeId, userObj);
+    if (serial && serial !== "----") return serial;
+  } catch (err) {
+    console.warn("[serial] billing instant-async failed:", err?.message || err);
+  }
+
+  return claimSerialInstant(storeId, userObj);
+};
+
+// ══════════════════════════════════════════════════════════════
 // EXPORTS
 // ══════════════════════════════════════════════════════════════
 export default {
   claimNextSerial,
+  claimSerialInstant,
+  claimSerialInstantAsync,
+  claimSerialForBilling,
   markSerialUsed,
+  releaseSerialClaim,
+  refreshOrdersMaxCache,
   syncSerialFromFirebase,
   resetSerialService,
   clearLocalSerialCache,
   subscribeNextSerial,
+  bootstrapNextSerial,
   getPlaceholderSerial,
   getCurrentNextSerial,
   extractSerialNumber,

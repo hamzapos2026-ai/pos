@@ -7,16 +7,48 @@ import React, {
 } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
-  doc, updateDoc, addDoc, collection, serverTimestamp,
+  doc, updateDoc, addDoc, collection, serverTimestamp, query, where, getDocs, limit,
 } from "firebase/firestore";
-import { db } from "../../services/firebase";
+import { db, auth } from "../../services/firebase";
 import {
   X, Save, Edit3, User, Phone, ChevronDown, MapPin,
   Package, Hash, BarChart3, Loader2, AlertCircle,
   Banknote, Smartphone, CreditCard, Building2, Wallet,
 } from "lucide-react";
+import { showFieldAlert, showValidationAlert } from "../../utils/fieldAlert";
 import { toast } from "react-hot-toast";
 import { logCashierAction } from "../../services/cashierAuditService";
+import { saveOfflinePayment } from "../../services/offlinePaymentService";
+import { applyTrustedInstantPaymentToCloud } from "../../services/paidBillIndexService";
+import { normalizeOrderForInvoice } from "../../utils/invoiceUtils";
+import { useLanguage } from "../../hooks/useLanguage";
+import { useSettings } from "../../context/SettingsContext";
+import { getEnabledPaymentMethods } from "../../utils/paymentMethodsUtils";
+import { getHasInternet } from "../../utils/networkReachability";
+import { buildCashierPaymentPatch, CASHIER_PAYMENT_STATUS } from "../../utils/cashierOrderUtils";
+import { getBillSerialKey } from "../../utils/serialMatch";
+
+const resolveAllOrderDocIds = async (order, serial) => {
+  const ids = new Set();
+  if (order?.id) ids.add(order.id);
+  if (order?.firebaseId) ids.add(order.firebaseId);
+  if (order?.localId) ids.add(order.localId);
+
+  const needle = serial || order?.billSerial || order?.serialNo;
+  if (!needle) return [...ids];
+
+  for (const field of ["billSerial", "serialNo"]) {
+    try {
+      const snap = await getDocs(query(
+        collection(db, "orders"),
+        where(field, "==", needle),
+        limit(12),
+      ));
+      snap.docs.forEach((d) => ids.add(d.id));
+    } catch { /* index may be missing */ }
+  }
+  return [...ids];
+};
 
 let _c = 0;
 const uid = () => `i_${Date.now()}_${++_c}_${Math.random().toString(36).slice(2, 5)}`;
@@ -32,42 +64,27 @@ const cleanName = (name) => {
   return clean || "Product";
 };
 
-// ✅ Receipt printer
-const doPrint = (order, items, total, disc, name, phone, market, city) => {
-  const w = window.open("", "_blank", "width=380,height=600");
-  if (!w) { toast.error("Allow popups"); return; }
-  w.document.write(`<!DOCTYPE html><html><head><title>Bill #${order.billSerial || order.serialNo}</title>
-<style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:'Courier New',monospace;font-size:12px;padding:16px;max-width:320px}.c{text-align:center}.d{border-top:1px dashed #000;margin:8px 0}.r{display:flex;justify-content:space-between;margin:3px 0}.t{font-size:14px;font-weight:bold}@media print{body{padding:0}}</style></head><body>
-<div class="c"><h2>${order.storeName || "POS"}</h2><p>#${order.billSerial || order.serialNo}</p><p>${new Date().toLocaleString("en-PK")}</p></div><div class="d"></div>
-<div class="r"><span>Customer:</span><span>${name}</span></div>
-${phone ? `<div class="r"><span>Phone:</span><span>${phone}</span></div>` : ""}
-${market ? `<div class="r"><span>Market:</span><span>${market}</span></div>` : ""}
-${city ? `<div class="r"><span>City:</span><span>${city}</span></div>` : ""}
-<div class="d"></div>
-${items.map(i => `<div class="r"><span>${cleanName(i.productName)}</span><span>Rs.${(i.qty * i.price).toLocaleString()}</span></div><div style="color:#666;font-size:10px;margin-left:8px">Qty:${i.qty} × Rs.${i.price}</div>`).join("")}
-<div class="d"></div>
-${disc > 0 ? `<div class="r"><span>Discount:</span><span>-Rs.${disc}</span></div>` : ""}
-<div class="r t"><span>TOTAL:</span><span>Rs.${total.toLocaleString()}</span></div>
-<div class="d"></div><div class="c" style="font-size:10px;margin-top:8px">Thank you!</div>
-<script>window.onload=()=>{window.print();window.onafterprint=()=>window.close()}</script></body></html>`);
-  w.document.close();
+const PAY_METHOD_UI = {
+  cash: { icon: Banknote, color: "emerald" },
+  easypaisa: { icon: Smartphone, color: "green" },
+  jazzcash: { icon: Smartphone, color: "orange" },
+  bankTransfer: { icon: Building2, color: "blue" },
+  creditCard: { icon: CreditCard, color: "purple" },
 };
 
-// Payment methods config
-const PAY_METHODS = [
-  { v: "Cash", icon: Banknote, color: "emerald" },
-  { v: "EasyPaisa", icon: Smartphone, color: "green" },
-  { v: "JazzCash", icon: Smartphone, color: "orange" },
-  { v: "Bank Transfer", icon: Building2, color: "blue" },
-  { v: "Card", icon: CreditCard, color: "purple" },
-];
-
-const EditBillModal = ({ order, isDark, userData, storeData, onClose }) => {
-  const [cName, setCName] = useState(order.customer?.name || "Walking Customer");
+const EditBillModal = ({ order, isDark, userData, storeData, onClose, onComplete }) => {
+  const { t } = useLanguage();
+  const { settings } = useSettings();
+  const payMethods = useMemo(() => getEnabledPaymentMethods(settings).map((m) => {
+    const ui = PAY_METHOD_UI[m.key] || PAY_METHOD_UI.cash;
+    return { v: m.label, icon: ui.icon, color: ui.color };
+  }), [settings?.paymentMethods]);
+  const defaultPay = payMethods[0]?.v || "Cash";
+  const [cName, setCName] = useState(order.customer?.name || t('walkingCustomer', 'Walking Customer'));
   const [cPhone, setCPhone] = useState(order.customer?.phone || "");
   const [cMarket, setCMarket] = useState(order.customer?.market || "");
   const [cCity, setCCity] = useState(order.customer?.city || "");
-  const [payM, setPayM] = useState(order.paymentType || "Cash");
+  const [payM, setPayM] = useState(defaultPay);
   const [notes, setNotes] = useState(order.comments || "");
 
   const [showItemsDiscount, setShowItemsDiscount] = useState(false);
@@ -91,6 +108,19 @@ const EditBillModal = ({ order, isDark, userData, storeData, onClose }) => {
       };
     });
   });
+
+  useEffect(() => {
+    if (!order) return;
+    const c = order.customer || {};
+    setCName(c.name || t('walkingCustomer', 'Walking Customer'));
+    setCPhone(c.phone || "");
+    setCMarket(c.market || "");
+    setCCity(c.city || "");
+    setNotes(order.comments || "");
+    const saved = order.paymentType || order.paymentMethod;
+    const match = payMethods.find((m) => m.v.toLowerCase() === String(saved || '').toLowerCase());
+    setPayM(match?.v || defaultPay);
+  }, [order?.id, order?.customer, order?.comments, order?.paymentType, order?.paymentMethod, t, payMethods, defaultPay]);
 
   // ── Glass theme classes ──
   const modalBg = isDark
@@ -121,6 +151,11 @@ const EditBillModal = ({ order, isDark, userData, storeData, onClose }) => {
     return () => window.removeEventListener("keydown", h, true);
   }, [onClose]);
 
+  // Always default to Cash when edit modal opens for a bill.
+  useEffect(() => {
+    setPayM("Cash");
+  }, [order?.id]);
+
   const origTotal = order.totalAmount || 0;
   const origDisc = order.billDiscount || 0;
   const origSub = useMemo(
@@ -142,17 +177,7 @@ const EditBillModal = ({ order, isDark, userData, storeData, onClose }) => {
       ? { ...i, price: Math.max(0, Number(v) || 0) } : i
     )), []);
 
-  const handleSave = useCallback(async () => {
-    if (items.length === 0) {
-      toast.error("Need items", { icon: <AlertCircle className="w-4 h-4" /> });
-      return;
-    }
-    if (Number(extraDisc) > 0 && !discReason.trim()) {
-      toast.error("Discount reason required");
-      return;
-    }
-    setSaving(true);
-    const tid = toast.loading("Saving...");
+  const buildSavePayload = useCallback(() => {
     const cn = userData?.displayName || userData?.name || "Cashier";
     const fi = items.map(i => ({
       productName: i.productName,
@@ -161,67 +186,240 @@ const EditBillModal = ({ order, isDark, userData, storeData, onClose }) => {
       qty: Number(i.qty),
       total: i.qty * i.price,
     }));
+    return { cn, fi, totalQty: fi.reduce((s, i) => s + i.qty, 0) };
+  }, [items, userData]);
+
+  const buildUpdatedOrder = useCallback((fi, markPaid) => normalizeOrderForInvoice({
+    ...order,
+    items: fi,
+    customer: { name: cName, phone: cPhone, market: cMarket, city: cCity },
+    paymentType: payM,
+    comments: notes,
+    subtotal: newSub,
+    billDiscount: totalDisc,
+    billerBillDiscount: order.billerBillDiscount ?? order.billDiscountValue ?? origDisc,
+    cashierExtraDiscount: Number(order.cashierExtraDiscount || 0) + Number(extraDisc || 0),
+    totalAmount: newTotal,
+    totalQty: fi.reduce((s, i) => s + i.qty, 0),
+    previousTotal: origTotal,
+    editedTotalDifference: diff,
+    newTotalAfterEdit: newTotal,
+    isEdited: true,
+    wasEdited: true,
+    ...(markPaid ? buildCashierPaymentPatch({
+      amount: newTotal,
+      paymentType: payM,
+      cashierId: userData?.uid || order.paidBy || "",
+      cashierName: userData?.displayName || userData?.name || order.paidByName || "Cashier",
+    }) : { status: order.status, paymentStatus: order.paymentStatus }),
+  }), [order, cName, cPhone, cMarket, cCity, payM, notes, newSub, totalDisc, newTotal, origTotal, diff, userData]);
+
+  const persistBillEdit = useCallback(async (shouldPrint = false) => {
+    if (items.length === 0) {
+      showFieldAlert("items", { message: "Add at least one item before saving." });
+      return;
+    }
+    if (Number(extraDisc) > 0 && !discReason.trim()) {
+      showFieldAlert("discountReason", { message: "Discount reason is required when applying extra discount." });
+      return;
+    }
+    if (!order?.id) {
+      showValidationAlert("Bill ID missing — refresh and try again.", {
+        variant: "error",
+        title: "Bill Not Found",
+        fieldLabel: "Bill",
+      });
+      return;
+    }
+
+    setSaving(true);
+    const tid = toast.loading(shouldPrint ? "Saving, paying & printing..." : "Saving & marking paid...");
+    const { cn, fi, totalQty } = buildSavePayload();
+    const cashierId = auth?.currentUser?.uid || userData?.uid || "";
+    const sid = userData?.storeId || userData?.primaryStore || order.storeId || "default";
+    const now = new Date();
+
+    const editPayload = {
+      items: fi,
+      "customer.name": cName,
+      "customer.phone": cPhone,
+      "customer.market": cMarket,
+      "customer.city": cCity,
+      paymentType: payM,
+      comments: notes,
+      subtotal: newSub,
+      billDiscount: totalDisc,
+      billerBillDiscount: order.billerBillDiscount ?? order.billDiscountValue ?? origDisc,
+      cashierExtraDiscount: Number(order.cashierExtraDiscount || 0) + Number(extraDisc || 0),
+      discountReason: extraDisc > 0 ? discReason : (order.discountReason || ""),
+      totalAmount: newTotal,
+      totalQty,
+      previousTotal: origTotal,
+      editedTotalDifference: diff,
+      newTotalAfterEdit: newTotal,
+      isEdited: true,
+      wasEdited: true,
+      lastEditedBy: cn,
+      lastEditedAt: serverTimestamp(),
+      lastEditedUserId: userData?.uid || "",
+      editedByName: cn,
+      editHistory: [
+        ...(order.editHistory || []),
+        {
+          editedBy: cn,
+          editedAt: now.toISOString(),
+          previousTotal: origTotal,
+          newTotal,
+          reason: notes || discReason || "Edited & paid",
+        },
+      ],
+      ...buildCashierPaymentPatch({
+        amount: newTotal,
+        paymentType: payM,
+        cashierId,
+        cashierName: cn,
+        nowISO: now.toISOString(),
+      }),
+      paidAt: serverTimestamp(),
+      cashierPaidAt: serverTimestamp(),
+      editedBeforePay: true,
+    };
+
+    const billSerial = getBillSerialKey(order) || order.billSerial || order.serialNo || "";
+
+    const writeOrder = async () => {
+      const docIds = await resolveAllOrderDocIds(order, billSerial);
+      for (const docId of docIds) {
+        await updateDoc(doc(db, "orders", docId), editPayload);
+      }
+    };
+
     try {
-      await Promise.all([
-        // ✨ Update with isEdited flag (purple badge)
-        updateDoc(doc(db, "orders", order.id), {
-          items: fi,
-          "customer.name": cName,
-          "customer.phone": cPhone,
-          "customer.market": cMarket,
-          "customer.city": cCity,
-          paymentType: payM,
-          comments: notes,
-          subtotal: newSub,
-          billDiscount: totalDisc,
-          discountReason: extraDisc > 0 ? discReason : (order.discountReason || ""),
-          totalAmount: newTotal,
-          totalQty: fi.reduce((s, i) => s + i.qty, 0),
-          isEdited: true,        // ✨ NEW
-          wasEdited: true,       // ✨ NEW
-          lastEditedBy: cn,
-          lastEditedAt: serverTimestamp(),
-          lastEditedUserId: userData?.uid || "",
-          editedByName: cn,      // ✨ NEW
-          editHistory: [
-            ...(order.editHistory || []),
-            {
-              editedBy: cn,
-              editedAt: new Date().toISOString(),
-              previousTotal: origTotal,
-              newTotal,
-              reason: notes || discReason || "Edited",
+      const updated = normalizeOrderForInvoice(buildUpdatedOrder(fi, true));
+      toast.success(
+        shouldPrint
+          ? `Paid Rs.${newTotal.toLocaleString()} — opening print...`
+          : `Saved & paid Rs.${newTotal.toLocaleString()}`,
+        { id: tid, duration: 1500 },
+      );
+      setSaving(false);
+      onComplete?.({ order: updated, shouldPrint, markPaid: true });
+
+      void (async () => {
+        try {
+          try {
+            await writeOrder();
+          } catch (writeErr) {
+            if (writeErr?.code === "permission-denied" && auth?.currentUser) {
+              await auth.currentUser.getIdToken(true);
+              await writeOrder();
+            } else {
+              throw writeErr;
+            }
+          }
+
+          await applyTrustedInstantPaymentToCloud({
+            order: {
+              ...order,
+              items: fi,
+              customer: { name: cName, phone: cPhone, market: cMarket, city: cCity },
+              totalAmount: newTotal,
+              paymentType: payM,
             },
-          ],
-        }),
-        // ✨ NEW: Audit log
-        logCashierAction({
-          action: "BILL_EDITED",
-          orderId: order.id,
-          billSerial: order.billSerial || order.serialNo,
-          userId: userData?.uid || "",
-          userName: cn,
-          storeId: userData?.storeId || "",
-          amount: newTotal,
-          before: { totalAmount: origTotal, subtotal: origSub, discount: origDisc },
-          after: { totalAmount: newTotal, subtotal: newSub, discount: totalDisc },
-          metadata: { difference: diff, discountReason: discReason, notes },
-        }),
-      ]);
-      toast.success("Saved! Printing...", { id: tid, duration: 1500 });
-      doPrint(order, fi, newTotal, totalDisc, cName, cPhone, cMarket, cCity);
-      onClose();
+            cashierId,
+            cashierName: cn,
+            storeId: sid,
+          }).catch(() => {});
+
+          if (!getHasInternet()) {
+            const saved = await saveOfflinePayment({
+              billId: order.id,
+              billSerial: order.billSerial || order.serialNo,
+              enteredAmount: newTotal,
+              paymentMethod: payM,
+              cashierId,
+              cashierName: cn,
+              storeId: sid,
+            });
+            if (!saved?.success && !saved?.duplicate) {
+              throw new Error(saved?.error || "Offline payment save failed");
+            }
+          } else {
+            void saveOfflinePayment({
+              billId: order.id,
+              billSerial: order.billSerial || order.serialNo,
+              enteredAmount: newTotal,
+              paymentMethod: payM,
+              cashierId,
+              cashierName: cn,
+              storeId: sid,
+            }).catch(() => {});
+            void addDoc(collection(db, "cashierActions"), {
+              actionType: "PAID",
+              orderId: order.id,
+              billSerial: billSerial || order.billSerial || order.serialNo || "",
+              serialNo: billSerial || order.serialNo || order.billSerial || "",
+              storeId: sid,
+              cashierId,
+              cashierName: cn,
+              totalAmount: newTotal,
+              totalDiscount: order.totalDiscount || 0,
+              totalQty,
+              paymentType: payM,
+              customer: { name: cName, phone: cPhone, market: cMarket, city: cCity },
+              items: fi,
+              billerName: order.billerName || "",
+              billerId: order.billerId || "",
+              date: now.toISOString().split("T")[0],
+              time: now.toLocaleTimeString("en-PK"),
+              timestamp: serverTimestamp(),
+              editedBeforePay: true,
+            }).catch(() => {});
+          }
+          void logCashierAction({
+            action: "BILL_EDITED",
+            orderId: order.id,
+            billSerial: order.billSerial || order.serialNo,
+            userId: cashierId,
+            userName: cn,
+            storeId: sid,
+            amount: newTotal,
+            before: { totalAmount: origTotal, subtotal: origSub, discount: origDisc },
+            after: { totalAmount: newTotal, subtotal: newSub, discount: totalDisc },
+            metadata: { difference: diff, discountReason: discReason, notes, markPaid: true, shouldPrint },
+          }).catch(() => {});
+          void logCashierAction({
+            action: "PAYMENT_RECEIVED",
+            orderId: order.id,
+            billSerial: order.billSerial || order.serialNo,
+            userId: cashierId,
+            userName: cn,
+            storeId: sid,
+            amount: newTotal,
+            paymentType: payM,
+            metadata: { editedBeforePay: true, shouldPrint },
+          }).catch(() => {});
+        } catch (err) {
+          console.error("[EditBill] background save:", err);
+          toast.error(err?.message || "Saved locally — cloud sync pending", { duration: 3000 });
+        }
+      })();
     } catch (err) {
-      console.error(err);
-      toast.error("Save failed", { id: tid });
-    } finally {
+      console.error("[EditBill]", err);
+      const msg = err?.code === "permission-denied"
+        ? "Permission denied — please re-login"
+        : (err?.message || "Save & pay failed");
+      toast.error(msg, { id: tid });
       setSaving(false);
     }
   }, [
     items, extraDisc, discReason, cName, cPhone, cMarket, cCity,
     payM, notes, newSub, totalDisc, newTotal, order, userData,
-    origTotal, origSub, origDisc, diff, onClose,
+    origTotal, origSub, origDisc, diff, buildSavePayload, buildUpdatedOrder, onComplete,
   ]);
+
+  const handleSave = useCallback(() => persistBillEdit(true), [persistBillEdit]);
+  const handleSaveAndCash = useCallback(() => persistBillEdit(false), [persistBillEdit]);
 
   // ✅ Glassmorphism Toggle
   const GlassToggle = ({ open, toggle, icon, label, badge }) => (
@@ -299,10 +497,10 @@ const EditBillModal = ({ order, isDark, userData, storeData, onClose }) => {
             </div>
             <div>
               <h2 className={`font-bold text-base ${text}`}>
-                Edit #{order.billSerial || order.serialNo}
+                {t('cashier.editBill', 'Edit Bill')} #{order.billSerial || order.serialNo}
               </h2>
               <p className={`text-xs ${subText}`}>
-                {items.length} item{items.length !== 1 ? "s" : ""} · ESC to close
+                {items.length} {t('items', 'items')} · {t('escClose', 'ESC to close')}
               </p>
             </div>
           </div>
@@ -329,23 +527,23 @@ const EditBillModal = ({ order, isDark, userData, storeData, onClose }) => {
                 <User className="w-3.5 h-3.5 text-amber-500" />
               </div>
               <span className={`text-[10px] font-bold uppercase tracking-widest ${subText}`}>
-                Customer
+                {t('customer.name', 'Customer')}
               </span>
             </div>
             <div className="grid grid-cols-2 gap-2">
               {[
-                { l: "Name", v: cName, s: setCName, t: "text", p: "Name", ic: <User className="inline w-3 h-3 mr-0.5 opacity-50" /> },
-                { l: "Phone", v: cPhone, s: setCPhone, t: "tel", p: "03XX", ic: <Phone className="inline w-3 h-3 mr-0.5 opacity-50" /> },
-                { l: "Market", v: cMarket, s: setCMarket, t: "text", p: "Market", ic: <MapPin className="inline w-3 h-3 mr-0.5 opacity-50" /> },
-                { l: "City", v: cCity, s: setCCity, t: "text", p: "City", ic: <MapPin className="inline w-3 h-3 mr-0.5 opacity-50" /> },
-              ].map(({ l, v, s, t, p, ic }) => (
+                { l: t('name', 'Name'), v: cName, s: setCName, t: "text", p: t('name', 'Name'), ic: <User className="inline w-3 h-3 me-0.5 opacity-50" /> },
+                { l: t('phone', 'Phone'), v: cPhone, s: setCPhone, t: "tel", p: "03XX", ic: <Phone className="inline w-3 h-3 me-0.5 opacity-50" /> },
+                { l: t('market', 'Market'), v: cMarket, s: setCMarket, t: "text", p: t('market', 'Market'), ic: <MapPin className="inline w-3 h-3 me-0.5 opacity-50" /> },
+                { l: t('city', 'City'), v: cCity, s: setCCity, t: "text", p: t('city', 'City'), ic: <MapPin className="inline w-3 h-3 me-0.5 opacity-50" /> },
+              ].map(({ l, v, s, t: inputType, p, ic }) => (
                 <div key={l}>
                   <label className={`text-[10px] font-bold uppercase tracking-wider
                     block mb-1 ${subText}`}>
                     {ic}{l}
                   </label>
                   <input
-                    type={t}
+                    type={inputType}
                     value={v}
                     onChange={e => s(e.target.value)}
                     placeholder={p}
@@ -362,10 +560,10 @@ const EditBillModal = ({ order, isDark, userData, storeData, onClose }) => {
           <div className={`rounded-2xl p-4 border ${glassBg} backdrop-blur-sm`}>
             <label className={`text-[10px] font-bold uppercase tracking-widest
               block mb-2.5 ${subText}`}>
-              Payment Method
+              {t('paymentMethod', 'Payment Method')}
             </label>
             <div className="flex gap-1.5 flex-wrap">
-              {PAY_METHODS.map(m => {
+              {payMethods.map(m => {
                 const Icon = m.icon;
                 return (
                   <motion.button
@@ -396,7 +594,7 @@ const EditBillModal = ({ order, isDark, userData, storeData, onClose }) => {
               open={showItemsDiscount}
               toggle={() => setShowItemsDiscount(v => !v)}
               icon={<Package className="w-4 h-4" />}
-              label="Items & Discount"
+              label={t('cashier.itemsAndDiscount', 'Items & Discount')}
               badge={`${items.length}${totalDisc > 0 ? ` · -${totalDisc}` : ""}`}
             />
 
@@ -413,7 +611,7 @@ const EditBillModal = ({ order, isDark, userData, storeData, onClose }) => {
                     <p className={`text-[10px] font-bold uppercase tracking-widest ${subText}
                       flex items-center gap-1.5`}>
                       <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
-                      Edit Qty & Price
+                      {t('cashier.editQtyPrice', 'Edit Qty & Price')}
                     </p>
 
                     {items.map((item, idx) => (
@@ -454,7 +652,7 @@ const EditBillModal = ({ order, isDark, userData, storeData, onClose }) => {
                           <div>
                             <label className={`text-[9px] font-bold uppercase tracking-widest
                               block mb-1 ${subText}`}>
-                              Qty
+                              {t('qty', 'Qty')}
                             </label>
                             <input
                               type="number"
@@ -471,7 +669,7 @@ const EditBillModal = ({ order, isDark, userData, storeData, onClose }) => {
                           <div>
                             <label className={`text-[9px] font-bold uppercase tracking-widest
                               block mb-1 ${subText}`}>
-                              Price (Rs.)
+                              {t('price', 'Price')} (Rs.)
                             </label>
                             <input
                               type="number"
@@ -678,27 +876,41 @@ const EditBillModal = ({ order, isDark, userData, storeData, onClose }) => {
               ? "bg-amber-500/10 border border-amber-500/15"
               : "bg-amber-50/80 border border-amber-200/50"
           }`}>
-            <span className={`text-sm font-bold ${subText}`}>New Total</span>
+            <span className={`text-sm font-bold ${subText}`}>{t('cashier.newTotal', 'New Total')}</span>
             <span className="text-xl font-extrabold text-amber-500 tabular-nums">
               Rs.{newTotal.toLocaleString()}
             </span>
           </div>
+          <div className={`mb-3 px-4 py-2 rounded-xl border text-xs ${
+            isDark ? "border-white/10 bg-white/[0.03]" : "border-gray-200/70 bg-white/80"
+          }`}>
+            <div className="flex items-center justify-between">
+              <span className={subText}>Previous Total</span>
+              <span className={`${text} font-semibold tabular-nums`}>Rs.{origTotal.toLocaleString()}</span>
+            </div>
+            <div className="flex items-center justify-between mt-1">
+              <span className={subText}>Difference</span>
+              <span className={`font-bold tabular-nums ${diff >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+                {diff >= 0 ? "+" : "-"}Rs.{Math.abs(diff).toLocaleString()}
+              </span>
+            </div>
+          </div>
 
           {/* Buttons */}
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2">
             <motion.button
               whileHover={{ scale: 1.02 }}
               whileTap={{ scale: 0.98 }}
               onClick={onClose}
               disabled={saving}
-              className={`px-4 py-2.5 rounded-xl border text-sm font-medium
-                transition-all disabled:opacity-50
+              className={`px-3 py-2.5 rounded-xl border text-sm font-medium
+                transition-all disabled:opacity-50 flex-shrink-0
                 ${isDark
                   ? "border-white/10 text-gray-400 hover:bg-white/5"
                   : "border-gray-200 text-gray-500 hover:bg-gray-50"
                 }`}
             >
-              Cancel
+              {t('common.cancel', 'Cancel')}
             </motion.button>
             <motion.button
               whileHover={{ scale: 1.02 }}
@@ -707,13 +919,28 @@ const EditBillModal = ({ order, isDark, userData, storeData, onClose }) => {
               disabled={saving}
               className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500
                 hover:from-amber-600 hover:to-orange-600 disabled:opacity-50
-                text-white text-sm font-bold flex items-center justify-center gap-2
-                shadow-lg shadow-amber-500/25 transition-all"
+                text-white text-xs sm:text-sm font-bold flex items-center justify-center gap-1.5
+                shadow-lg shadow-amber-500/25 transition-all min-w-0"
             >
               {saving
-                ? <Loader2 className="w-4 h-4 animate-spin" />
-                : <Save className="w-4 h-4" />}
-              {saving ? "Saving..." : "Save & Print"}
+                ? <Loader2 className="w-4 h-4 animate-spin flex-shrink-0" />
+                : <Save className="w-4 h-4 flex-shrink-0" />}
+              <span className="truncate">{saving ? t('billSaving', 'Saving...') : t('cashier.saveAndPrint', 'Save & Print')}</span>
+            </motion.button>
+            <motion.button
+              whileHover={{ scale: 1.02 }}
+              whileTap={{ scale: 0.98 }}
+              onClick={handleSaveAndCash}
+              disabled={saving}
+              className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-emerald-500 to-green-600
+                hover:from-emerald-600 hover:to-green-700 disabled:opacity-50
+                text-white text-xs sm:text-sm font-bold flex items-center justify-center gap-1.5
+                shadow-lg shadow-emerald-500/25 transition-all min-w-0"
+            >
+              {saving
+                ? <Loader2 className="w-4 h-4 animate-spin flex-shrink-0" />
+                : <Wallet className="w-4 h-4 flex-shrink-0" />}
+              <span className="truncate">{saving ? t('processing', 'Processing...') : t('cashier.saveAndCash', 'Save & Cash')}</span>
             </motion.button>
           </div>
         </div>

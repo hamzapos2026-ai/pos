@@ -4,6 +4,7 @@
 import { useState, useCallback, useMemo } from 'react';
 import { useSettings } from '../context/SettingsContext';
 import { useAuth } from '../context/AuthContext';
+import { calcOrderItemCommission, buildAgentMap } from '../services/commissionService';
 
 // ═══════════════════════════════════════════════════════════════
 // 🔒 PERMISSION HELPER — Only SuperAdmin can manage agents
@@ -25,22 +26,9 @@ export const canManageSalespersons = (userData) => {
 // ═══════════════════════════════════════════════════════════════
 // COMMISSION CALCULATOR — per item
 // ═══════════════════════════════════════════════════════════════
-export const calcItemCommission = (item) => {
-  const qty      = Number(item.qty || item.quantity || 1);
-  const price    = Number(item.price || item.salePrice || 0);
-  const discount = Number(item.discount || 0);
-  const discType = item.discountType || 'amount';
-
-  let net = price * qty;
-  if (discType === 'percent') net -= (net * discount) / 100;
-  else                        net -= discount * qty;
-  net = Math.max(0, net);
-
-  const pct   = Number(item.commissionPercent || 0);
-  const type  = item.commissionType || 'percent';
-  const fixed = Number(item.commissionFixed || 0);
-
-  const rawComm = type === 'fixed' ? fixed * qty : (net * pct) / 100;
+/** @param {object} item @param {object} [agentMap] id → agent from settings */
+export const calcItemCommission = (item, agentMap = {}) => {
+  const { net, rawComm } = calcOrderItemCommission(item, agentMap);
   return { net, rawComm };
 };
 
@@ -72,13 +60,16 @@ export const aggregateByAgent = (items, paidRatio = 1) => {
 // ═══════════════════════════════════════════════════════════════
 // HOOK
 // ═══════════════════════════════════════════════════════════════
-const useSalesperson = () => {
-  const { settings } = useSettings();
+const useSalesperson = (overrides = {}) => {
+  const { settings = {} } = useSettings();
   const { userData } = useAuth();
 
-  const sp      = settings.salesperson || {};
+  // Merge global settings with optional biller-scoped overrides passed by caller
+  const globalSp = settings?.salesperson || {};
+  const sp = { ...globalSp, ...(overrides.salesperson || {}) };
   const agents  = sp.agents || [];
-  const enabled = !!sp.enableCommission;
+  const enabled =
+    sp.enableCommission !== false && sp.enabled !== false;
   const multiSP = !!sp.allowMultiplePerBill;
 
   // 🔒 Permission flag (true only for SuperAdmin / Admin)
@@ -101,11 +92,9 @@ const useSalesperson = () => {
         ...item,
         salespersonId:     currentAgent.id,
         salespersonName:   currentAgent.name,
-        commissionType:    currentAgent.commissionType || 'percent',
-        commissionPercent:
-          currentAgent.commissionType === 'percent' ? currentAgent.commissionRate : 0,
-        commissionFixed:
-          currentAgent.commissionType === 'fixed' ? currentAgent.commissionRate : 0,
+        commissionType:    'percent',
+        commissionPercent: Number(currentAgent.commissionRate || 0),
+        commissionFixed:   0,
       };
     },
     [enabled, currentAgent]
@@ -122,9 +111,9 @@ const useSalesperson = () => {
         ...item,
         salespersonId:     agent.id,
         salespersonName:   agent.name,
-        commissionType:    agent.commissionType || 'percent',
-        commissionPercent: agent.commissionType === 'percent' ? agent.commissionRate : 0,
-        commissionFixed:   agent.commissionType === 'fixed' ? agent.commissionRate : 0,
+        commissionType:    'percent',
+        commissionPercent: Number(agent.commissionRate || 0),
+        commissionFixed:   0,
       };
     },
     [agents]

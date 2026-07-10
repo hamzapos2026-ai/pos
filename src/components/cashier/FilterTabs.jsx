@@ -3,20 +3,19 @@
 
 import React from "react";
 import { motion } from "framer-motion";
-import { Receipt, Clock, XCircle, CheckCircle } from "lucide-react";
+import { Receipt, Clock, XCircle } from "lucide-react";
 import { cn } from "../../utils/cn";
-import { useSettings } from "../../context/SettingsContext";
+import useLanguage from "../../hooks/useLanguage";
 
 const TABS = [
-  { key: "all", label: "All", icon: Receipt, color: "blue", gradient: "from-blue-500 to-blue-600" },
-  { key: "pending", label: "Pending", icon: Clock, color: "amber", gradient: "from-amber-500 to-orange-500" },
-  { key: "cancelled", label: "Cancelled", icon: XCircle, color: "red", gradient: "from-red-500 to-rose-500" },
+  { key: "all", labelKey: "tabAll", label: "All", icon: Receipt, color: "blue", gradient: "from-blue-500 to-blue-600" },
+  { key: "pending", labelKey: "tabPending", label: "Pending", icon: Clock, color: "amber", gradient: "from-amber-500 to-orange-500" },
+  { key: "cancelled", labelKey: "tabCancelled", label: "Cancelled", icon: XCircle, color: "red", gradient: "from-red-500 to-rose-500" },
 ];
 
 const FilterTabs = ({ activeTab, setActiveTab, onChange, stats = {}, isDark }) => {
-  const { getSetting } = useSettings();
-  const disableOffline = getSetting('disableCashierOffline', false);
-  const tabs = disableOffline ? TABS.filter(t => t.key !== 'cancelled') : TABS;
+  const { t } = useLanguage();
+  const tabs = TABS;
 
   const handleChange = (key) => {
     if (typeof setActiveTab === "function") setActiveTab(key);
@@ -61,7 +60,7 @@ const FilterTabs = ({ activeTab, setActiveTab, onChange, stats = {}, isDark }) =
             )}
             <span className="relative z-10 flex items-center gap-1.5">
               <Icon className="w-3.5 h-3.5" />
-              {tab.label}
+              {t(tab.labelKey, tab.label)}
               <span className={`text-[10px] px-1.5 py-0 rounded-full font-extrabold ${
                 active
                   ? "bg-white/25 text-white"

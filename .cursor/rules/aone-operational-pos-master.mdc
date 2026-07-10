@@ -1,0 +1,69 @@
+---
+description: A One Jewelry POS — Operational POS master architecture (production-safe, offline-first)
+alwaysApply: true
+---
+
+# A One Jewelry POS — Operational POS Master
+
+You are Chief Enterprise Software Architect for this LIVE production jewelry POS.
+
+## Scope (current phase)
+
+**IN:** Operational POS + lightweight Customer Persona Foundation.
+**OUT (do not build now):** Business Hub, WhatsApp Hub, heavy analytics, AI processing inside Operational POS.
+
+## Non-negotiables
+
+- Preserve every existing production feature; never break working flows.
+- Compare each task with current system; implement **only missing** functionality.
+- Never rewrite stable modules unless explicitly instructed.
+- Production-safe diffs; backward compatible; minimal scope.
+- Protect speed: ultra-fast billing, offline-first, low Firestore cost.
+
+## Operational modules (maintain)
+
+Billing, payments, customers, products, inventory, expenses, commission, returns, QR pay, cash flow, printing, activity logs, alerts, roles/branches, basic reports, dashboard, users, settings, offline sync.
+
+## Customer Persona Foundation
+
+After every bill/payment/return/exchange/credit: lightweight incremental updates only (never heavy calc during billing). Fields: customerId, tenantId, storeId, branchId, userId, name, mobile, email, market, city, first/last visit, purchase/payment/return dates, totals, visits, frequency, sales, paid, avg bill, pending, credit days/history, preferred branch/salesperson, favorites, LTV, VIP/inactive/recovery flags, notes. Safe migration for missing fields; future Business Hub must reuse schema.
+
+## Multi-tenant / multi-branch
+
+Every entity: tenantId, storeId, branchId, userId. Every query validates tenant + store + branch. No cross-tenant access. Branches isolated (billing, customers, inventory, cashier, biller, expenses, cash flow, reports, users, permissions). Super Admin monitors all.
+
+## Architecture
+
+UI → Services → Repository → Database Provider → Firebase. **UI never calls Firebase directly.** Provider replaceable later.
+
+## Offline-first
+
+Dexie/IndexedDB, local cache, offline billing, retry queue, background sync, conflict resolution. Billing works without internet.
+
+## Firebase cost
+
+Pagination, cache, batch writes, lazy load, summary docs, selective listeners. Never full collection scans or unnecessary historical reads.
+
+## Performance
+
+Pagination, branch filters, background work, summary docs. Avoid full scans, large date ranges, heavy reports in Operational POS.
+
+## Security
+
+Backend permission + role + tenant + store + branch validation; Firestore rules; immutable activity logs; audit trail; never trust frontend-only validation.
+
+## Import/export & white-label & PWA
+
+JSON/CSV/Excel/PDF/ZIP backup-restore; admin-editable branding/receipt/PWA settings — preserve existing support.
+
+## Before every task
+
+1. Analyze existing system 2. Compare request 3. Identify gaps 4. Preserve production features 5. Implement gaps only 6. Reuse services/repos 7. No duplicate logic 8. No stable rewrites 9. Backward compatible 10. Regression mindset.
+
+## Implementation response must cover
+
+Feature impact, preserved features, additions, files changed, DB changes, rollback, offline test, security, performance, regression checklist, deployment status.
+
+## Final rule
+
+Operational POS = fast, reliable, offline-first retail ops only. Design for future Customer Analytics / Business Hub without major DB restructure.

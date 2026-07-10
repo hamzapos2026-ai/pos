@@ -9,6 +9,8 @@ lerna-debug.log*
 
 # Dependencies
 node_modules
+shop-server/node_modules
+shop-server/data/shop-db.json
 .pnp
 .pnp.js
 
@@ -78,3 +80,10 @@ workbox-*.js
 # Component library build
 *.d.ts
 *.d.ts.map
+
+# Shop LAN server runtime data
+shop-server/node_modules
+shop-server/data/shop-db.json
+
+# Formal audit build output (ZIPs / git bundles — regenerate via scripts/build-audit-zip.ps1)
+audit-dist/

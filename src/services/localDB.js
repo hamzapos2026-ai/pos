@@ -13,7 +13,13 @@ export default db;
 
 export const putUser = async (user) => db.users.put(user);
 export const getUserByEmail = async (email) => db.users.where('email').equals(email).first();
-export const putSetting = async (key, value) => db.settings.put({key, value, updatedAt: Date.now()});
+export const putSetting = async (key, value, meta = {}) =>
+  db.settings.put({
+    key,
+    value,
+    updatedAt: Date.now(),
+    remoteUpdatedAt: meta.remoteUpdatedAt ?? null,
+  });
 export const getAllSettings = async () => db.settings.toArray();
 export const enqueueSync = async (op) => db.syncQueue.add(op);
 export const getSyncQueue = async () => db.syncQueue.toArray();

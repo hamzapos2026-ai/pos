@@ -11,7 +11,7 @@ const colorMap = {
   cyan: { bg: 'from-cyan-400/20 to-cyan-600/10', icon: 'text-cyan-500 bg-cyan-500/10' },
 };
 
-const StatCard = ({ label, value, icon: Icon, color = 'amber', trend, trendValue, subtitle, onClick }) => {
+const StatCard = ({ label, value, icon: Icon, color = 'amber', trend, trendValue, subtitle, onClick, compact = false }) => {
   const { isDark } = useTheme();
   const colors = colorMap[color] || colorMap.amber;
   const isPositive = trend === 'up';
@@ -20,24 +20,37 @@ const StatCard = ({ label, value, icon: Icon, color = 'amber', trend, trendValue
     <div
       onClick={onClick}
       className={cn(
-        'rounded-2xl p-3 sm:p-4 border transition-all duration-300 relative overflow-hidden',
+        'rounded-2xl border transition-all duration-300 relative overflow-hidden',
+        compact ? 'p-2 sm:p-3' : 'p-3 sm:p-4',
         onClick && 'cursor-pointer hover:-translate-y-1 hover:shadow-xl',
         isDark ? 'bg-[#0f0a05] border-[#2a1f0d]' : 'bg-white border-amber-200'
       )}
     >
       <div className={cn('absolute -top-10 -right-10 w-32 h-32 rounded-full bg-gradient-to-br opacity-20', colors.bg)} />
       <div className="relative">
-        <div className="flex items-start justify-between mb-3">
-          <p className={cn('text-xs font-medium uppercase tracking-wider', isDark ? 'text-gray-400' : 'text-gray-500')}>{label}</p>
+        <div className="flex items-start justify-between gap-2 mb-2 sm:mb-3">
+          <p className={cn(
+            compact ? 'text-[9px] sm:text-[10px]' : 'text-[10px] sm:text-xs',
+            'font-medium uppercase tracking-wider leading-tight',
+            isDark ? 'text-gray-400' : 'text-gray-500'
+          )}>{label}</p>
           {Icon && (
-            <div className={cn('w-10 h-10 rounded-xl flex items-center justify-center', colors.icon)}>
-              <Icon className="w-5 h-5" />
+            <div className={cn(
+              compact ? 'w-8 h-8 sm:w-9 sm:h-9' : 'w-9 h-9 sm:w-10 sm:h-10',
+              'rounded-xl flex items-center justify-center shrink-0',
+              colors.icon
+            )}>
+              <Icon className={cn(compact ? 'w-3 h-3 sm:w-4 sm:h-4' : 'w-4 h-4 sm:w-5 sm:h-5')} />
             </div>
           )}
         </div>
         <div className="flex items-end justify-between gap-2">
           <div className="min-w-0 flex-1">
-            <p className={cn('text-2xl sm:text-3xl font-bold tracking-tight break-words', isDark ? 'text-white' : 'text-gray-900')}>{value}</p>
+            <p className={cn(
+              compact ? 'text-lg sm:text-xl' : 'text-xl sm:text-2xl lg:text-3xl',
+              'font-bold tracking-tight break-words',
+              isDark ? 'text-white' : 'text-gray-900'
+            )}>{value}</p>
             {subtitle && <p className={cn('text-xs mt-1', isDark ? 'text-gray-500' : 'text-gray-400')}>{subtitle}</p>}
           </div>
           {trend && trendValue && (
