@@ -9,6 +9,8 @@
 | Branch | `main` |
 | Tracking | `origin/main` |
 | Remote fetch/push | `https://github.com/hamzapos2026-ai/pos.git` |
+| Audit baseline commit | `2129948` — `chore: snapshot Operational POS baseline and formal audit package` |
+| Note | Local branch is **ahead of origin by 1 commit** (not pushed unless you request push) |
 
 ## How to create a full Git backup (no secrets in history if never committed)
 
