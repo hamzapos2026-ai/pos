@@ -7,10 +7,11 @@
 | Field | Value |
 |-------|--------|
 | Branch | `main` |
-| Tracking | `origin/main` |
-| Remote fetch/push | `https://github.com/hamzapos2026-ai/pos.git` |
-| Audit baseline commit | `2129948` — `chore: snapshot Operational POS baseline and formal audit package` |
-| Note | Local branch is **ahead of origin by 1 commit** (not pushed unless you request push) |
+| Tracking | `origin/main` (in sync after push) |
+| Remote | `https://github.com/hamzapos2026-ai/pos.git` |
+| Audit baseline commits | `2129948` (Operational POS snapshot) · `8de1c4a` (audit git-backup note) |
+| GitHub push | **Done** — 10 Jul 2026 · `e75499e..8de1c4a` → `origin/main` |
+| Clone | `git clone https://github.com/hamzapos2026-ai/pos.git` |
 
 ## How to create a full Git backup (no secrets in history if never committed)
 
@@ -33,9 +34,11 @@ git checkout main
 
 ## Notes for auditors
 
-- Working tree may contain uncommitted Operational POS work; the audit ZIP includes the **working tree snapshot** (secret-free), while the **bundle** captures committed history.
-- `.env` is gitignored and must never be in the bundle if it was never committed (verify with `git log --all -- .env`).
-- Prefer sharing the bundle + source ZIP together so both history and latest files are available.
+- Latest audit baseline is on GitHub `main` (`https://github.com/hamzapos2026-ai/pos.git`).
+- The **git bundle** in `audit-dist/` is a portable offline copy of the same history.
+- The **source ZIP** is a secret-free working-tree snapshot (no `.env`, no `node_modules`).
+- `.env` is gitignored — verify it was never committed: `git log --all -- .env`.
+- Prefer sharing the bundle + source ZIP + `AUDIT-DOCS/` together; add screen recording MP4 when ready.
 
 ## Recommended tag (optional, after commit)
 
